@@ -3,4 +3,20 @@ name = "relay"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "relay"
+path = "src/lib.rs"
+
+[[bin]]
+name = "relay"
+path = "src/main.rs"
+
 [dependencies]
+protocol = { path = "../protocol" }
+tokio = { workspace = true }
+axum = { version = "0.7", features = ["ws"] }
+dashmap = "6"
+futures-util = "0.3"
+
+[dev-dependencies]
+tokio-tungstenite = "0.24"
