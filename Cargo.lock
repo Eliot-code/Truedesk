@@ -337,6 +337,12 @@ dependencies = [
 [[package]]
 name = "host-agent"
 version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "protocol",
+ "tokio",
+ "tokio-tungstenite",
+]
 
 [[package]]
 name = "http"
