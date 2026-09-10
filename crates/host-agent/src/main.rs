@@ -1,4 +1,8 @@
 use futures_util::{SinkExt, StreamExt};
+use host_agent::{
+    capture::{self, ScreenCapturer},
+    encode::{self, Encoder},
+};
 use protocol::{control::Control, crypto::Sealer, frame, kex::derive_keys, Tag};
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::Message;
@@ -18,19 +22,38 @@ fn parse_kex(body: &[u8]) -> Option<(u8, &[u8])> {
     body.split_first().map(|(s, rest)| (*s, rest))
 }
 
-/// Builds the 18-byte video-frame header (big-endian) followed by `payload`:
-/// u64 frame_seq, u32 timestamp_us, u8 codec(=1 H264), u8 flags(bit0=keyframe),
-/// u16 width, u16 height.
-fn video_frame(seq: u64, payload: &[u8]) -> Vec<u8> {
-    let mut p = Vec::with_capacity(18 + payload.len());
-    p.extend_from_slice(&seq.to_be_bytes()); // frame_seq u64
-    p.extend_from_slice(&(0u32).to_be_bytes()); // timestamp_us u32
-    p.push(1); // codec = H264
-    p.push(1); // flags = keyframe
-    p.extend_from_slice(&(1280u16).to_be_bytes()); // width
-    p.extend_from_slice(&(720u16).to_be_bytes()); // height
-    p.extend_from_slice(payload); // encoded bytes
-    p
+fn even_frame(frame: encode::RawFrame) -> Option<encode::RawFrame> {
+    let width = frame.width & !1;
+    let height = frame.height & !1;
+    if width == 0
+        || height == 0
+        || frame.data.len() != usize::from(frame.width) * usize::from(frame.height) * 4
+    {
+        return None;
+    }
+
+    if width == frame.width && height == frame.height {
+        return Some(frame);
+    }
+
+    let source_width = usize::from(frame.width);
+    let cropped_width = usize::from(width);
+    let mut data = Vec::with_capacity(cropped_width * usize::from(height) * 4);
+    for row in frame
+        .data
+        .chunks_exact(source_width * 4)
+        .take(usize::from(height))
+    {
+        data.extend_from_slice(&row[..cropped_width * 4]);
+    }
+
+    Some(encode::RawFrame {
+        width,
+        height,
+        data,
+        format: frame.format,
+        timestamp_us: frame.timestamp_us,
+    })
 }
 
 #[tokio::main]
@@ -110,16 +133,67 @@ async fn main() {
     let (send_key, _recv_key) = derive_keys(&shared, true);
     let mut sealer = Sealer::new(send_key);
 
+    let mut capturer = match capture::ScapCapturer::new() {
+        Some(capturer) => capturer,
+        None => {
+            eprintln!("Screen capture is unavailable. Grant this app macOS Screen Recording permission and try again.");
+            return;
+        }
+    };
+    let first_frame = loop {
+        if let Some(frame) = capturer.next_frame() {
+            break frame;
+        }
+        tokio::time::sleep(Duration::from_millis(1_000 / 15)).await;
+    };
+    let first_frame = match even_frame(first_frame) {
+        Some(frame) => frame,
+        None => {
+            eprintln!("Screen capture returned an invalid or unusable frame.");
+            return;
+        }
+    };
+    let width = first_frame.width;
+    let height = first_frame.height;
+    let fps = 15;
+    let mut encoder = encode::H264Encoder::new(width, height, fps, 1_000_000);
     let mut seq = 0u64;
+    let mut next_frame = tokio::time::Instant::now();
+    let mut last_keyframe = next_frame;
+
     loop {
-        let plaintext = video_frame(seq, &[0xABu8; 320]);
+        next_frame += Duration::from_millis(1_000 / u64::from(fps));
+        let frame = if seq == 0 {
+            Some(first_frame.clone())
+        } else {
+            capturer.next_frame().and_then(even_frame)
+        };
+        let Some(frame) = frame else {
+            tokio::time::sleep_until(next_frame).await;
+            continue;
+        };
+        if frame.width != width || frame.height != height {
+            tokio::time::sleep_until(next_frame).await;
+            continue;
+        }
+        if last_keyframe.elapsed() >= Duration::from_secs(2) {
+            encoder.force_intra_frame();
+            last_keyframe = next_frame;
+        }
+        let Some(encoded) = encoder.encode(&frame) else {
+            tokio::time::sleep_until(next_frame).await;
+            continue;
+        };
+        let mut plaintext =
+            encode::video_header(seq, frame.timestamp_us, encoded.keyframe, width, height);
+        plaintext.extend_from_slice(&encoded.data);
         let sealed = sealer.seal(&plaintext);
         ws.send(Message::Binary(frame::wrap(Tag::Video, &sealed)))
             .await
             .unwrap();
         println!("sent frame {seq} ({} bytes sealed)", sealed.len());
         seq += 1;
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::time::sleep_until(next_frame).await;
     }
 }
 
@@ -130,7 +204,8 @@ mod tests {
     #[test]
     fn video_frame_header_layout_is_18_bytes_big_endian() {
         let payload = [0xABu8; 320];
-        let out = video_frame(7, &payload);
+        let mut out = encode::video_header(7, 0, true, 1280, 720);
+        out.extend_from_slice(&payload);
 
         assert_eq!(out.len(), 18 + payload.len());
         assert_eq!(&out[0..8], &7u64.to_be_bytes()); // frame_seq

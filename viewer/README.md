@@ -25,39 +25,55 @@ Run each of these in its own terminal, in order:
 # 1. relay
 cargo run -p relay
 
-# 2. host  (last arg is the password; must match the viewer)
+# 2. host  (target and password are the hardcoded PoC defaults: abc / test)
 cargo run -p host-agent -- ws://127.0.0.1:8080/ws abc test
 
 # 3. viewer  (built as its own Tauri workspace)
 cd viewer && npm install && npm run tauri dev
 ```
 
-The viewer currently uses password `"test"` and target `"abc"` as hardcoded
-PoC defaults in `src/main.ts`. There is no user-facing password prompt yet —
-to test against a different password/target, edit those defaults or pass
-matching values to `host-agent` on the command line above.
+The viewer currently uses target `"abc"` and password `"test"` as hardcoded
+PoC defaults in `src/main.ts`. There is no user-facing password prompt yet.
+
+## Capture requirements
+
+The host captures the primary display, encodes it as H.264, and the viewer
+renders the real host screen.
+
+On macOS 12.3+, grant Screen Recording permission to the terminal or binary
+that runs `host-agent` in **System Settings → Privacy & Security → Screen
+Recording**. Until permission is granted, `scap::has_permission()` returns
+`false`; `host-agent` prints a message and exits without sending anything.
+
+The cross-platform capture path uses `scap` and software `openh264` encoding:
+
+- Windows: Windows 10 version 1803 or newer, using Windows.Graphics.Capture.
+- Linux: PipeWire plus `xdg-desktop-portal` for the Wayland screencast portal.
+
+The Windows and Linux paths are code-complete through the same
+`scap`/`openh264` implementation, but runtime verification has so far only
+been performed on macOS. Encoding is software for now; hardware encoders can
+be added later behind the `Encoder` trait.
 
 ## Security acceptance behavior
 
 - **Matching password** — SPAKE2 handshake completes, key confirmation
-  succeeds on both sides, and the viewer starts receiving and attempting to
-  decrypt (AEAD `open()`) frames. The frame payload is still a dummy `0xAB`
-  buffer, not real H.264, so the browser's `VideoDecoder` will error on it —
-  that is **expected** at this stage of the PoC. The thing actually being
-  proven is that AEAD `open()` succeeds, i.e. both sides derived the same
-  session key.
+  succeeds on both sides, and the viewer decrypts valid H.264 frames. Each
+  frame is encoded before it is sealed with the SPAKE2-derived key, so no
+  cleartext frame leaves the host; the relay only forwards opaque bytes.
 - **Wrong password** — key confirmation fails: the host panics with
   `"key confirmation FAILED"`, and the viewer's `kex_verify` call throws.
   In both cases the handshake aborts before any frame is sent/decrypted —
-  no frames are ever decrypted with a mismatched password. This is the
-  end-to-end encryption guarantee: the relay only ever forwards opaque
-  bytes and never sees the password or the derived key.
+  no frames are ever decrypted with a mismatched password. End-to-end
+  encryption remains intact: the relay never sees the password, derived key,
+  or unsealed frame.
 
 ## Not yet implemented (PoC scope)
 
-- Real screen capture / H.264 encoding on the host (frames are a fixed dummy
-  payload).
 - Real input injection.
 - A user-facing password prompt in the viewer UI (password/target are
   hardcoded defaults in `src/main.ts`).
 - Password rotation/expiry or brute-force throttling on the relay.
+
+Audio capture and multi-monitor selection are also not implemented. Hardware
+encoding is deferred; `openh264` is the current software encoder.

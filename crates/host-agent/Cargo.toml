@@ -8,3 +8,5 @@ protocol = { path = "../protocol" }
 tokio = { workspace = true }
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
+openh264 = "0.9"
+scap = "0.0.8"
