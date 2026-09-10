@@ -1,7 +1,22 @@
-use futures_util::SinkExt;
+use futures_util::{SinkExt, StreamExt};
 use protocol::{control::Control, crypto::Sealer, frame, kex::derive_keys, Tag};
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::Message;
+
+// KEX sub-tags carried inside Tag::Kex (0x02)
+const KEX_MSG: u8 = 0x01;
+const KEX_CONFIRM: u8 = 0x02;
+
+fn kex_body(sub: u8, payload: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(1 + payload.len());
+    v.push(sub);
+    v.extend_from_slice(payload);
+    v
+}
+
+fn parse_kex(body: &[u8]) -> Option<(u8, &[u8])> {
+    body.split_first().map(|(s, rest)| (*s, rest))
+}
 
 /// Builds the 18-byte video-frame header (big-endian) followed by `payload`:
 /// u64 frame_seq, u32 timestamp_us, u8 codec(=1 H264), u8 flags(bit0=keyframe),
@@ -36,8 +51,63 @@ async fn main() {
     .await
     .unwrap();
 
-    // PoC shared secret; real path derives this via X25519+SPAKE2.
-    let (send_key, _recv_key) = derive_keys(&[42u8; 32], true);
+    // Real SPAKE2 key exchange before any video is sent.
+    let password = std::env::args().nth(3).unwrap_or_else(|| "test".into());
+
+    // 1. start SPAKE2 (host = side A) and send our message.
+    let (state, my_msg) = protocol::pake::start(password.as_bytes(), true);
+    ws.send(Message::Binary(frame::wrap(
+        Tag::Kex,
+        &kex_body(KEX_MSG, &my_msg),
+    )))
+    .await
+    .unwrap();
+
+    // 2. receive the viewer's SPAKE2 message (skip non-Kex frames, e.g. `paired`).
+    let shared = loop {
+        match ws.next().await {
+            Some(Ok(Message::Binary(m))) => {
+                if let Some((Tag::Kex, body)) = frame::unwrap(&m) {
+                    if let Some((KEX_MSG, msg)) = parse_kex(body) {
+                        break protocol::pake::finish(state, msg).expect("valid spake2 msg");
+                    }
+                }
+            }
+            Some(Ok(_)) => {} // tolerate/skip non-binary control frames
+            _ => panic!("connection closed during KEX"),
+        }
+    };
+
+    // 3. exchange confirmation MACs.
+    let my_confirm = protocol::pake::confirm_tag(&shared, true);
+    ws.send(Message::Binary(frame::wrap(
+        Tag::Kex,
+        &kex_body(KEX_CONFIRM, &my_confirm),
+    )))
+    .await
+    .unwrap();
+
+    let mut verified = false;
+    while !verified {
+        match ws.next().await {
+            Some(Ok(Message::Binary(m))) => {
+                if let Some((Tag::Kex, body)) = frame::unwrap(&m) {
+                    if let Some((KEX_CONFIRM, tag)) = parse_kex(body) {
+                        // peer is the viewer (peer_is_host = false)
+                        if !protocol::pake::verify_peer(&shared, false, tag) {
+                            panic!("key confirmation FAILED — wrong password or tampering");
+                        }
+                        verified = true;
+                    }
+                }
+            }
+            Some(Ok(_)) => {} // tolerate/skip non-binary control frames
+            _ => panic!("connection closed during KEX confirm"),
+        }
+    }
+
+    // 4. derive real per-direction keys (replaces the fixed [42;32]).
+    let (send_key, _recv_key) = derive_keys(&shared, true);
     let mut sealer = Sealer::new(send_key);
 
     let mut seq = 0u64;
