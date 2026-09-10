@@ -6,3 +6,4 @@ pub mod crypto;
 pub use crypto::{Opener, Sealer};
 pub mod kex;
 pub use kex::derive_keys;
+pub mod pake;
