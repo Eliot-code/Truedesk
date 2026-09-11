@@ -55,6 +55,19 @@ The Windows and Linux paths are code-complete through the same
 been performed on macOS. Encoding is software for now; hardware encoders can
 be added later behind the `Encoder` trait.
 
+## Input control requirements
+
+The viewer now controls the host with mouse and keyboard input captured in the
+viewer. Events are sealed viewer-to-host with `k_v2h` and injected on the host
+via `enigo`.
+
+- **macOS:** Grant **Accessibility** permission to the `host-agent` process in
+  **System Settings → Privacy & Security → Accessibility**. This is separate
+  from Screen Recording permission. Without Accessibility permission,
+  `host-agent` prints guidance and the deep-link, then runs video-only.
+- **Windows:** Input works out of the box through `SendInput`.
+- **Linux:** Input uses `uinput`/XTest; injection is limited on Wayland.
+
 ## Security acceptance behavior
 
 - **Matching password** — SPAKE2 handshake completes, key confirmation
@@ -66,11 +79,11 @@ be added later behind the `Encoder` trait.
   In both cases the handshake aborts before any frame is sent/decrypted —
   no frames are ever decrypted with a mismatched password. End-to-end
   encryption remains intact: the relay never sees the password, derived key,
-  or unsealed frame.
+  or unsealed frame. Input is E2EE as well: it is sealed viewer-to-host with
+  `k_v2h`, so a wrong password blocks input just like it blocks video.
 
 ## Not yet implemented (PoC scope)
 
-- Real input injection.
 - A user-facing password prompt in the viewer UI (password/target are
   hardcoded defaults in `src/main.ts`).
 - Password rotation/expiry or brute-force throttling on the relay.

@@ -1,6 +1,8 @@
 import { Tag, wrap, parseVideo } from "./lib/protocol";
 import { runKex, openFrame, attachRouter } from "./lib/kex";
 import { makeDecoder } from "./lib/decode";
+import { attachInput } from "./lib/input";
+import { invoke } from "@tauri-apps/api/core";
 
 const canvas = document.querySelector<HTMLCanvasElement>("#screen")!;
 const decode = makeDecoder(canvas);
@@ -40,6 +42,12 @@ async function main() {
       console.error("open/decode failed", e);
     }
   });
+
+  attachInput(ws, canvas, (bytes) =>
+    invoke<number[]>("seal_input", { bytes: Array.from(bytes) }).then(
+      (sealed) => new Uint8Array(sealed),
+    ),
+  );
 }
 
 main();

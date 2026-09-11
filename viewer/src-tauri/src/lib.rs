@@ -1,7 +1,7 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 use std::sync::Mutex;
 
-use protocol::crypto::Opener;
+use protocol::crypto::{Opener, Sealer};
 use protocol::pake::{self, PakeState};
 
 /// Handshake + session state. Held only in the Rust backend; never crosses to JS.
@@ -11,6 +11,7 @@ struct Session {
     pake: Option<PakeState>,
     shared: Option<[u8; 32]>,
     opener: Option<Opener>,
+    sealer: Option<Sealer>,
 }
 
 struct AppState(Mutex<Session>);
@@ -35,8 +36,9 @@ fn kex_finish(state: tauri::State<AppState>, peer_msg: Vec<u8>) -> Result<Vec<u8
     let mut s = state.0.lock().unwrap();
     let pk = s.pake.take().ok_or("kex not started")?;
     let shared = pake::finish(pk, &peer_msg).ok_or("bad spake2 message")?;
-    let (_send, recv) = protocol::kex::derive_keys(&shared, false); // viewer recv = k_h2v
+    let (send, recv) = protocol::kex::derive_keys(&shared, false); // viewer send = k_v2h, recv = k_h2v
     s.opener = Some(Opener::new(recv));
+    s.sealer = Some(Sealer::new(send));
     s.shared = Some(shared);
     let confirm = pake::confirm_tag(&shared, false); // viewer role
     let mut body = Vec::with_capacity(1 + confirm.len());
@@ -64,7 +66,17 @@ fn kex_verify(state: tauri::State<AppState>, peer_confirm: Vec<u8>) -> Result<()
 fn open_frame(state: tauri::State<AppState>, sealed: Vec<u8>) -> Result<Vec<u8>, String> {
     let mut s = state.0.lock().unwrap();
     let opener = s.opener.as_mut().ok_or("no session key")?;
-    opener.open(&sealed).ok_or_else(|| "AEAD open failed".into())
+    opener
+        .open(&sealed)
+        .ok_or_else(|| "AEAD open failed".into())
+}
+
+/// Seal one plaintext input event with the viewer-to-host session key.
+#[tauri::command]
+fn seal_input(state: tauri::State<AppState>, bytes: Vec<u8>) -> Result<Vec<u8>, String> {
+    let mut s = state.0.lock().unwrap();
+    let sealer = s.sealer.as_mut().ok_or("no session key")?;
+    Ok(sealer.seal(&bytes))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -73,10 +85,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(AppState(Mutex::new(Session::default())))
         .invoke_handler(tauri::generate_handler![
-            kex_start,
-            kex_finish,
-            kex_verify,
-            open_frame
+            kex_start, kex_finish, kex_verify, open_frame, seal_input
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

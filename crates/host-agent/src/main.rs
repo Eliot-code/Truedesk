@@ -2,8 +2,16 @@ use futures_util::{SinkExt, StreamExt};
 use host_agent::{
     capture::{self, ScreenCapturer},
     encode::{self, Encoder},
+    inject::{EnigoInjector, InputInjector},
 };
-use protocol::{control::Control, crypto::Sealer, frame, kex::derive_keys, Tag};
+use protocol::{
+    control::Control,
+    crypto::{Opener, Sealer},
+    frame,
+    input::InputEvent,
+    kex::derive_keys,
+    Tag,
+};
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -130,8 +138,9 @@ async fn main() {
     }
 
     // 4. derive real per-direction keys (replaces the fixed [42;32]).
-    let (send_key, _recv_key) = derive_keys(&shared, true);
+    let (send_key, recv_key) = derive_keys(&shared, true);
     let mut sealer = Sealer::new(send_key);
+    let mut opener = Opener::new(recv_key);
 
     let mut capturer = match capture::ScapCapturer::new() {
         Some(capturer) => capturer,
@@ -155,6 +164,40 @@ async fn main() {
     };
     let width = first_frame.width;
     let height = first_frame.height;
+
+    let mut injector: Box<dyn InputInjector> = match EnigoInjector::new() {
+        Some(injector) => Box::new(injector),
+        None => {
+            eprintln!("Input injection unavailable: macOS Accessibility permission is required. Grant it in System Settings, then restart the host.");
+            eprintln!("Open Accessibility settings: x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility");
+            Box::new(host_agent::inject::NoopInjector::default())
+        }
+    };
+
+    // Split the WebSocket so incoming input is read independently of the video
+    // producer. The first captured frame supplies the single-display dimensions.
+    let (mut ws_sink, mut ws_stream) = ws.split();
+    let (input_tx, mut input_rx) = tokio::sync::mpsc::channel(64);
+    tokio::spawn(async move {
+        while let Some(message) = ws_stream.next().await {
+            let Ok(Message::Binary(message)) = message else {
+                break;
+            };
+            let Some((Tag::Input, body)) = frame::unwrap(&message) else {
+                continue;
+            };
+            let Some(plaintext) = opener.open(body) else {
+                continue;
+            };
+            let Some((event, _timestamp_us)) = InputEvent::from_bytes(&plaintext) else {
+                continue;
+            };
+            if input_tx.send(event).await.is_err() {
+                break;
+            }
+        }
+    });
+
     let fps = 15;
     let mut encoder = encode::H264Encoder::new(width, height, fps, 1_000_000);
     let mut seq = 0u64;
@@ -162,38 +205,36 @@ async fn main() {
     let mut last_keyframe = next_frame;
 
     loop {
-        next_frame += Duration::from_millis(1_000 / u64::from(fps));
-        let frame = if seq == 0 {
-            Some(first_frame.clone())
-        } else {
-            capturer.next_frame().and_then(even_frame)
-        };
-        let Some(frame) = frame else {
-            tokio::time::sleep_until(next_frame).await;
-            continue;
-        };
-        if frame.width != width || frame.height != height {
-            tokio::time::sleep_until(next_frame).await;
-            continue;
+        tokio::select! {
+            Some(event) = input_rx.recv() => {
+                injector.inject(&event, u32::from(width), u32::from(height));
+            }
+            _ = tokio::time::sleep_until(next_frame) => {
+                next_frame += Duration::from_millis(1_000 / u64::from(fps));
+                let frame = if seq == 0 {
+                    Some(first_frame.clone())
+                } else {
+                    capturer.next_frame().and_then(even_frame)
+                };
+                let Some(frame) = frame else { continue };
+                if frame.width != width || frame.height != height { continue };
+                if last_keyframe.elapsed() >= Duration::from_secs(2) {
+                    encoder.force_intra_frame();
+                    last_keyframe = next_frame;
+                }
+                let Some(encoded) = encoder.encode(&frame) else { continue };
+                let mut plaintext =
+                    encode::video_header(seq, frame.timestamp_us, encoded.keyframe, width, height);
+                plaintext.extend_from_slice(&encoded.data);
+                let sealed = sealer.seal(&plaintext);
+                ws_sink
+                    .send(Message::Binary(frame::wrap(Tag::Video, &sealed)))
+                    .await
+                    .unwrap();
+                println!("sent frame {seq} ({} bytes sealed)", sealed.len());
+                seq += 1;
+            }
         }
-        if last_keyframe.elapsed() >= Duration::from_secs(2) {
-            encoder.force_intra_frame();
-            last_keyframe = next_frame;
-        }
-        let Some(encoded) = encoder.encode(&frame) else {
-            tokio::time::sleep_until(next_frame).await;
-            continue;
-        };
-        let mut plaintext =
-            encode::video_header(seq, frame.timestamp_us, encoded.keyframe, width, height);
-        plaintext.extend_from_slice(&encoded.data);
-        let sealed = sealer.seal(&plaintext);
-        ws.send(Message::Binary(frame::wrap(Tag::Video, &sealed)))
-            .await
-            .unwrap();
-        println!("sent frame {seq} ({} bytes sealed)", sealed.len());
-        seq += 1;
-        tokio::time::sleep_until(next_frame).await;
     }
 }
 
