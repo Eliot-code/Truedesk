@@ -1,0 +1,13 @@
+# Keep the relay build context small. The relay build only needs the Rust
+# workspace (root Cargo.toml/lock + crates/*). Everything else is excluded.
+target/
+**/target/
+viewer/
+docs/
+.superpowers/
+.git/
+.idea/
+.vscode/
+**/node_modules/
+*.log
+.DS_Store
