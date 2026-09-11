@@ -88,16 +88,26 @@ export function attachInput(
 ): void {
   if (canvas.tabIndex < 0) canvas.tabIndex = 0;
 
-  const send = async (event: InputEvent): Promise<void> => {
-    const sealed = await seal(encodeInputEvent(event, timestampUs()));
+  const sealAndSend = async (bytes: Uint8Array): Promise<void> => {
+    const sealed = await seal(bytes);
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(wrap(Tag.Input, sealed) as Uint8Array<ArrayBuffer>);
     }
   };
 
+  let sendChain = Promise.resolve();
+  const enqueue = (event: InputEvent): void => {
+    const bytes = encodeInputEvent(event, timestampUs());
+    sendChain = sendChain
+      .then(() => sealAndSend(bytes))
+      .catch((error: unknown) => {
+        console.error("Failed to seal or send input event", error);
+      });
+  };
+
   canvas.addEventListener("mousemove", (event) => {
     const rect = canvas.getBoundingClientRect();
-    void send({
+    enqueue({
       kind: "mouseMove",
       x: normalizedCoordinate(event.clientX, rect.left, rect.width),
       y: normalizedCoordinate(event.clientY, rect.top, rect.height),
@@ -107,25 +117,25 @@ export function attachInput(
   canvas.addEventListener("mousedown", (event) => {
     canvas.focus();
     const mapped = button(event.button);
-    if (mapped !== null) void send({ kind: "mouseButton", button: mapped, down: true });
+    if (mapped !== null) enqueue({ kind: "mouseButton", button: mapped, down: true });
   });
 
   canvas.addEventListener("mouseup", (event) => {
     const mapped = button(event.button);
-    if (mapped !== null) void send({ kind: "mouseButton", button: mapped, down: false });
+    if (mapped !== null) enqueue({ kind: "mouseButton", button: mapped, down: false });
   });
 
   canvas.addEventListener("wheel", (event) => {
-    void send({ kind: "scroll", dx: Math.trunc(event.deltaX), dy: Math.trunc(event.deltaY) });
+    enqueue({ kind: "scroll", dx: Math.trunc(event.deltaX), dy: Math.trunc(event.deltaY) });
   });
 
   canvas.addEventListener("keydown", (event) => {
     event.preventDefault();
-    void send({ kind: "key", code: event.keyCode >>> 0, down: true, modifiers: modifiers(event) });
+    enqueue({ kind: "key", code: event.keyCode >>> 0, down: true, modifiers: modifiers(event) });
   });
 
   canvas.addEventListener("keyup", (event) => {
     event.preventDefault();
-    void send({ kind: "key", code: event.keyCode >>> 0, down: false, modifiers: modifiers(event) });
+    enqueue({ kind: "key", code: event.keyCode >>> 0, down: false, modifiers: modifiers(event) });
   });
 }
