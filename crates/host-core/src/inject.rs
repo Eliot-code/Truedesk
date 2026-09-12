@@ -10,6 +10,12 @@ pub trait InputInjector {
     fn inject(&mut self, ev: &InputEvent, screen_w: u32, screen_h: u32);
 }
 
+impl<T: InputInjector + ?Sized> InputInjector for Box<T> {
+    fn inject(&mut self, ev: &InputEvent, screen_w: u32, screen_h: u32) {
+        (**self).inject(ev, screen_w, screen_h);
+    }
+}
+
 pub struct EnigoInjector {
     enigo: Enigo,
 }

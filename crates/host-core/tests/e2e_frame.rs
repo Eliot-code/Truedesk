@@ -1,4 +1,4 @@
-use host_agent::encode::{video_header, Encoder, H264Encoder, PixelFormat, RawFrame};
+use host_core::encode::{video_header, Encoder, H264Encoder, PixelFormat, RawFrame};
 use protocol::crypto::{Opener, Sealer};
 use protocol::kex::derive_keys;
 

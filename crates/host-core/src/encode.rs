@@ -25,6 +25,9 @@ pub struct EncodedFrame {
 
 pub trait Encoder {
     fn encode(&mut self, frame: &RawFrame) -> Option<EncodedFrame>;
+
+    /// Request that the next encoded frame be an intra frame when supported.
+    fn force_intra_frame(&mut self) {}
 }
 
 pub struct H264Encoder {
@@ -56,6 +59,10 @@ impl H264Encoder {
 }
 
 impl Encoder for H264Encoder {
+    fn force_intra_frame(&mut self) {
+        self.encoder.force_intra_frame();
+    }
+
     fn encode(&mut self, frame: &RawFrame) -> Option<EncodedFrame> {
         if !matches!(frame.format, PixelFormat::Bgra)
             || frame.width != self.width
