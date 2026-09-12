@@ -1,0 +1,31 @@
+import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+
+export type Status = "offline" | "online" | "connecting" | "in_session";
+export interface Identity { id: string; password: string }
+export interface AppConfig { relay_url: string; recent_ids: string[] }
+export interface PermissionStatus { screen_recording: boolean; accessibility: boolean }
+export interface IncomingRequest { peer_id: string; fingerprint: string }
+export interface SessionStarted { role: "host" | "viewer"; remote_id: string }
+export interface SessionEnded { reason: string }
+export interface ErrorEvent { message: string }
+export interface StatusChanged { state: Status }
+
+export const getIdentity = () => invoke<Identity>("get_identity");
+export const rotatePassword = () => invoke<{ password: string }>("rotate_password");
+export const getConfig = () => invoke<AppConfig>("get_config");
+export const setRelay = (url: string) => invoke<void>("set_relay", { url });
+export const permissionStatus = () => invoke<PermissionStatus>("permission_status");
+export const openPermissionSettings = (which: "screen" | "accessibility") => invoke<void>("open_permission_settings", { which });
+export const respondToRequest = (peer_id: string, allow: boolean, always: boolean) => invoke<void>("respond_to_request", { peer_id, allow, always });
+export const startHosting = () => invoke<void>("start_hosting");
+export const stopHosting = () => invoke<void>("stop_hosting");
+export const connect = (target_id: string, password: string) => invoke<void>("connect", { target_id, password });
+export const disconnect = () => invoke<void>("disconnect");
+
+const on = <T>(event: string, handler: (payload: T) => void): Promise<UnlistenFn> => listen<T>(event, ({ payload }) => handler(payload));
+export const onStatusChanged = (handler: (payload: StatusChanged) => void) => on("status_changed", handler);
+export const onIncomingRequest = (handler: (payload: IncomingRequest) => void) => on("incoming_request", handler);
+export const onSessionStarted = (handler: (payload: SessionStarted) => void) => on("session_started", handler);
+export const onSessionEnded = (handler: (payload: SessionEnded) => void) => on("session_ended", handler);
+export const onError = (handler: (payload: ErrorEvent) => void) => on("error", handler);

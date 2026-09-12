@@ -1,0 +1,60 @@
+import { useEffect, useRef } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import * as api from "../lib/api";
+import { makeDecoder } from "../lib/decode";
+import { attachInput } from "../lib/input";
+import { attachRouter, openFrame, runKex, type FrameRouter } from "../lib/kex";
+import { parseVideo } from "../lib/protocol";
+import Toolbar from "../components/Toolbar";
+
+export interface SessionProps {
+  remoteId: string;
+  role: "host" | "viewer";
+  onDisconnect: () => void;
+}
+
+/**
+ * Starts the browser-side portion of a viewer session when given a transport.
+ * Task 6 will supply the backend-owned WebSocket and password to this helper.
+ */
+export async function runViewerFrameLoop(ws: WebSocket, canvas: HTMLCanvasElement, password: string): Promise<void> {
+  const router: FrameRouter = attachRouter(ws);
+  await runKex(ws, router, password);
+  const decode = makeDecoder(canvas);
+  router.onVideo((sealed) => {
+    void openFrame(sealed).then((plain) => {
+      const frame = parseVideo(plain);
+      canvas.width = frame.width;
+      canvas.height = frame.height;
+      decode(frame.data, frame.keyframe, frame.timestampUs);
+    }).catch((error: unknown) => console.error("Failed to open video frame", error));
+  });
+  attachInput(ws, canvas, async (bytes) => {
+    const sealed: number[] = await invoke("seal_input", { input: Array.from(bytes) });
+    return new Uint8Array(sealed);
+  });
+}
+
+export default function Session({ remoteId, role, onDisconnect }: SessionProps) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    if (role !== "viewer" || !canvasRef.current) return;
+    // The Tauri backend currently retains the relay socket. Task 6 will invoke
+    // runViewerFrameLoop once that socket is bridged into the WebView.
+    return undefined;
+  }, [role]);
+
+  const disconnect = () => {
+    void api.disconnect();
+    onDisconnect();
+  };
+
+  return (
+    <main className={`session-screen session-screen--${role}`}>
+      <canvas ref={canvasRef} className="session-canvas" tabIndex={0} aria-label="Remote screen" />
+      {role === "host" && <div className="session-host-overlay"><span className="eyebrow">OPENDESK · SECURE SESSION</span><h1>You are being controlled by {remoteId}</h1><p>Your screen is shared for this session.</p></div>}
+      <Toolbar remoteId={remoteId} onDisconnect={disconnect} />
+    </main>
+  );
+}
