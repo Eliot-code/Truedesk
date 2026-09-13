@@ -23,10 +23,19 @@ struct RuntimeState {
     config: ConfigStore,
     password: Option<String>,
     session: Session,
-    host_task: Option<tauri::async_runtime::JoinHandle<()>>,
+    host_thread: Option<HostThread>,
     viewer_task: Option<tauri::async_runtime::JoinHandle<()>>,
     pending_request: Option<oneshot::Sender<bool>>,
     remote_id: Option<String>,
+}
+
+/// The host session owns Enigo, which is not `Send`. Keep the session and its
+/// current-thread Tokio runtime together on a dedicated OS thread. The stop
+/// signal is separate so Tauri commands can shut it down without aborting a
+/// task that may be running non-`Send` code.
+struct HostThread {
+    stop_tx: oneshot::Sender<()>,
+    join: std::thread::JoinHandle<()>,
 }
 struct AppState(Mutex<RuntimeState>);
 
@@ -160,7 +169,7 @@ fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<()
             current_password(&mut s),
         )
     };
-    if state.0.lock().unwrap().host_task.is_some() {
+    if state.0.lock().unwrap().host_thread.is_some() {
         return Ok(());
     }
     emit(
@@ -214,6 +223,7 @@ fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<()
                         reason: "rejected".into(),
                     },
                 );
+                emit(&app, "status_changed", StatusEvent { state: "offline" });
                 return Ok(());
             }
             emit(
@@ -231,31 +241,79 @@ fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<()
                     remote_id: "unknown".into(),
                 },
             );
-            // TODO(Task 6): run host_core::roles::run_default_host_session on a
-            // dedicated thread — the Enigo injector is !Send and cannot cross a
-            // Tauri async task. For now the host session surface holds open
-            // until disconnect (stop_hosting aborts this task).
-            let _ = (&ws, &password);
-            futures_util::future::pending::<()>().await;
+            let (stop_tx, stop_rx) = oneshot::channel::<()>();
+            let host_app = app.clone();
+            let join = std::thread::spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        emit(&host_app, "error", ErrorEvent { message: error.to_string() });
+                        emit(
+                            &host_app,
+                            "session_ended",
+                            SessionEnded { reason: "runtime initialization failed".into() },
+                        );
+                        emit(&host_app, "status_changed", StatusEvent { state: "offline" });
+                        return;
+                    }
+                };
+
+                let cleanup_app = host_app.clone();
+                runtime.block_on(async move {
+                    let result = tokio::select! {
+                        result = host_core::roles::run_default_host_session(ws, &password) => Some(result),
+                        _ = stop_rx => None,
+                    };
+                    if let Some(Err(error)) = &result {
+                        emit(&host_app, "error", ErrorEvent { message: error.to_string() });
+                    }
+                    emit(
+                        &host_app,
+                        "session_ended",
+                        SessionEnded {
+                            reason: if result.is_some() { "host session ended".into() } else { "disconnected".into() },
+                        },
+                    );
+                    emit(&host_app, "status_changed", StatusEvent { state: "offline" });
+                });
+
+                // A naturally ended session should not leave a stale host
+                // handle preventing a later start_hosting call.
+                if let Ok(mut state) = cleanup_app.state::<AppState>().0.lock() {
+                    state.host_thread = None;
+                };
+            });
+            app.state::<AppState>().0.lock().unwrap().host_thread = Some(HostThread { stop_tx, join });
             Ok::<(), String>(())
         }
         .await;
         if let Err(message) = result {
             emit(&app, "error", ErrorEvent { message });
+            emit(&app, "status_changed", StatusEvent { state: "offline" });
         }
-        emit(&app, "status_changed", StatusEvent { state: "offline" });
     });
-    state.0.lock().unwrap().host_task = Some(task);
+    // The registration task is intentionally short-lived after it hands the
+    // paired socket to HostThread. Detach it (the host session is stopped via
+    // the oneshot channel owned by HostThread).
+    drop(task);
     Ok(())
 }
 #[tauri::command]
 fn stop_hosting(state: tauri::State<'_, AppState>, app: AppHandle) {
-    let mut s = state.0.lock().unwrap();
-    if let Some(task) = s.host_task.take() {
-        task.abort();
+    let (host_thread, pending_request) = {
+        let mut s = state.0.lock().unwrap();
+        (s.host_thread.take(), s.pending_request.take())
+    };
+    drop(pending_request);
+    if let Some(host_thread) = host_thread {
+        let _ = host_thread.stop_tx.send(());
+        let _ = host_thread.join.join();
+    } else {
+        emit(&app, "status_changed", StatusEvent { state: "offline" });
     }
-    s.pending_request.take();
-    emit(&app, "status_changed", StatusEvent { state: "offline" });
 }
 
 #[tauri::command]
@@ -328,22 +386,26 @@ fn connect(
 }
 #[tauri::command]
 fn disconnect(state: tauri::State<'_, AppState>, app: AppHandle) {
-    let mut s = state.0.lock().unwrap();
-    if let Some(task) = s.viewer_task.take() {
+    let (viewer_task, host_thread) = {
+        let mut s = state.0.lock().unwrap();
+        (s.viewer_task.take(), s.host_thread.take())
+    };
+    if let Some(task) = viewer_task {
         task.abort();
+        emit(
+            &app,
+            "session_ended",
+            SessionEnded {
+                reason: "disconnected".into(),
+            },
+        );
+        emit(&app, "status_changed", StatusEvent { state: "offline" });
     }
-    if let Some(task) = s.host_task.take() {
-        task.abort();
+    if let Some(host_thread) = host_thread {
+        let _ = host_thread.stop_tx.send(());
+        let _ = host_thread.join.join();
     }
-    s.remote_id = None;
-    emit(
-        &app,
-        "session_ended",
-        SessionEnded {
-            reason: "disconnected".into(),
-        },
-    );
-    emit(&app, "status_changed", StatusEvent { state: "offline" });
+    state.0.lock().unwrap().remote_id = None;
 }
 
 #[tauri::command]
@@ -415,7 +477,7 @@ pub fn run() {
                 config,
                 password: None,
                 session: Session::default(),
-                host_task: None,
+                host_thread: None,
                 viewer_task: None,
                 pending_request: None,
                 remote_id: None,

@@ -1,6 +1,5 @@
 import { useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import * as api from "../lib/api";
 import { makeDecoder } from "../lib/decode";
 import { attachInput } from "../lib/input";
 import { attachRouter, openFrame, runKex, type FrameRouter } from "../lib/kex";
@@ -46,7 +45,6 @@ export default function Session({ remoteId, role, onDisconnect }: SessionProps) 
   }, [role]);
 
   const disconnect = () => {
-    void api.disconnect();
     onDisconnect();
   };
 
