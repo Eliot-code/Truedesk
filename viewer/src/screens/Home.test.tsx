@@ -15,10 +15,11 @@ describe("Home", () => {
     vi.mocked(api.getConfig).mockResolvedValue({ relay_url: "wss://relay", recent_ids: [] });
     vi.mocked(api.startHosting).mockResolvedValue(undefined); vi.mocked(api.connect).mockResolvedValue(undefined);
   });
-  it("renders the identity returned by the backend", async () => { render(<Home status="online" incomingRequest={null} onDismissRequest={vi.fn()} />); expect(await screen.findByText("123456789")).toBeTruthy(); });
+  it("renders the identity returned by the backend", async () => { render(<Home status="online" onConnect={vi.fn()} incomingRequest={null} onDismissRequest={vi.fn()} />); expect(await screen.findByText("123456789")).toBeTruthy(); });
   it("connects with the entered target ID and password", async () => {
-    render(<Home status="online" incomingRequest={null} onDismissRequest={vi.fn()} />);
+    const onConnect = vi.fn().mockResolvedValue(undefined);
+    render(<Home status="online" onConnect={onConnect} incomingRequest={null} onDismissRequest={vi.fn()} />);
     fireEvent.change(screen.getByPlaceholderText("000 000 000"), { target: { value: "987654321" } }); fireEvent.change(screen.getByPlaceholderText("Password"), { target: { value: "remote-secret" } }); fireEvent.click(screen.getByRole("button", { name: "Connect" }));
-    await waitFor(() => expect(api.connect).toHaveBeenCalledWith("987654321", "remote-secret"));
+    await waitFor(() => expect(onConnect).toHaveBeenCalledWith("987654321", "remote-secret"));
   });
 });

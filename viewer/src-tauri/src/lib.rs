@@ -24,9 +24,7 @@ struct RuntimeState {
     password: Option<String>,
     session: Session,
     host_thread: Option<HostThread>,
-    viewer_task: Option<tauri::async_runtime::JoinHandle<()>>,
     pending_request: Option<oneshot::Sender<bool>>,
-    remote_id: Option<String>,
 }
 
 /// The host session owns Enigo, which is not `Send`. Keep the session and its
@@ -326,11 +324,13 @@ fn connect(
     if target_id.len() != 9 || !target_id.bytes().all(|b| b.is_ascii_digit()) {
         return Err("target ID must be 9 digits".into());
     }
-    let relay_url = {
-        let mut s = state.0.lock().unwrap();
-        s.config.add_recent(&target_id).map_err(|e| e.to_string())?;
-        s.config.config.relay_url.clone()
-    };
+    state
+        .0
+        .lock()
+        .unwrap()
+        .config
+        .add_recent(&target_id)
+        .map_err(|e| e.to_string())?;
     emit(
         &app,
         "status_changed",
@@ -338,60 +338,26 @@ fn connect(
             state: "connecting",
         },
     );
-    let remote_id = target_id.clone();
-    let task = tauri::async_runtime::spawn(async move {
-        let result = async {
-            let mut ws = host_core::relay_client::connect(&relay_url)
-                .await
-                .map_err(|e| e.to_string())?;
-            host_core::relay_client::connect_to(&mut ws, &remote_id)
-                .await
-                .map_err(|e| e.to_string())?;
-            while let Some(message) = ws.next().await {
-                if let Ok(tokio_tungstenite::tungstenite::Message::Binary(bytes)) = message {
-                    if let Some((Tag::Control, body)) = frame::unwrap(&bytes) {
-                        if matches!(
-                            protocol::control::Control::from_bytes(body),
-                            Some(protocol::control::Control::Paired { .. })
-                        ) {
-                            emit(
-                                &app,
-                                "status_changed",
-                                StatusEvent {
-                                    state: "in_session",
-                                },
-                            );
-                            emit(
-                                &app,
-                                "session_started",
-                                SessionStarted {
-                                    role: "viewer",
-                                    remote_id: remote_id.clone(),
-                                },
-                            );
-                            return Ok::<(), String>(());
-                        }
-                    }
-                }
-            }
-            Err("relay closed before pairing".into())
-        }
-        .await;
-        if let Err(message) = result {
-            emit(&app, "error", ErrorEvent { message });
-        }
-    });
-    state.0.lock().unwrap().viewer_task = Some(task);
+    emit(
+        &app,
+        "session_started",
+        SessionStarted {
+            role: "viewer",
+            remote_id: target_id,
+        },
+    );
     Ok(())
 }
 #[tauri::command]
 fn disconnect(state: tauri::State<'_, AppState>, app: AppHandle) {
-    let (viewer_task, host_thread) = {
+    let host_thread = {
         let mut s = state.0.lock().unwrap();
-        (s.viewer_task.take(), s.host_thread.take())
+        s.host_thread.take()
     };
-    if let Some(task) = viewer_task {
-        task.abort();
+    if let Some(host_thread) = host_thread {
+        let _ = host_thread.stop_tx.send(());
+        let _ = host_thread.join.join();
+    } else {
         emit(
             &app,
             "session_ended",
@@ -401,11 +367,6 @@ fn disconnect(state: tauri::State<'_, AppState>, app: AppHandle) {
         );
         emit(&app, "status_changed", StatusEvent { state: "offline" });
     }
-    if let Some(host_thread) = host_thread {
-        let _ = host_thread.stop_tx.send(());
-        let _ = host_thread.join.join();
-    }
-    state.0.lock().unwrap().remote_id = None;
 }
 
 #[tauri::command]
@@ -478,9 +439,7 @@ pub fn run() {
                 password: None,
                 session: Session::default(),
                 host_thread: None,
-                viewer_task: None,
                 pending_request: None,
-                remote_id: None,
             })));
             Ok(())
         })

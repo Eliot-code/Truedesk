@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Home from "./screens/Home";
 import IncomingRequest from "./screens/IncomingRequest";
 import Permissions from "./screens/Permissions";
@@ -12,7 +12,16 @@ export default function App() {
   const [status, setStatus] = useState<api.Status>("offline");
   const [request, setRequest] = useState<api.IncomingRequest | null>(null);
   const [session, setSession] = useState<api.SessionStarted | null>(null);
+  const [viewerCredentials, setViewerCredentials] = useState<{ remoteId: string; password: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const handleConnect = async (remoteId: string, password: string) => {
+    setViewerCredentials({ remoteId, password });
+    await api.connect(remoteId, password);
+    setSession({ role: "viewer", remote_id: remoteId });
+    setScreen("session");
+  };
+  const handleDisconnect = useCallback(() => { void api.disconnect(); }, []);
 
   useEffect(() => {
     let active = true;
@@ -25,6 +34,7 @@ export default function App() {
       }),
       api.onSessionStarted((payload) => {
         if (!active) return;
+        if (payload.role === "viewer") return;
         setRequest(null);
         setSession(payload);
         setScreen("session");
@@ -34,6 +44,7 @@ export default function App() {
         if (!active) return;
         setRequest(null);
         setSession(null);
+        setViewerCredentials(null);
         setScreen("home");
       }),
       api.onError(({ message }) => active && setError(message)),
@@ -49,9 +60,9 @@ export default function App() {
   if (screen === "permissions") {
     content = <Permissions onContinue={() => setScreen("home")} />;
   } else if (screen === "session" && session) {
-    content = <Session remoteId={session.remote_id} role={session.role} onDisconnect={() => void api.disconnect()} />;
+    content = <Session remoteId={session.remote_id} role={session.role} password={viewerCredentials?.password} onDisconnect={handleDisconnect} />;
   } else {
-    content = <Home status={status} onOpenPermissions={() => setScreen("permissions")} />;
+    content = <Home status={status} onConnect={handleConnect} onOpenPermissions={() => setScreen("permissions")} />;
   }
 
   return <>

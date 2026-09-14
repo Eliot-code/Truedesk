@@ -17,10 +17,11 @@ export const getConfig = () => invoke<AppConfig>("get_config");
 export const setRelay = (url: string) => invoke<void>("set_relay", { url });
 export const permissionStatus = () => invoke<PermissionStatus>("permission_status");
 export const openPermissionSettings = (which: "screen" | "accessibility") => invoke<void>("open_permission_settings", { which });
-export const respondToRequest = (peer_id: string, allow: boolean, always: boolean) => invoke<void>("respond_to_request", { peer_id, allow, always });
+// Tauri v2 exposes Rust snake_case params to JS as camelCase (peerId/targetId).
+export const respondToRequest = (peer_id: string, allow: boolean, always: boolean) => invoke<void>("respond_to_request", { peerId: peer_id, allow, always });
 export const startHosting = () => invoke<void>("start_hosting");
 export const stopHosting = () => invoke<void>("stop_hosting");
-export const connect = (target_id: string, password: string) => invoke<void>("connect", { target_id, password });
+export const connect = (target_id: string, password: string) => invoke<void>("connect", { targetId: target_id, password });
 export const disconnect = () => invoke<void>("disconnect");
 
 const on = <T>(event: string, handler: (payload: T) => void): Promise<UnlistenFn> => listen<T>(event, ({ payload }) => handler(payload));

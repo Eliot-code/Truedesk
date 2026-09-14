@@ -7,10 +7,11 @@ interface HomeProps {
   incomingRequest?: api.IncomingRequest | null;
   onDismissRequest?: () => void;
   onOpenPermissions?: () => void;
+  onConnect: (targetId: string, password: string) => Promise<void>;
 }
 const statusLabels: Record<api.Status, string> = { offline: "Offline", online: "Online", connecting: "Connecting", in_session: "In session" };
 
-export default function Home({ status, onOpenPermissions }: HomeProps) {
+export default function Home({ status, onConnect, onOpenPermissions }: HomeProps) {
   const [identity, setIdentity] = useState<api.Identity | null>(null);
   const [recentIds, setRecentIds] = useState<string[]>([]);
   const [targetId, setTargetId] = useState("");
@@ -36,7 +37,7 @@ export default function Home({ status, onOpenPermissions }: HomeProps) {
     if (!/^\d{9}$/.test(targetId)) { setMessage("Enter a 9-digit device ID."); return; }
     if (!remotePassword) { setMessage("Enter the remote device password."); return; }
     setBusy(true); setMessage(null);
-    try { await api.connect(targetId, remotePassword); } catch (error) { setMessage(String(error)); } finally { setBusy(false); }
+    try { await onConnect(targetId, remotePassword); } catch (error) { setMessage(String(error)); } finally { setBusy(false); }
   };
   const copyId = async () => {
     if (!identity) return;
