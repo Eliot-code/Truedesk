@@ -3,18 +3,27 @@
 use super::{Transport, TransportError};
 use futures_util::{SinkExt, StreamExt};
 use protocol::{frame, Tag};
+use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::Mutex;
 use tokio_tungstenite::{tungstenite::Message, WebSocketStream};
 
 /// A transport over an already connected and paired relay WebSocket.
 pub struct RelayTransport<S = tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
-    ws: WebSocketStream<S>,
+    ws: Arc<Mutex<WebSocketStream<S>>>,
 }
 
 impl<S> RelayTransport<S> {
     /// Wrap an already connected and paired WebSocket.
     pub fn new(ws: WebSocketStream<S>) -> Self {
-        Self { ws }
+        Self {
+            ws: Arc::new(Mutex::new(ws)),
+        }
+    }
+
+    /// Wrap a WebSocket shared with the ICE signaling adapter.
+    pub(crate) fn shared_socket(&self) -> Arc<Mutex<WebSocketStream<S>>> {
+        Arc::clone(&self.ws)
     }
 }
 
@@ -34,13 +43,16 @@ where
 {
     async fn send(&mut self, tag: Tag, sealed: &[u8]) -> Result<(), TransportError> {
         self.ws
+            .lock()
+            .await
             .send(wrap_message(tag, sealed))
             .await
             .map_err(|error| TransportError::Io(error.to_string()))
     }
 
     async fn recv(&mut self) -> Option<(Tag, Vec<u8>)> {
-        while let Some(message) = self.ws.next().await {
+        let mut ws = self.ws.lock().await;
+        while let Some(message) = ws.next().await {
             match message {
                 Ok(Message::Binary(bytes)) => {
                     if let Some(frame) = unwrap_message(&bytes) {

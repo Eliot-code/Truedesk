@@ -4,6 +4,7 @@ use crate::{
     capture::{ScapCapturer, ScreenCapturer},
     encode::{self, Encoder, H264Encoder},
     inject::{EnigoInjector, InputInjector, NoopInjector},
+    transport::{self, RelayIceSignaling, RelayTransport, Transport},
 };
 use futures_util::{SinkExt, StreamExt};
 use protocol::{
@@ -143,6 +144,20 @@ where
     let mut sealer = Sealer::new(send_key);
     let mut opener = Opener::new(recv_key);
 
+    let relay = RelayTransport::new(ws);
+    // The current viewer/host session initiator is ICE-controlling; the peer
+    // must use controlled mode. The relay's pairing session is currently s1.
+    let signaling = RelayIceSignaling::new(&relay, "s1");
+    let transport = transport::establish(
+        true,
+        signaling,
+        relay,
+        transport::default_agent_config(),
+        Duration::from_secs(3),
+    )
+    .await;
+    let transport = std::sync::Arc::new(tokio::sync::Mutex::new(transport));
+
     let first_frame = loop {
         if let Some(frame) = capturer.next_frame() {
             break frame;
@@ -154,17 +169,15 @@ where
     ))?;
     let width = first_frame.width;
     let height = first_frame.height;
-    let (mut ws_sink, mut ws_stream) = ws.split();
     let (input_tx, mut input_rx) = tokio::sync::mpsc::channel(64);
+    let input_transport = std::sync::Arc::clone(&transport);
     tokio::spawn(async move {
-        while let Some(message) = ws_stream.next().await {
-            let Ok(Message::Binary(message)) = message else {
+        loop {
+            let received = input_transport.lock().await.recv().await;
+            let Some((Tag::Input, body)) = received else {
                 break;
             };
-            let Some((Tag::Input, body)) = frame::unwrap(&message) else {
-                continue;
-            };
-            let Some(plaintext) = opener.open(body) else {
+            let Some(plaintext) = opener.open(&body) else {
                 continue;
             };
             let Some((event, _timestamp_us)) = InputEvent::from_bytes(&plaintext) else {
@@ -193,8 +206,7 @@ where
                 let mut plaintext = encode::video_header(seq, frame.timestamp_us, encoded.keyframe, width, height);
                 plaintext.extend_from_slice(&encoded.data);
                 let sealed = sealer.seal(&plaintext);
-                ws_sink.send(Message::Binary(frame::wrap(Tag::Video, &sealed))).await?;
-                println!("sent frame {seq} ({} bytes sealed)", sealed.len());
+                transport.lock().await.send(Tag::Video, &sealed).await?;
                 seq += 1;
             }
         }

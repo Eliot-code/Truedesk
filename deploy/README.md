@@ -37,3 +37,11 @@ through unchanged.
   Running it on untrusted infrastructure does not expose session content.
 - It is stateless — scale horizontally only with sticky routing per peer pair
   (a single instance is fine for most self-hosting).
+- Sessions are P2P-first: clients exchange ICE candidates through the paired
+  relay WebSocket after key confirmation, then use direct UDP when possible.
+  Only outbound UDP is required; no inbound firewall rule or forwarded port is
+  needed. Networks that block UDP fall back to the relay on `wss://` port 443.
+- ICE uses Google Public STUN by default (`stun:stun.l.google.com:19302`). Set
+  the host-core `AgentConfig.urls` to a self-hosted STUN endpoint when desired.
+- The host reports `INFO transport selected: direct` or
+  `INFO transport selected: relay (ICE timeout)` in its logs.

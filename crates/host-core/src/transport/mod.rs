@@ -1,8 +1,26 @@
 //! Transport abstractions for carrying sealed protocol frames.
 
+pub mod direct;
+pub mod ice;
 pub mod relay;
 
+pub use direct::DirectTransport;
+pub use ice::RelayIceSignaling;
 pub use relay::RelayTransport;
+
+use ice::{establish_ice, IceOutcome, IceSignaling};
+use std::time::Duration;
+use webrtc_ice::agent::agent_config::AgentConfig;
+
+/// Default ICE configuration. Google Public STUN provides server-reflexive
+/// candidates; deployments may replace `urls` with a self-hosted STUN server.
+pub fn default_agent_config() -> AgentConfig {
+    let mut config = AgentConfig::default();
+    if let Ok(url) = webrtc_ice::url::Url::parse_url("stun:stun.l.google.com:19302") {
+        config.urls.push(url);
+    }
+    config
+}
 
 /// Errors encountered while sending a sealed frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,22 +51,88 @@ pub trait Transport {
     async fn recv(&mut self) -> Option<(protocol::Tag, Vec<u8>)>;
 }
 
-/// Transport implementations available before the direct UDP path is added.
-pub enum AnyTransport {
-    Relay(relay::RelayTransport),
+/// Transport implementations selected for a session.
+pub enum AnyTransport<S = tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+    Relay(Box<relay::RelayTransport<S>>),
+    Direct(direct::DirectTransport),
 }
 
 #[async_trait::async_trait]
-impl Transport for AnyTransport {
+impl<S> Transport for AnyTransport<S>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
+{
     async fn send(&mut self, tag: protocol::Tag, sealed: &[u8]) -> Result<(), TransportError> {
         match self {
             Self::Relay(transport) => transport.send(tag, sealed).await,
+            Self::Direct(transport) => transport.send(tag, sealed).await,
         }
     }
 
     async fn recv(&mut self) -> Option<(protocol::Tag, Vec<u8>)> {
         match self {
             Self::Relay(transport) => transport.recv().await,
+            Self::Direct(transport) => transport.recv().await,
         }
+    }
+}
+
+/// Establish the direct path first and retain the relay as the fallback.
+///
+/// Callers should pair over the relay, complete SPAKE2 and key confirmation,
+/// call this function, and only then start media: capture -> encode -> seal ->
+/// transport, and transport -> open -> decode/inject.
+pub async fn establish<S, R>(
+    controlling: bool,
+    signaling: S,
+    relay_fallback: RelayTransport<R>,
+    agent_config: AgentConfig,
+    deadline: Duration,
+) -> AnyTransport<R>
+where
+    S: IceSignaling,
+    R: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
+{
+    match establish_ice(agent_config, controlling, signaling, deadline).await {
+        IceOutcome::Nominated(conn) => {
+            eprintln!("INFO transport selected: direct");
+            AnyTransport::Direct(DirectTransport::new(conn))
+        }
+        IceOutcome::TimedOut => {
+            eprintln!("INFO transport selected: relay (ICE timeout)");
+            AnyTransport::Relay(Box::new(relay_fallback))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio_tungstenite::{tungstenite::protocol::Role, WebSocketStream};
+
+    struct NoRemote;
+
+    #[async_trait::async_trait]
+    impl IceSignaling for NoRemote {
+        async fn send_local(&mut self, _signal: ice::IceSignal) {}
+
+        async fn recv_remote(&mut self) -> Option<ice::IceSignal> {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn establish_falls_back_to_relay_when_ice_times_out() {
+        let (client, _server) = tokio::io::duplex(1024);
+        let ws = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
+        let selected = establish(
+            true,
+            NoRemote,
+            RelayTransport::new(ws),
+            AgentConfig::default(),
+            Duration::from_millis(20),
+        )
+        .await;
+        assert!(matches!(selected, AnyTransport::Relay(_)));
     }
 }

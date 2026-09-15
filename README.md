@@ -15,7 +15,16 @@ Runs over `wss://` on port **443** · **End-to-end encrypted** · The relay is a
 
 OpenDesk lets one device view and control another over the internet, through a relay server you host yourself. Frames and input are sealed on each endpoint with a key only the two peers hold, derived from a session password. The relay forwards bytes it cannot decrypt, so the encryption is end-to-end rather than only in transit.
 
-Each peer opens one outbound `wss://` connection on port 443. That gets through strict firewalls, corporate proxies, and VPN kill-switches, and it sits behind Traefik, Caddy, or Nginx with no custom ports.
+Each peer opens one outbound `wss://` connection on port 443. After SPAKE2 key
+confirmation, OpenDesk attempts a direct UDP path using ICE; if that fails, the
+same connection remains the encrypted relay fallback. No inbound ports or port
+forwarding are needed. The direct attempt requires outbound UDP; strict-UDP
+networks fall back to relay automatically.
+
+ICE uses Google Public STUN by default (`stun:stun.l.google.com:19302`) to find
+server-reflexive addresses. A self-hosted STUN service can be substituted in
+the host-core `AgentConfig.urls` configuration. STUN helps discover addresses;
+it is not a media relay and does not receive desktop contents.
 
 ## Why
 
@@ -31,6 +40,7 @@ OpenDesk is under active development. What works today:
 | Area | Status |
 |------|--------|
 | Relay over `wss://` :443 (blind pipe) | ✅ |
+| P2P-first ICE transport with relay fallback | ✅ |
 | End-to-end encryption (ChaCha20-Poly1305) | ✅ |
 | Password-authenticated key exchange (SPAKE2) | ✅ |
 | Screen capture + H.264 encode (macOS/Windows/Linux via `scap` + `openh264`) | ✅ |
@@ -94,6 +104,14 @@ cd viewer && npm install && npm run tauri dev
 - **Key agreement.** A password-authenticated exchange (SPAKE2) derives a fresh per-session key. A wrong password fails key confirmation, and nothing is decrypted.
 - **Blind relay.** The relay holds no keys and parses only the routing control message. Frames and input are opaque to it.
 - **Trust the client.** The viewer is a native Tauri app with a verifiable binary, which a server-served JavaScript client cannot match.
+
+### Checking the selected transport
+
+The host logs `INFO transport selected: direct` after successful ICE
+nomination, or `INFO transport selected: relay (ICE timeout)` when it falls
+back. The ordering is pairing → SPAKE2/key confirmation → ICE signaling over
+`Control::Ice` → transport selection → media, so media never starts before key
+confirmation.
 
 ## Roadmap
 
