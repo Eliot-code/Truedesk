@@ -156,7 +156,7 @@ where
         Duration::from_secs(3),
     )
     .await;
-    let transport = std::sync::Arc::new(tokio::sync::Mutex::new(transport));
+    let (mut transport_tx, mut transport_rx) = transport.into_split();
 
     let first_frame = loop {
         if let Some(frame) = capturer.next_frame() {
@@ -170,10 +170,9 @@ where
     let width = first_frame.width;
     let height = first_frame.height;
     let (input_tx, mut input_rx) = tokio::sync::mpsc::channel(64);
-    let input_transport = std::sync::Arc::clone(&transport);
     tokio::spawn(async move {
         loop {
-            let received = input_transport.lock().await.recv().await;
+            let received = transport_rx.recv().await;
             let Some((Tag::Input, body)) = received else {
                 break;
             };
@@ -206,7 +205,7 @@ where
                 let mut plaintext = encode::video_header(seq, frame.timestamp_us, encoded.keyframe, width, height);
                 plaintext.extend_from_slice(&encoded.data);
                 let sealed = sealer.seal(&plaintext);
-                transport.lock().await.send(Tag::Video, &sealed).await?;
+                transport_tx.send(Tag::Video, &sealed).await?;
                 seq += 1;
             }
         }

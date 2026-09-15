@@ -46,8 +46,18 @@ impl std::error::Error for TransportError {}
 /// A transport for sealed, tagged protocol frames.
 #[async_trait::async_trait]
 pub trait Transport {
-    async fn send(&mut self, tag: protocol::Tag, sealed: &[u8]) -> Result<(), TransportError>;
+    fn into_split(self) -> (Box<dyn TransportSender>, Box<dyn TransportReceiver>);
+}
 
+/// The independently owned sending half of a transport.
+#[async_trait::async_trait]
+pub trait TransportSender: Send {
+    async fn send(&mut self, tag: protocol::Tag, sealed: &[u8]) -> Result<(), TransportError>;
+}
+
+/// The independently owned receiving half of a transport.
+#[async_trait::async_trait]
+pub trait TransportReceiver: Send {
     async fn recv(&mut self) -> Option<(protocol::Tag, Vec<u8>)>;
 }
 
@@ -60,19 +70,12 @@ pub enum AnyTransport<S = tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStrea
 #[async_trait::async_trait]
 impl<S> Transport for AnyTransport<S>
 where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    async fn send(&mut self, tag: protocol::Tag, sealed: &[u8]) -> Result<(), TransportError> {
+    fn into_split(self) -> (Box<dyn TransportSender>, Box<dyn TransportReceiver>) {
         match self {
-            Self::Relay(transport) => transport.send(tag, sealed).await,
-            Self::Direct(transport) => transport.send(tag, sealed).await,
-        }
-    }
-
-    async fn recv(&mut self) -> Option<(protocol::Tag, Vec<u8>)> {
-        match self {
-            Self::Relay(transport) => transport.recv().await,
-            Self::Direct(transport) => transport.recv().await,
+            Self::Relay(transport) => transport.into_split(),
+            Self::Direct(transport) => transport.into_split(),
         }
     }
 }
@@ -91,7 +94,7 @@ pub async fn establish<S, R>(
 ) -> AnyTransport<R>
 where
     S: IceSignaling,
-    R: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
+    R: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     match establish_ice(agent_config, controlling, signaling, deadline).await {
         IceOutcome::Nominated(conn) => {
