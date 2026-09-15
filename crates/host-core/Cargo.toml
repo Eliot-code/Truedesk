@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+async-trait = "0.1"
 protocol = { path = "../protocol" }
 tokio = { workspace = true }
 tokio-tungstenite = "0.24"

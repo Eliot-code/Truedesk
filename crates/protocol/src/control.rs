@@ -6,6 +6,7 @@ pub enum Control {
     Register { peer_id: String, ver: u32 },
     Connect { target: String, ver: u32 },
     Paired { session: String, peer_role: String },
+    Ice { session: String, cand: String },
     Error { code: String },
     Bye { session: String },
 }
@@ -35,5 +36,25 @@ mod tests {
         let c = Control::Connect { target: "1".into(), ver: 1 };
         let json = String::from_utf8(c.to_bytes()).unwrap();
         assert!(json.contains("\"t\":\"connect\""));
+    }
+
+    #[test]
+    fn ice_roundtrips() {
+        let c = Control::Ice {
+            session: "s1".into(),
+            cand: "4257992714 1 udp 2130706431 10.2.0.2 57012 typ host".into(),
+        };
+        let bytes = c.to_bytes();
+        assert_eq!(Control::from_bytes(&bytes), Some(c));
+    }
+
+    #[test]
+    fn ice_uses_t_discriminator() {
+        let c = Control::Ice {
+            session: "s1".into(),
+            cand: "candidate".into(),
+        };
+        let json = String::from_utf8(c.to_bytes()).unwrap();
+        assert!(json.contains("\"t\":\"ice\""));
     }
 }
