@@ -10,6 +10,14 @@ export interface SessionStarted { role: "host" | "viewer"; remote_id: string }
 export interface SessionEnded { reason: string }
 export interface ErrorEvent { message: string }
 export interface StatusChanged { state: Status }
+export interface VideoFrame {
+  seq: number;
+  timestamp_us: number;
+  keyframe: boolean;
+  width: number;
+  height: number;
+  data: number[];
+}
 
 export const getIdentity = () => invoke<Identity>("get_identity");
 export const rotatePassword = () => invoke<{ password: string }>("rotate_password");
@@ -23,6 +31,7 @@ export const startHosting = () => invoke<void>("start_hosting");
 export const stopHosting = () => invoke<void>("stop_hosting");
 export const connect = (target_id: string, password: string) => invoke<void>("connect", { targetId: target_id, password });
 export const disconnect = () => invoke<void>("disconnect");
+export const sendInput = (bytes: Uint8Array) => invoke<void>("send_input", { bytes: Array.from(bytes) });
 
 const on = <T>(event: string, handler: (payload: T) => void): Promise<UnlistenFn> => listen<T>(event, ({ payload }) => handler(payload));
 export const onStatusChanged = (handler: (payload: StatusChanged) => void) => on("status_changed", handler);
@@ -30,3 +39,4 @@ export const onIncomingRequest = (handler: (payload: IncomingRequest) => void) =
 export const onSessionStarted = (handler: (payload: SessionStarted) => void) => on("session_started", handler);
 export const onSessionEnded = (handler: (payload: SessionEnded) => void) => on("session_ended", handler);
 export const onError = (handler: (payload: ErrorEvent) => void) => on("error", handler);
+export const onVideoFrame = (handler: (frame: VideoFrame) => void) => on("video_frame", handler);

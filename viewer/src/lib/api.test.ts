@@ -5,8 +5,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 // backend. Tauri v2 exposes Rust snake_case params to JS as camelCase, so
 // multi-word args must be passed as targetId/peerId — not target_id/peer_id.
 const invoke = vi.fn(() => Promise.resolve());
+const listen = vi.fn((_event: string, _handler: unknown) => Promise.resolve(vi.fn()));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
-vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
+vi.mock("@tauri-apps/api/event", () => ({ listen }));
 
 const api = await import("./api");
 
@@ -21,5 +22,16 @@ describe("api invoke payload keys (camelCase contract)", () => {
   it("respondToRequest passes peerId (not peer_id)", async () => {
     await api.respondToRequest("123456789", true, false);
     expect(invoke).toHaveBeenCalledWith("respond_to_request", { peerId: "123456789", allow: true, always: false });
+  });
+
+  it("sendInput passes raw bytes to the backend", async () => {
+    await api.sendInput(new Uint8Array([1, 2, 255]));
+    expect(invoke).toHaveBeenCalledWith("send_input", { bytes: [1, 2, 255] });
+  });
+
+  it("onVideoFrame listens to the backend event", async () => {
+    const handler = vi.fn();
+    await api.onVideoFrame(handler);
+    expect(listen).toHaveBeenCalledWith("video_frame", expect.any(Function));
   });
 });

@@ -3,27 +3,18 @@ mod permissions;
 
 use config::ConfigStore;
 use futures_util::StreamExt;
-use protocol::crypto::{Opener, Sealer};
 use protocol::{frame, Tag};
 use serde::Serialize;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
-use tokio::sync::oneshot;
-
-/// Handshake and session state. Secrets and protocol keys never cross into JS.
-#[derive(Default)]
-struct Session {
-    pake: Option<protocol::pake::PakeState>,
-    shared: Option<[u8; 32]>,
-    opener: Option<Opener>,
-    sealer: Option<Sealer>,
-}
+use tokio::sync::{mpsc, oneshot};
 
 struct RuntimeState {
     config: ConfigStore,
     password: Option<String>,
-    session: Session,
     host_thread: Option<HostThread>,
+    viewer_task: Option<tauri::async_runtime::JoinHandle<()>>,
+    viewer_input: Option<mpsc::Sender<Vec<u8>>>,
     pending_request: Option<oneshot::Sender<bool>>,
 }
 
@@ -78,6 +69,15 @@ struct SessionEnded {
 struct ErrorEvent {
     message: String,
 }
+#[derive(Serialize, Clone)]
+struct VideoFrame {
+    seq: u64,
+    timestamp_us: u32,
+    keyframe: bool,
+    width: u16,
+    height: u16,
+    data: Vec<u8>,
+}
 
 fn emit<T: Serialize + Clone>(app: &AppHandle, event: &str, payload: T) {
     let _ = app.emit(event, payload);
@@ -88,6 +88,16 @@ fn fresh_password() -> String {
 }
 fn current_password(state: &mut RuntimeState) -> String {
     state.password.get_or_insert_with(fresh_password).clone()
+}
+
+fn enqueue_input(sender: Option<mpsc::Sender<Vec<u8>>>, bytes: Vec<u8>) -> Result<(), String> {
+    sender
+        .ok_or_else(|| "no active viewer session".to_string())?
+        .try_send(bytes)
+        .map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => "viewer input queue is full".into(),
+            mpsc::error::TrySendError::Closed(_) => "viewer session is closed".into(),
+        })
 }
 
 #[tauri::command]
@@ -194,7 +204,7 @@ fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<()
             let Some((Tag::Control, body)) = frame::unwrap(&message) else {
                 return Err("invalid pairing message".into());
             };
-            let Some(protocol::control::Control::Paired { .. }) =
+            let Some(protocol::control::Control::Paired { session, .. }) =
                 protocol::control::Control::from_bytes(body)
             else {
                 return Err("invalid pairing message".into());
@@ -262,7 +272,7 @@ fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<()
                 let cleanup_app = host_app.clone();
                 runtime.block_on(async move {
                     let result = tokio::select! {
-                        result = host_core::roles::run_default_host_session(ws, &password) => Some(result),
+                        result = host_core::roles::run_default_host_session(ws, &password, &session) => Some(result),
                         _ = stop_rx => None,
                     };
                     if let Some(Err(error)) = &result {
@@ -319,7 +329,7 @@ fn connect(
     state: tauri::State<'_, AppState>,
     app: AppHandle,
     target_id: String,
-    _password: String,
+    password: String,
 ) -> Result<(), String> {
     if target_id.len() != 9 || !target_id.bytes().all(|b| b.is_ascii_digit()) {
         return Err("target ID must be 9 digits".into());
@@ -338,90 +348,144 @@ fn connect(
             state: "connecting",
         },
     );
-    emit(
-        &app,
-        "session_started",
-        SessionStarted {
-            role: "viewer",
-            remote_id: target_id,
-        },
-    );
+    let relay_url = state.0.lock().unwrap().config.config.relay_url.clone();
+    let target = target_id.clone();
+    let task_app = app.clone();
+    let task = tauri::async_runtime::spawn(async move {
+        let result = async {
+            let mut ws = host_core::relay_client::connect(&relay_url)
+                .await
+                .map_err(|error| error.to_string())?;
+            host_core::relay_client::connect_to(&mut ws, &target)
+                .await
+                .map_err(|error| error.to_string())?;
+
+            let Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(message))) =
+                ws.next().await
+            else {
+                return Err::<(), String>("relay closed while connecting".into());
+            };
+            let Some((Tag::Control, body)) = frame::unwrap(&message) else {
+                return Err("invalid pairing message".into());
+            };
+            let Some(protocol::control::Control::Paired { session, .. }) =
+                protocol::control::Control::from_bytes(body)
+            else {
+                return Err("invalid pairing message".into());
+            };
+
+            let (frame_tx, mut frame_rx) = mpsc::channel::<Vec<u8>>(64);
+            let (input_tx, input_rx) = mpsc::channel::<Vec<u8>>(256);
+            task_app.state::<AppState>().0.lock().unwrap().viewer_input = Some(input_tx);
+
+            let frame_app = task_app.clone();
+            tauri::async_runtime::spawn(async move {
+                while let Some(plaintext) = frame_rx.recv().await {
+                    if plaintext.len() < 18 {
+                        continue;
+                    }
+                    let seq = u64::from_be_bytes(plaintext[0..8].try_into().unwrap());
+                    let timestamp_us = u32::from_be_bytes(plaintext[8..12].try_into().unwrap());
+                    let _codec = plaintext[12];
+                    let flags = plaintext[13];
+                    let width = u16::from_be_bytes(plaintext[14..16].try_into().unwrap());
+                    let height = u16::from_be_bytes(plaintext[16..18].try_into().unwrap());
+                    emit(
+                        &frame_app,
+                        "video_frame",
+                        VideoFrame {
+                            seq,
+                            timestamp_us,
+                            keyframe: flags & 1 != 0,
+                            width,
+                            height,
+                            data: plaintext[18..].to_vec(),
+                        },
+                    );
+                }
+            });
+
+            emit(
+                &task_app,
+                "status_changed",
+                StatusEvent {
+                    state: "in_session",
+                },
+            );
+            emit(
+                &task_app,
+                "session_started",
+                SessionStarted {
+                    role: "viewer",
+                    remote_id: target.clone(),
+                },
+            );
+            host_core::roles::run_viewer_session(ws, &password, &session, frame_tx, input_rx).await
+        }
+        .await;
+
+        if let Err(message) = &result {
+            emit(
+                &task_app,
+                "error",
+                ErrorEvent {
+                    message: message.clone(),
+                },
+            );
+        }
+        let app_state = task_app.state::<AppState>();
+        let mut state = app_state.0.lock().unwrap();
+        state.viewer_input = None;
+        state.viewer_task = None;
+        drop(state);
+        emit(
+            &task_app,
+            "session_ended",
+            SessionEnded {
+                reason: if result.is_ok() {
+                    "ended".into()
+                } else {
+                    "error".into()
+                },
+            },
+        );
+        emit(
+            &task_app,
+            "status_changed",
+            StatusEvent { state: "offline" },
+        );
+    });
+    state.0.lock().unwrap().viewer_task = Some(task);
     Ok(())
 }
 #[tauri::command]
-fn disconnect(state: tauri::State<'_, AppState>, app: AppHandle) {
-    let host_thread = {
-        let mut s = state.0.lock().unwrap();
-        s.host_thread.take()
-    };
-    if let Some(host_thread) = host_thread {
-        let _ = host_thread.stop_tx.send(());
-        let _ = host_thread.join.join();
-    } else {
-        emit(
-            &app,
-            "session_ended",
-            SessionEnded {
-                reason: "disconnected".into(),
-            },
-        );
-        emit(&app, "status_changed", StatusEvent { state: "offline" });
-    }
+fn send_input(state: tauri::State<'_, AppState>, bytes: Vec<u8>) -> Result<(), String> {
+    let sender = state.0.lock().unwrap().viewer_input.clone();
+    enqueue_input(sender, bytes)
 }
 
 #[tauri::command]
-fn kex_start(state: tauri::State<'_, AppState>, password: String) -> Vec<u8> {
-    let (pk, msg) = protocol::pake::start(password.as_bytes(), false);
-    let mut s = state.0.lock().unwrap();
-    s.session.pake = Some(pk);
-    let mut body = Vec::with_capacity(1 + msg.len());
-    body.push(0x01);
-    body.extend_from_slice(&msg);
-    body
-}
-#[tauri::command]
-fn kex_finish(state: tauri::State<'_, AppState>, peer_msg: Vec<u8>) -> Result<Vec<u8>, String> {
-    let mut s = state.0.lock().unwrap();
-    let pk = s.session.pake.take().ok_or("kex not started")?;
-    let shared = protocol::pake::finish(pk, &peer_msg).ok_or("bad spake2 message")?;
-    let (send, recv) = protocol::kex::derive_keys(&shared, false);
-    s.session.opener = Some(Opener::new(recv));
-    s.session.sealer = Some(Sealer::new(send));
-    s.session.shared = Some(shared);
-    let confirm = protocol::pake::confirm_tag(&shared, false);
-    let mut body = Vec::with_capacity(1 + confirm.len());
-    body.push(0x02);
-    body.extend_from_slice(&confirm);
-    Ok(body)
-}
-#[tauri::command]
-fn kex_verify(state: tauri::State<'_, AppState>, peer_confirm: Vec<u8>) -> Result<(), String> {
-    let s = state.0.lock().unwrap();
-    let shared = s.session.shared.ok_or("no shared key")?;
-    if protocol::pake::verify_peer(&shared, true, &peer_confirm) {
-        Ok(())
-    } else {
-        Err("key confirmation failed — wrong password or tampering".into())
+fn disconnect(state: tauri::State<'_, AppState>, app: AppHandle) {
+    let (host_thread, viewer_task) = {
+        let mut s = state.0.lock().unwrap();
+        s.viewer_input = None;
+        (s.host_thread.take(), s.viewer_task.take())
+    };
+    if let Some(viewer_task) = viewer_task {
+        viewer_task.abort();
     }
-}
-#[tauri::command]
-fn open_frame(state: tauri::State<'_, AppState>, sealed: Vec<u8>) -> Result<Vec<u8>, String> {
-    let mut s = state.0.lock().unwrap();
-    s.session
-        .opener
-        .as_mut()
-        .ok_or("no session key")?
-        .open(&sealed)
-        .ok_or_else(|| "AEAD open failed".into())
-}
-#[tauri::command]
-fn seal_input(state: tauri::State<'_, AppState>, bytes: Vec<u8>) -> Result<Vec<u8>, String> {
-    let mut s = state.0.lock().unwrap();
-    s.session
-        .sealer
-        .as_mut()
-        .ok_or_else(|| "no session key".to_string())
-        .map(|sealer| sealer.seal(&bytes))
+    if let Some(host_thread) = host_thread {
+        let _ = host_thread.stop_tx.send(());
+        let _ = host_thread.join.join();
+    }
+    emit(
+        &app,
+        "session_ended",
+        SessionEnded {
+            reason: "disconnected".into(),
+        },
+    );
+    emit(&app, "status_changed", StatusEvent { state: "offline" });
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -437,8 +501,9 @@ pub fn run() {
             app.manage(AppState(Mutex::new(RuntimeState {
                 config,
                 password: None,
-                session: Session::default(),
                 host_thread: None,
+                viewer_task: None,
+                viewer_input: None,
                 pending_request: None,
             })));
             Ok(())
@@ -455,12 +520,28 @@ pub fn run() {
             stop_hosting,
             connect,
             disconnect,
-            kex_start,
-            kex_finish,
-            kex_verify,
-            open_frame,
-            seal_input
+            send_input
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn send_input_enqueues_bytes() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        enqueue_input(Some(sender), vec![1, 2, 3]).unwrap();
+        assert_eq!(receiver.try_recv().unwrap(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn send_input_requires_active_session() {
+        assert_eq!(
+            enqueue_input(None, vec![]),
+            Err("no active viewer session".into())
+        );
+    }
 }

@@ -16,10 +16,13 @@ Runs over `wss://` on port **443** · **End-to-end encrypted** · The relay is a
 OpenDesk lets one device view and control another over the internet, through a relay server you host yourself. Frames and input are sealed on each endpoint with a key only the two peers hold, derived from a session password. The relay forwards bytes it cannot decrypt, so the encryption is end-to-end rather than only in transit.
 
 Each peer opens one outbound `wss://` connection on port 443. After SPAKE2 key
-confirmation, OpenDesk attempts a direct UDP path using ICE; if that fails, the
-same connection remains the encrypted relay fallback. No inbound ports or port
+confirmation, both the host and viewer run the Rust transport: they gather and
+exchange ICE candidates and attempt a direct UDP path. If that fails, the same
+connection remains the encrypted relay fallback. No inbound ports or port
 forwarding are needed. The direct attempt requires outbound UDP; strict-UDP
-networks fall back to relay automatically.
+networks fall back to relay automatically. The relay assigns one pairing
+session ID and sends it in `Control::Paired` to both peers, so their ICE
+candidate messages are routed to the same session.
 
 ICE uses Google Public STUN by default (`stun:stun.l.google.com:19302`) to find
 server-reflexive addresses. A self-hosted STUN service can be substituted in
@@ -75,7 +78,10 @@ OpenDesk is under active development. What works today:
 - **`crates/protocol`**: shared wire types. Frame tags, control messages, ChaCha20-Poly1305 seal/open, SPAKE2 handshake, HKDF directional keys, input event codec.
 - **`crates/relay`**: axum WebSocket server. Pairs a host and viewer by ID and forwards sealed bytes it cannot read.
 - **`crates/host-agent`**: captures the screen, encodes H.264, seals and sends. Receives and injects remote input.
-- **`viewer/`**: Tauri desktop app. All crypto runs in the Rust backend; the WebView only renders (WebCodecs to canvas).
+- **`viewer/`**: Tauri desktop app. The Rust backend runs crypto and transport
+  (including ICE/direct UDP and relay fallback); the WebView only decodes with
+  WebCodecs and captures input. Direct P2P is bidirectional: the host sends
+  video and the viewer sends input over the selected transport.
 
 ## Build & run
 
@@ -112,6 +118,16 @@ nomination, or `INFO transport selected: relay (ICE timeout)` when it falls
 back. The ordering is pairing → SPAKE2/key confirmation → ICE signaling over
 `Control::Ice` → transport selection → media, so media never starts before key
 confirmation.
+
+### Manual end-to-end check
+
+Run two app instances, connect them by device ID and session password, and
+allow the incoming request on the host. Confirm that the remote screen renders
+and that mouse/keyboard input controls the host. Check both logs for
+`transport selected: direct` or `transport selected: relay`.
+
+Remaining deferrals are graceful relay control-channel shutdown after Direct is
+selected, audio, multi-monitor support, and file transfer.
 
 ## Roadmap
 

@@ -4,7 +4,7 @@ use crate::{
     capture::{ScapCapturer, ScreenCapturer},
     encode::{self, Encoder, H264Encoder},
     inject::{EnigoInjector, InputInjector, NoopInjector},
-    transport::{self, RelayIceSignaling, RelayTransport, Transport},
+    transport::{self, RelayIceSignaling, RelayTransport, Transport, TransportReceiver, TransportSender},
 };
 use futures_util::{SinkExt, StreamExt};
 use protocol::{
@@ -20,6 +20,11 @@ use tokio_tungstenite::{tungstenite::Message, WebSocketStream};
 
 const KEX_MSG: u8 = 0x01;
 const KEX_CONFIRM: u8 = 0x02;
+
+/// ICE role invariant: the host controls nomination and the viewer accepts it.
+/// These values MUST differ for ICE to nominate a connection.
+const HOST_ICE_CONTROLLING: bool = true;
+const VIEWER_ICE_CONTROLLING: bool = false;
 
 type SessionResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -83,6 +88,7 @@ fn even_frame(frame: encode::RawFrame) -> Option<encode::RawFrame> {
 pub async fn run_host_session<S, C, E, F, I>(
     mut ws: WebSocketStream<S>,
     password: &str,
+    ice_session: &str,
     mut capturer: C,
     encoder_factory: F,
     mut injector: I,
@@ -145,11 +151,9 @@ where
     let mut opener = Opener::new(recv_key);
 
     let relay = RelayTransport::new(ws);
-    // The current viewer/host session initiator is ICE-controlling; the peer
-    // must use controlled mode. The relay's pairing session is currently s1.
-    let signaling = RelayIceSignaling::new(&relay, "s1");
+    let signaling = RelayIceSignaling::new(&relay, ice_session);
     let transport = transport::establish(
-        true,
+        HOST_ICE_CONTROLLING,
         signaling,
         relay,
         transport::default_agent_config(),
@@ -212,10 +216,116 @@ where
     }
 }
 
+/// Run the viewer side of a transport after SPAKE2 and key confirmation.
+///
+/// The viewer is the ICE-controlled peer and therefore uses the opposite
+/// SPAKE2 role and directional keys from [`run_host_session`]. No media is
+/// established or processed until peer confirmation has succeeded.
+pub async fn run_viewer_session<S>(
+    mut ws: WebSocketStream<S>,
+    password: &str,
+    ice_session: &str,
+    frame_sink: tokio::sync::mpsc::Sender<Vec<u8>>,
+    input_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+) -> Result<(), String>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (state, my_msg) = protocol::pake::start(password.as_bytes(), false);
+    ws.send(Message::Binary(frame::wrap(
+        Tag::Kex,
+        &kex_body(KEX_MSG, &my_msg),
+    )))
+    .await
+    .map_err(|error| error.to_string())?;
+
+    let shared = loop {
+        match ws.next().await {
+            Some(Ok(Message::Binary(m))) => {
+                if let Some((Tag::Kex, body)) = frame::unwrap(&m) {
+                    if let Some((KEX_MSG, msg)) = parse_kex(body) {
+                        break protocol::pake::finish(state, msg)
+                            .ok_or_else(|| "invalid SPAKE2 message".to_owned())?;
+                    }
+                }
+            }
+            Some(Ok(_)) => {}
+            _ => return Err("connection closed during KEX".to_owned()),
+        }
+    };
+
+    let my_confirm = protocol::pake::confirm_tag(&shared, false);
+    ws.send(Message::Binary(frame::wrap(
+        Tag::Kex,
+        &kex_body(KEX_CONFIRM, &my_confirm),
+    )))
+    .await
+    .map_err(|error| error.to_string())?;
+    loop {
+        match ws.next().await {
+            Some(Ok(Message::Binary(m))) => {
+                if let Some((Tag::Kex, body)) = frame::unwrap(&m) {
+                    if let Some((KEX_CONFIRM, tag)) = parse_kex(body) {
+                        if !protocol::pake::verify_peer(&shared, true, tag) {
+                            return Err("key confirmation failed".to_owned());
+                        }
+                        break;
+                    }
+                }
+            }
+            Some(Ok(_)) => {}
+            _ => return Err("connection closed during KEX confirmation".to_owned()),
+        }
+    }
+
+    let (send_key, recv_key) = derive_keys(&shared, false);
+    let sealer = Sealer::new(send_key);
+    let opener = Opener::new(recv_key);
+
+    let relay = RelayTransport::new(ws);
+    let signaling = RelayIceSignaling::new(&relay, ice_session);
+    let transport = transport::establish(
+        VIEWER_ICE_CONTROLLING,
+        signaling,
+        relay,
+        transport::default_agent_config(),
+        Duration::from_secs(3),
+    )
+    .await;
+    let (transport_tx, transport_rx) = transport.into_split();
+
+    run_viewer_media_loop(transport_tx, transport_rx, frame_sink, input_rx, sealer, opener).await
+}
+
+async fn run_viewer_media_loop(
+    mut transport_tx: Box<dyn TransportSender>,
+    mut transport_rx: Box<dyn TransportReceiver>,
+    frame_sink: tokio::sync::mpsc::Sender<Vec<u8>>,
+    mut input_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    mut sealer: Sealer,
+    mut opener: Opener,
+) -> Result<(), String> {
+    loop {
+        tokio::select! {
+            received = transport_rx.recv() => {
+                let Some((Tag::Video, sealed)) = received else { return Ok(()) };
+                let Some(plaintext) = opener.open(&sealed) else { continue };
+                if frame_sink.send(plaintext).await.is_err() { return Ok(()) }
+            }
+            input = input_rx.recv() => {
+                let Some(bytes) = input else { return Ok(()) };
+                let sealed = sealer.seal(&bytes);
+                if transport_tx.send(Tag::Input, &sealed).await.is_err() { return Ok(()) }
+            }
+        }
+    }
+}
+
 /// Run a host session with the production capture, H.264 encoder, and Enigo injector.
 pub async fn run_default_host_session<S>(
     ws: WebSocketStream<S>,
     password: &str,
+    ice_session: &str,
 ) -> SessionResult<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -232,9 +342,68 @@ where
     run_host_session(
         ws,
         password,
+        ice_session,
         capturer,
         |w, h| H264Encoder::new(w, h, 15, 1_000_000),
         injector,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transport::DirectTransport;
+    use protocol::kex::derive_keys;
+    use std::sync::Arc;
+    use tokio::time::{timeout, Duration};
+    use webrtc_util::conn::conn_pipe::pipe;
+
+    #[test]
+    fn host_and_viewer_ice_roles_are_opposite() {
+        // Compile-time invariant: host and viewer MUST take opposite ICE
+        // controlling roles, or ICE never nominates a candidate pair.
+        const _: () = assert!(HOST_ICE_CONTROLLING != VIEWER_ICE_CONTROLLING);
+    }
+
+    #[tokio::test]
+    async fn viewer_media_loop_opens_video_and_seals_input() {
+        let shared = [23u8; 32];
+        let (viewer_send, viewer_recv) = derive_keys(&shared, false);
+        let (host_send, host_recv) = derive_keys(&shared, true);
+        let mut host_video_sealer = Sealer::new(host_send);
+        let mut host_input_opener = Opener::new(host_recv);
+
+        let (viewer_conn, host_conn) = pipe();
+        let (viewer_tx, viewer_rx) = DirectTransport::new(Arc::new(viewer_conn)).into_split();
+        let (mut host_tx, mut host_rx) = DirectTransport::new(Arc::new(host_conn)).into_split();
+        let (frame_sink, mut frames) = tokio::sync::mpsc::channel(1);
+        let (input_tx, input_rx) = tokio::sync::mpsc::channel(1);
+
+        let viewer = tokio::spawn(run_viewer_media_loop(
+            viewer_tx,
+            viewer_rx,
+            frame_sink,
+            input_rx,
+            Sealer::new(viewer_send),
+            Opener::new(viewer_recv),
+        ));
+
+        let video = b"18-byte-header-plus-h264".to_vec();
+        let sealed_video = host_video_sealer.seal(&video);
+        host_tx.send(Tag::Video, &sealed_video).await.unwrap();
+        assert_eq!(timeout(Duration::from_secs(1), frames.recv()).await.unwrap(), Some(video));
+
+        let input = b"encoded input event".to_vec();
+        input_tx.send(input.clone()).await.unwrap();
+        let (tag, sealed_input) = timeout(Duration::from_secs(1), host_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(tag, Tag::Input);
+        assert_eq!(host_input_opener.open(&sealed_input), Some(input));
+
+        drop(input_tx);
+        assert!(timeout(Duration::from_secs(1), viewer).await.unwrap().unwrap().is_ok());
+    }
 }

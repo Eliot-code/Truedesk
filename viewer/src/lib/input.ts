@@ -1,5 +1,3 @@
-import { Tag, wrap } from "./protocol";
-
 export type InputEvent =
   | { kind: "mouseMove"; x: number; y: number }
   | { kind: "mouseButton"; button: number; down: boolean }
@@ -80,62 +78,70 @@ function button(button: number): number | null {
   return null;
 }
 
-/** Capture canvas input, seal each event, and send it as a Tag.Input frame. */
+/** Capture canvas input and send raw InputEvent bytes in FIFO order. */
 export function attachInput(
-  ws: WebSocket,
   canvas: HTMLCanvasElement,
-  seal: (bytes: Uint8Array) => Promise<Uint8Array>,
-): void {
+  send: (bytes: Uint8Array) => Promise<void>,
+): () => void {
   if (canvas.tabIndex < 0) canvas.tabIndex = 0;
-
-  const sealAndSend = async (bytes: Uint8Array): Promise<void> => {
-    const sealed = await seal(bytes);
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(wrap(Tag.Input, sealed) as Uint8Array<ArrayBuffer>);
-    }
-  };
 
   let sendChain = Promise.resolve();
   const enqueue = (event: InputEvent): void => {
     const bytes = encodeInputEvent(event, timestampUs());
     sendChain = sendChain
-      .then(() => sealAndSend(bytes))
+      .then(() => send(bytes))
       .catch((error: unknown) => {
-        console.error("Failed to seal or send input event", error);
+        console.error("Failed to send input event", error);
       });
   };
 
-  canvas.addEventListener("mousemove", (event) => {
+  const onMouseMove = (event: MouseEvent): void => {
     const rect = canvas.getBoundingClientRect();
     enqueue({
       kind: "mouseMove",
       x: normalizedCoordinate(event.clientX, rect.left, rect.width),
       y: normalizedCoordinate(event.clientY, rect.top, rect.height),
     });
-  });
+  };
 
-  canvas.addEventListener("mousedown", (event) => {
+  const onMouseDown = (event: MouseEvent): void => {
     canvas.focus();
     const mapped = button(event.button);
     if (mapped !== null) enqueue({ kind: "mouseButton", button: mapped, down: true });
-  });
+  };
 
-  canvas.addEventListener("mouseup", (event) => {
+  const onMouseUp = (event: MouseEvent): void => {
     const mapped = button(event.button);
     if (mapped !== null) enqueue({ kind: "mouseButton", button: mapped, down: false });
-  });
+  };
 
-  canvas.addEventListener("wheel", (event) => {
+  const onWheel = (event: WheelEvent): void => {
     enqueue({ kind: "scroll", dx: Math.trunc(event.deltaX), dy: Math.trunc(event.deltaY) });
-  });
+  };
 
-  canvas.addEventListener("keydown", (event) => {
+  const onKeyDown = (event: KeyboardEvent): void => {
     event.preventDefault();
     enqueue({ kind: "key", code: event.keyCode >>> 0, down: true, modifiers: modifiers(event) });
-  });
+  };
 
-  canvas.addEventListener("keyup", (event) => {
+  const onKeyUp = (event: KeyboardEvent): void => {
     event.preventDefault();
     enqueue({ kind: "key", code: event.keyCode >>> 0, down: false, modifiers: modifiers(event) });
-  });
+  };
+
+  canvas.addEventListener("mousemove", onMouseMove);
+  canvas.addEventListener("mousedown", onMouseDown);
+  canvas.addEventListener("mouseup", onMouseUp);
+  canvas.addEventListener("wheel", onWheel);
+  canvas.addEventListener("keydown", onKeyDown);
+  canvas.addEventListener("keyup", onKeyUp);
+
+  return () => {
+    canvas.removeEventListener("mousemove", onMouseMove);
+    canvas.removeEventListener("mousedown", onMouseDown);
+    canvas.removeEventListener("mouseup", onMouseUp);
+    canvas.removeEventListener("wheel", onWheel);
+    canvas.removeEventListener("keydown", onKeyDown);
+    canvas.removeEventListener("keyup", onKeyUp);
+  };
 }

@@ -2,8 +2,10 @@
 
 OpenDesk is a unified Tauri desktop app: it can host incoming remote-control
 sessions and connect to another OpenDesk instance as a viewer. Cryptography,
-session keys, capture, and input injection stay in the Rust backend; the
-webview only renders the UI and sends user actions.
+session keys, and the full transport stay in the Rust backend. Both host and
+viewer gather/exchange ICE candidates and attempt direct UDP, falling back to
+the encrypted relay. The WebView only decodes video with WebCodecs and captures
+user input, making direct P2P bidirectional.
 
 ## Run
 
@@ -41,7 +43,8 @@ request before capture or input starts.
 4. On the host, verify the requester and select Allow.
 5. Confirm that the viewer sees the host screen and that mouse/keyboard input
    is delivered when the required permissions are granted.
-6. Select Disconnect and verify both instances return to Home.
+6. Check the logs for `transport selected: direct` or `transport selected:
+   relay`, then select Disconnect and verify both instances return to Home.
 
-The P2P transport and multi-region relay selection are future milestones;
-this integration uses the existing relay path.
+Remaining deferrals are graceful relay control-channel shutdown after Direct
+is selected, audio, multi-monitor support, and file transfer.

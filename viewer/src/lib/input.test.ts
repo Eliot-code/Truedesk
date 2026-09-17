@@ -14,30 +14,28 @@ describe("encodeInputEvent", () => {
 });
 
 describe("attachInput", () => {
-  it("sends sealed events in capture order when sealing resolves out of order", async () => {
+  it("sends events in capture order when sends resolve out of order", async () => {
     const listeners = new Map<string, EventListener>();
     const canvas = {
       tabIndex: -1,
       addEventListener: (type: string, listener: EventListener) => listeners.set(type, listener),
+      removeEventListener: () => {},
       focus: () => {},
       getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }),
     } as unknown as HTMLCanvasElement;
     const sent: number[] = [];
-    const ws = {
-      readyState: 1,
-      send: (frame: Uint8Array) => sent.push(frame[1]),
-    } as unknown as WebSocket;
-    let resolveFirst!: (sealed: Uint8Array) => void;
-    const firstSeal = new Promise<Uint8Array>((resolve) => {
+    let resolveFirst!: () => void;
+    const firstSend = new Promise<void>((resolve) => {
       resolveFirst = resolve;
     });
-    let sealCalls = 0;
-    const seal = () => {
-      sealCalls += 1;
-      return sealCalls === 1 ? firstSeal : Promise.resolve(new Uint8Array([sealCalls]));
+    let sendCalls = 0;
+    const send = () => {
+      sendCalls += 1;
+      sent.push(sendCalls);
+      return sendCalls === 1 ? firstSend : Promise.resolve();
     };
 
-    attachInput(ws, canvas, seal);
+    attachInput(canvas, send);
     const keydown = listeners.get("keydown")!;
     const keyup = listeners.get("keyup")!;
     keydown({ preventDefault: () => {}, keyCode: 65, shiftKey: false, ctrlKey: false, altKey: false, metaKey: false } as unknown as KeyboardEvent);
@@ -45,9 +43,9 @@ describe("attachInput", () => {
     keydown({ preventDefault: () => {}, keyCode: 66, shiftKey: false, ctrlKey: false, altKey: false, metaKey: false } as unknown as KeyboardEvent);
 
     await Promise.resolve();
-    expect(sealCalls).toBe(1);
-    expect(sent).toEqual([]);
-    resolveFirst(new Uint8Array([1]));
+    expect(sendCalls).toBe(1);
+    expect(sent).toEqual([1]);
+    resolveFirst();
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(sent).toEqual([1, 2, 3]);
