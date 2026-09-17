@@ -14,3 +14,8 @@ scap = "0.0.8"
 enigo = "0.2"
 webrtc-ice = "0.13"
 webrtc-util = "0.11"
+
+[dev-dependencies]
+relay = { path = "../relay" }
+tokio = { workspace = true, features = ["full"] }
+tokio-tungstenite = "0.24"
