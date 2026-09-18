@@ -8,3 +8,4 @@ pub mod kex;
 pub use kex::derive_keys;
 pub mod input;
 pub mod pake;
+pub mod filexfer;
