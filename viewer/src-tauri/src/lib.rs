@@ -3,9 +3,10 @@ mod permissions;
 
 use config::ConfigStore;
 use futures_util::StreamExt;
-use protocol::{frame, Tag};
+use host_core::filexfer::{ConsentDecision, FileReceiver, FileSink, FileSource, FileSender};
+use protocol::{crypto::{Opener, Sealer}, filexfer::FileMsg, frame, Tag};
 use serde::Serialize;
-use std::sync::Mutex;
+use std::{collections::HashMap, path::{Path, PathBuf}, sync::{Arc, Mutex}};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{mpsc, oneshot};
 
@@ -16,6 +17,9 @@ struct RuntimeState {
     viewer_task: Option<tauri::async_runtime::JoinHandle<()>>,
     viewer_input: Option<mpsc::Sender<Vec<u8>>>,
     pending_request: Option<oneshot::Sender<bool>>,
+    pending_file_requests: HashMap<u64, oneshot::Sender<bool>>,
+    file_outgoing: Option<mpsc::Sender<Vec<u8>>>,
+    file_sealer: Option<Arc<Mutex<Sealer>>>,
 }
 
 /// The host session owns Enigo, which is not `Send`. Keep the session and its
@@ -77,6 +81,192 @@ struct VideoFrame {
     width: u16,
     height: u16,
     data: Vec<u8>,
+}
+#[derive(Serialize, Clone)]
+#[allow(dead_code)]
+pub(crate) struct FileOffer {
+    id: u64,
+    name: String,
+    size: u64,
+    from: String,
+}
+#[derive(Serialize, Clone)]
+struct FileProgress {
+    id: u64,
+    transferred: u64,
+    total: u64,
+    direction: &'static str,
+}
+#[derive(Serialize, Clone)]
+struct FileDone {
+    id: u64,
+}
+#[derive(Serialize, Clone)]
+struct FileError {
+    id: u64,
+    message: String,
+}
+
+/// A FileChannel sink for the reliable relay side-channel. The session loop
+/// supplies the channel and session sealer when Task 5 keeps that relay alive.
+struct ReliableFileSink {
+    outgoing: mpsc::Sender<Vec<u8>>,
+    sealer: Arc<Mutex<Sealer>>,
+    offer_id: Option<oneshot::Sender<Result<u64, String>>>,
+    transfer_id: Arc<Mutex<Option<u64>>>,
+}
+
+#[async_trait::async_trait]
+impl FileSink for ReliableFileSink {
+    async fn send(&mut self, message: FileMsg) {
+        if let FileMsg::Offer { id, .. } = &message {
+            *self.transfer_id.lock().unwrap() = Some(*id);
+            if let Some(sender) = self.offer_id.take() {
+                let _ = sender.send(Ok(*id));
+            }
+        }
+        let plaintext = message.to_bytes();
+        let sealed = self.sealer.lock().unwrap().seal(&plaintext);
+        let _ = self.outgoing.send(frame::wrap(Tag::Data, &sealed)).await;
+    }
+}
+
+impl ReliableFileSink {
+    fn fail_before_offer(&mut self, error: &str) {
+        if let Some(sender) = self.offer_id.take() {
+            let _ = sender.send(Err(error.to_owned()));
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) struct ReliableFileSource {
+    incoming: mpsc::Receiver<Vec<u8>>,
+    opener: Arc<Mutex<Opener>>,
+}
+
+#[async_trait::async_trait]
+impl FileSource for ReliableFileSource {
+    async fn recv(&mut self) -> Option<FileMsg> {
+        while let Some(message) = self.incoming.recv().await {
+            let Some((Tag::Data, sealed)) = frame::unwrap(&message) else {
+                continue;
+            };
+            let plaintext = self.opener.lock().unwrap().open(sealed)?;
+            if let Some(message) = FileMsg::from_bytes(&plaintext) {
+                return Some(message);
+            }
+        }
+        None
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn downloads_dir() -> PathBuf {
+    if let Ok(path) = std::env::var("XDG_DOWNLOAD_DIR") {
+        if !path.trim().is_empty() {
+            return PathBuf::from(path);
+        }
+    }
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
+    home.map(|path| path.join("Downloads"))
+        .unwrap_or_else(|| PathBuf::from("Downloads"))
+}
+
+fn route_file_consent(
+    pending: &mut HashMap<u64, oneshot::Sender<bool>>,
+    id: u64,
+    accept: bool,
+) -> Result<(), String> {
+    pending
+        .remove(&id)
+        .ok_or_else(|| "no incoming file offer with that id".to_owned())?
+        .send(accept)
+        .map_err(|_| "incoming file offer expired".to_owned())
+}
+
+/// Start the receiver half once the session loop has a relay Data channel.
+/// Consent is awaited asynchronously before FileReceiver creates a temporary
+/// file, so no Tokio worker is blocked by the UI response.
+#[allow(dead_code)]
+pub(crate) fn spawn_file_receiver(
+    app: AppHandle,
+    incoming: mpsc::Receiver<Vec<u8>>,
+    opener: Arc<Mutex<Opener>>,
+    from: String,
+) {
+    tauri::async_runtime::spawn(async move {
+        let mut source = ReliableFileSource { incoming, opener };
+        let pending_app = app.clone();
+        let transfer_id = Arc::new(Mutex::new(None));
+        let progress_id = transfer_id.clone();
+        let offer_id = transfer_id.clone();
+        let result = FileReceiver::receive_with_async_consent(
+            &mut source,
+            &downloads_dir(),
+            move |offer| async move {
+                let FileMsg::Offer { id, name, size, .. } = offer else {
+                    return ConsentDecision::Reject;
+                };
+                *offer_id.lock().unwrap() = Some(id);
+                let (decision_tx, decision_rx) = oneshot::channel();
+                pending_app
+                    .state::<AppState>()
+                    .0
+                    .lock()
+                    .unwrap()
+                    .pending_file_requests
+                    .insert(id, decision_tx);
+                emit(
+                    &pending_app,
+                    "file_offer",
+                    FileOffer {
+                        id,
+                        name: name.clone(),
+                        size,
+                        from: from.clone(),
+                    },
+                );
+
+                match decision_rx.await.unwrap_or(false) {
+                    true => ConsentDecision::Accept,
+                    false => ConsentDecision::Reject,
+                }
+            },
+            {
+                let progress_app = app.clone();
+                move |transferred, total| {
+                    if let Some(id) = *progress_id.lock().unwrap() {
+                        emit(
+                            &progress_app,
+                            "file_progress",
+                            FileProgress {
+                                id,
+                                transferred,
+                                total,
+                                direction: "receive",
+                            },
+                        );
+                    }
+                }
+            },
+        )
+        .await;
+        if let Err(error) = result {
+            emit(
+                &app,
+                "file_error",
+                FileError {
+                    id: (*transfer_id.lock().unwrap()).unwrap_or(0),
+                    message: error.to_string(),
+                },
+            );
+        } else if let Some(id) = *transfer_id.lock().unwrap() {
+            emit(&app, "file_done", FileDone { id });
+        }
+    });
 }
 
 fn emit<T: Serialize + Clone>(app: &AppHandle, event: &str, payload: T) {
@@ -164,6 +354,84 @@ fn respond_to_request(
         .ok_or_else(|| "no incoming request".to_string())?
         .send(allow)
         .map_err(|_| "incoming request expired".into())
+}
+
+#[tauri::command]
+async fn send_file(
+    state: tauri::State<'_, AppState>,
+    app: AppHandle,
+    path: String,
+) -> Result<u64, String> {
+    let (outgoing, sealer) = {
+        let state = state.0.lock().unwrap();
+        (
+            state.file_outgoing.clone(),
+            state.file_sealer.clone(),
+        )
+    };
+    let outgoing = outgoing.ok_or_else(|| "no active reliable file channel".to_owned())?;
+    let sealer = sealer.ok_or_else(|| "file session keys are not ready".to_owned())?;
+    let (offer_tx, offer_rx) = oneshot::channel();
+    let task_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let transfer_id = Arc::new(Mutex::new(None));
+        let progress_id = transfer_id.clone();
+        let progress_app = task_app.clone();
+        let mut sink = ReliableFileSink {
+            outgoing,
+            sealer,
+            offer_id: Some(offer_tx),
+            transfer_id: transfer_id.clone(),
+        };
+        let result = FileSender::send(Path::new(&path), &mut sink, move |transferred, total| {
+            if let Some(id) = *progress_id.lock().unwrap() {
+                emit(
+                    &progress_app,
+                    "file_progress",
+                    FileProgress {
+                        id,
+                        transferred,
+                        total,
+                        direction: "send",
+                    },
+                );
+            }
+        })
+        .await;
+        if let Err(error) = result {
+            sink.fail_before_offer(&error.to_string());
+            let id = *transfer_id.lock().unwrap();
+            emit(
+                &task_app,
+                "file_error",
+                FileError {
+                    id: id.unwrap_or(0),
+                    message: error.to_string(),
+                },
+            );
+        } else if let Some(id) = *transfer_id.lock().unwrap() {
+            emit(&task_app, "file_done", FileDone { id });
+        }
+    });
+    // FileSender allocates the id when it emits Offer. Returning after that
+    // first sealed frame lets the UI track a transfer while chunks continue.
+    let id = offer_rx
+        .await
+        .map_err(|_| "file transfer stopped before sending its offer".to_owned())??;
+    Ok(id)
+}
+
+#[tauri::command]
+fn respond_file(
+    state: tauri::State<'_, AppState>,
+    id: u64,
+    accept: bool,
+) -> Result<(), String> {
+    route_file_consent(
+        &mut state.0.lock().unwrap().pending_file_requests,
+        id,
+        accept,
+    )
 }
 
 #[tauri::command]
@@ -505,6 +773,9 @@ pub fn run() {
                 viewer_task: None,
                 viewer_input: None,
                 pending_request: None,
+                pending_file_requests: HashMap::new(),
+                file_outgoing: None,
+                file_sealer: None,
             })));
             Ok(())
         })
@@ -520,7 +791,9 @@ pub fn run() {
             stop_hosting,
             connect,
             disconnect,
-            send_input
+            send_input,
+            send_file,
+            respond_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -543,5 +816,43 @@ mod tests {
             enqueue_input(None, vec![]),
             Err("no active viewer session".into())
         );
+    }
+
+    #[test]
+    fn file_consent_routes_by_transfer_id() {
+        let (sender, mut receiver) = oneshot::channel();
+        let mut pending = HashMap::new();
+        pending.insert(42, sender);
+
+        route_file_consent(&mut pending, 42, true).unwrap();
+
+        assert!(receiver.try_recv().unwrap());
+        assert!(route_file_consent(&mut pending, 42, false).is_err());
+    }
+
+    #[test]
+    fn reliable_file_adapter_uses_sealed_data_frames() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (outgoing, mut incoming) = mpsc::channel(1);
+            let key = [9u8; 32];
+            let transfer_id = Arc::new(Mutex::new(None));
+            let mut sink = ReliableFileSink {
+                outgoing,
+                sealer: Arc::new(Mutex::new(Sealer::new(key))),
+                offer_id: None,
+                transfer_id,
+            };
+            let message = FileMsg::Done { id: 7 };
+            sink.send(message.clone()).await;
+            let wire = incoming.recv().await.expect("data frame");
+            let (tag, sealed) = frame::unwrap(&wire).expect("tagged frame");
+            assert_eq!(tag, Tag::Data);
+            let mut opener = Opener::new(key);
+            assert_eq!(FileMsg::from_bytes(&opener.open(sealed).unwrap()), Some(message));
+        });
     }
 }

@@ -813,6 +813,7 @@ dependencies = [
  "protocol",
  "relay",
  "scap",
+ "sha2",
  "tokio",
  "tokio-tungstenite",
  "webrtc-ice",

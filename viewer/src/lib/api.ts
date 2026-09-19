@@ -18,6 +18,10 @@ export interface VideoFrame {
   height: number;
   data: number[];
 }
+export interface FileOffer { id: number; name: string; size: number; from: string }
+export interface FileProgress { id: number; transferred: number; total: number; direction: "send" | "receive" | string }
+export interface FileDone { id: number }
+export interface FileError { id: number; message: string }
 
 export const getIdentity = () => invoke<Identity>("get_identity");
 export const rotatePassword = () => invoke<{ password: string }>("rotate_password");
@@ -32,6 +36,8 @@ export const stopHosting = () => invoke<void>("stop_hosting");
 export const connect = (target_id: string, password: string) => invoke<void>("connect", { targetId: target_id, password });
 export const disconnect = () => invoke<void>("disconnect");
 export const sendInput = (bytes: Uint8Array) => invoke<void>("send_input", { bytes: Array.from(bytes) });
+export const sendFile = (path: string) => invoke<number>("send_file", { path });
+export const respondFile = (id: number, accept: boolean) => invoke<void>("respond_file", { id, accept });
 
 const on = <T>(event: string, handler: (payload: T) => void): Promise<UnlistenFn> => listen<T>(event, ({ payload }) => handler(payload));
 export const onStatusChanged = (handler: (payload: StatusChanged) => void) => on("status_changed", handler);
@@ -40,3 +46,7 @@ export const onSessionStarted = (handler: (payload: SessionStarted) => void) => 
 export const onSessionEnded = (handler: (payload: SessionEnded) => void) => on("session_ended", handler);
 export const onError = (handler: (payload: ErrorEvent) => void) => on("error", handler);
 export const onVideoFrame = (handler: (frame: VideoFrame) => void) => on("video_frame", handler);
+export const onFileOffer = (handler: (payload: FileOffer) => void) => on("file_offer", handler);
+export const onFileProgress = (handler: (payload: FileProgress) => void) => on("file_progress", handler);
+export const onFileDone = (handler: (payload: FileDone) => void) => on("file_done", handler);
+export const onFileError = (handler: (payload: FileError) => void) => on("file_error", handler);

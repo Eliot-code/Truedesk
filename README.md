@@ -49,7 +49,8 @@ OpenDesk is under active development. What works today:
 | Screen capture + H.264 encode (macOS/Windows/Linux via `scap` + `openh264`) | ✅ |
 | Remote input: mouse and keyboard (via `enigo`) | 🚧 in progress |
 | Desktop UI / app shell (ID, connect, accept dialog, permissions) | 🗺️ planned |
-| Address book · unattended access · file transfer · 2FA | 🗺️ planned |
+| File-transfer protocol, hashing, consent UI, and backend adapters | 🚧 staged; relay session wiring pending |
+| Address book · unattended access · 2FA | 🗺️ planned |
 
 > **PoC note:** connection ID and password are currently hard-coded defaults; screen capture is verified on macOS (Windows/Linux code-complete, not yet runtime-tested). Software H.264 for now; hardware encoders slot in behind a trait later.
 
@@ -126,8 +127,28 @@ allow the incoming request on the host. Confirm that the remote screen renders
 and that mouse/keyboard input controls the host. Check both logs for
 `transport selected: direct` or `transport selected: relay`.
 
-Remaining deferrals are graceful relay control-channel shutdown after Direct is
-selected, audio, multi-monitor support, and file transfer.
+### File transfer
+
+The file-transfer feature supports sending and receiving individual files during
+a session, with an incoming consent prompt, bounded streaming to the recipient's
+OS Downloads directory, and SHA-256 verification before a file is finalized.
+Filenames are sanitized and concurrent transfers reserve unique final paths.
+File messages are sealed end-to-end and are designed to use the reliable relay
+WebSocket path, never the lossy direct-UDP media path.
+
+The protocol, streaming/hash/consent core, Tauri commands/events, and session UI
+are present. Live session wiring is not complete yet: after ICE selects Direct,
+`host-core::transport::establish` consumes the relay socket and the media loops
+only retain the selected transport. The remaining work is to retain a relay
+socket for the whole session, split its WebSocket into one writer and reader per
+peer, and demultiplex incoming frames: `Tag::Data` always goes to the file
+receiver, while `Tag::Video`/`Tag::Input` go to the media transport only when
+media uses the relay. The Tauri file sender/receiver adapters are ready to attach
+to those channels. Until that demux is added, the UI reports that no reliable
+file channel is active.
+
+Remaining deferrals are the relay data demux/control-channel lifetime work,
+audio, and multi-monitor support.
 
 ## Roadmap
 
@@ -135,7 +156,7 @@ selected, audio, multi-monitor support, and file transfer.
 - [ ] Desktop app shell: ID display, connect screen, incoming-request accept dialog, permission onboarding, session toolbar
 - [ ] Hardware-accelerated encoders (VideoToolbox / NVENC / QSV)
 - [ ] Address book, unattended access, 2FA
-- [ ] File transfer, clipboard sync, multi-monitor
+- [ ] Complete live relay data demux for file transfer; clipboard sync, multi-monitor
 - [ ] Audio
 
 ## Contributing

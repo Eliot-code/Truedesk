@@ -2,13 +2,19 @@
 import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { onVideoFrame, sendInput, decode } = vi.hoisted(() => ({
+const { onVideoFrame, onFileOffer, onFileProgress, onFileDone, onFileError, sendFile, respondFile, sendInput, decode } = vi.hoisted(() => ({
   onVideoFrame: vi.fn(),
+  onFileOffer: vi.fn(() => Promise.resolve(vi.fn())),
+  onFileProgress: vi.fn(() => Promise.resolve(vi.fn())),
+  onFileDone: vi.fn(() => Promise.resolve(vi.fn())),
+  onFileError: vi.fn(() => Promise.resolve(vi.fn())),
+  sendFile: vi.fn(),
+  respondFile: vi.fn(),
   sendInput: vi.fn<(bytes: Uint8Array) => Promise<void>>(() => Promise.resolve()),
   decode: vi.fn(),
 }));
 
-vi.mock("../lib/api", () => ({ onVideoFrame, sendInput }));
+vi.mock("../lib/api", () => ({ onVideoFrame, onFileOffer, onFileProgress, onFileDone, onFileError, sendFile, respondFile, sendInput }));
 vi.mock("../lib/decode", () => ({ makeDecoder: vi.fn(() => decode) }));
 
 import Session from "./Session";
@@ -17,6 +23,10 @@ describe("Session viewer transport", () => {
   afterEach(() => {
     cleanup();
     onVideoFrame.mockReset();
+    onFileOffer.mockReset().mockReturnValue(Promise.resolve(vi.fn()));
+    onFileProgress.mockReset().mockReturnValue(Promise.resolve(vi.fn()));
+    onFileDone.mockReset().mockReturnValue(Promise.resolve(vi.fn()));
+    onFileError.mockReset().mockReturnValue(Promise.resolve(vi.fn()));
     sendInput.mockClear();
     decode.mockClear();
   });
