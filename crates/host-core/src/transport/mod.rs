@@ -3,10 +3,12 @@
 pub mod direct;
 pub mod ice;
 pub mod relay;
+pub mod reliable;
 
 pub use direct::DirectTransport;
 pub use ice::RelayIceSignaling;
 pub use relay::RelayTransport;
+pub use reliable::{ReliableChannel, ReliableSender};
 
 use ice::{establish_ice, IceOutcome, IceSignaling};
 use std::time::Duration;
@@ -131,7 +133,10 @@ mod tests {
         let selected = establish(
             true,
             NoRemote,
-            RelayTransport::new(ws),
+            {
+                let mut channel = ReliableChannel::spawn(ws);
+                RelayTransport::<tokio::io::DuplexStream>::new(channel.sender(), channel.take_media_rx().unwrap())
+            },
             AgentConfig::default(),
             Duration::from_millis(20),
         )

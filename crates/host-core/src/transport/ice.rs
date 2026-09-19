@@ -2,14 +2,12 @@
 //!
 //! ICE candidate gathering, nomination, and relay signaling.
 
-use std::sync::Arc;
 use std::time::Duration;
 use std::{future::Future, pin::Pin};
 
-use futures_util::{SinkExt, StreamExt};
+use super::ReliableSender;
+use std::sync::Arc;
 use tokio::sync::mpsc;
-use tokio::sync::Mutex;
-use tokio_tungstenite::{tungstenite::Message, WebSocketStream};
 use webrtc_ice::agent::{agent_config::AgentConfig, Agent};
 use webrtc_ice::candidate::candidate_base::unmarshal_candidate;
 use webrtc_ice::candidate::Candidate;
@@ -36,21 +34,22 @@ pub trait IceSignaling: Send {
 ///
 /// Credentials use the wire convention `cred:<ufrag>:<pwd>` in the existing
 /// `Control::Ice.cand` field. ICE signaling is only read between SPAKE2 key
-/// confirmation and media transport selection; after timeout, the shared
-/// WebSocket is used by `RelayTransport` again.
+/// confirmation and media transport selection; after timeout, the same
+/// reliable channel remains available to relay media and session data.
 pub struct RelayIceSignaling<S> {
-    ws: Arc<Mutex<WebSocketStream<S>>>,
+    sender: ReliableSender,
+    control_rx: mpsc::Receiver<Vec<u8>>,
     session: String,
+    _stream: std::marker::PhantomData<S>,
 }
 
 impl<S> RelayIceSignaling<S> {
-    pub(crate) fn new(
-        relay: &crate::transport::RelayTransport<S>,
-        session: impl Into<String>,
-    ) -> Self {
+    pub(crate) fn new(sender: ReliableSender, control_rx: mpsc::Receiver<Vec<u8>>, session: impl Into<String>) -> Self {
         Self {
-            ws: relay.shared_socket(),
+            sender,
+            control_rx,
             session: session.into(),
+            _stream: std::marker::PhantomData,
         }
     }
 }
@@ -87,31 +86,20 @@ fn decode_control(session: &str, body: &[u8]) -> Option<IceSignal> {
 #[async_trait::async_trait]
 impl<S> IceSignaling for RelayIceSignaling<S>
 where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
+    S: Send,
 {
     async fn send_local(&mut self, signal: IceSignal) {
         let control = protocol::control::Control::Ice {
             session: self.session.clone(),
             cand: encode_signal(&signal),
         };
-        let mut ws = self.ws.lock().await;
-        let _ = ws
-            .send(Message::Binary(protocol::frame::wrap(
-                protocol::Tag::Control,
-                &control.to_bytes(),
-            )))
-            .await;
+        let _ = self.sender.send_frame(protocol::Tag::Control, &control.to_bytes()).await;
     }
 
     async fn recv_remote(&mut self) -> Option<IceSignal> {
-        let mut ws = self.ws.lock().await;
-        while let Some(message) = ws.next().await {
-            if let Ok(Message::Binary(bytes)) = message {
-                if let Some((protocol::Tag::Control, body)) = protocol::frame::unwrap(&bytes) {
-                    if let Some(signal) = decode_control(&self.session, body) {
-                        return Some(signal);
-                    }
-                }
+        while let Some(body) = self.control_rx.recv().await {
+            if let Some(signal) = decode_control(&self.session, &body) {
+                return Some(signal);
             }
         }
         None

@@ -3,7 +3,7 @@ mod permissions;
 
 use config::ConfigStore;
 use futures_util::StreamExt;
-use host_core::filexfer::{ConsentDecision, FileReceiver, FileSink, FileSource, FileSender};
+use host_core::{filexfer::{ConsentDecision, FileReceiver, FileSink, FileSource, FileSender}, roles::DataHandle, transport::reliable::ReliableSender};
 use protocol::{crypto::{Opener, Sealer}, filexfer::FileMsg, frame, Tag};
 use serde::Serialize;
 use std::{collections::HashMap, path::{Path, PathBuf}, sync::{Arc, Mutex}};
@@ -18,7 +18,7 @@ struct RuntimeState {
     viewer_input: Option<mpsc::Sender<Vec<u8>>>,
     pending_request: Option<oneshot::Sender<bool>>,
     pending_file_requests: HashMap<u64, oneshot::Sender<bool>>,
-    file_outgoing: Option<mpsc::Sender<Vec<u8>>>,
+    file_outgoing: Option<ReliableSender>,
     file_sealer: Option<Arc<Mutex<Sealer>>>,
 }
 
@@ -107,10 +107,9 @@ struct FileError {
     message: String,
 }
 
-/// A FileChannel sink for the reliable relay side-channel. The session loop
-/// supplies the channel and session sealer when Task 5 keeps that relay alive.
+/// A FileSink backed by the session's reliable, sealed Data channel.
 struct ReliableFileSink {
-    outgoing: mpsc::Sender<Vec<u8>>,
+    outgoing: ReliableSender,
     sealer: Arc<Mutex<Sealer>>,
     offer_id: Option<oneshot::Sender<Result<u64, String>>>,
     transfer_id: Arc<Mutex<Option<u64>>>,
@@ -127,7 +126,7 @@ impl FileSink for ReliableFileSink {
         }
         let plaintext = message.to_bytes();
         let sealed = self.sealer.lock().unwrap().seal(&plaintext);
-        let _ = self.outgoing.send(frame::wrap(Tag::Data, &sealed)).await;
+        let _ = self.outgoing.send_frame(Tag::Data, &sealed).await;
     }
 }
 
@@ -139,7 +138,6 @@ impl ReliableFileSink {
     }
 }
 
-#[allow(dead_code)]
 pub(crate) struct ReliableFileSource {
     incoming: mpsc::Receiver<Vec<u8>>,
     opener: Arc<Mutex<Opener>>,
@@ -149,10 +147,9 @@ pub(crate) struct ReliableFileSource {
 impl FileSource for ReliableFileSource {
     async fn recv(&mut self) -> Option<FileMsg> {
         while let Some(message) = self.incoming.recv().await {
-            let Some((Tag::Data, sealed)) = frame::unwrap(&message) else {
+            let Some(plaintext) = self.opener.lock().unwrap().open(&message) else {
                 continue;
             };
-            let plaintext = self.opener.lock().unwrap().open(sealed)?;
             if let Some(message) = FileMsg::from_bytes(&plaintext) {
                 return Some(message);
             }
@@ -161,7 +158,6 @@ impl FileSource for ReliableFileSource {
     }
 }
 
-#[allow(dead_code)]
 pub(crate) fn downloads_dir() -> PathBuf {
     if let Ok(path) = std::env::var("XDG_DOWNLOAD_DIR") {
         if !path.trim().is_empty() {
@@ -190,7 +186,6 @@ fn route_file_consent(
 /// Start the receiver half once the session loop has a relay Data channel.
 /// Consent is awaited asynchronously before FileReceiver creates a temporary
 /// file, so no Tokio worker is blocked by the UI response.
-#[allow(dead_code)]
 pub(crate) fn spawn_file_receiver(
     app: AppHandle,
     incoming: mpsc::Receiver<Vec<u8>>,
@@ -271,6 +266,24 @@ pub(crate) fn spawn_file_receiver(
 
 fn emit<T: Serialize + Clone>(app: &AppHandle, event: &str, payload: T) {
     let _ = app.emit(event, payload);
+}
+
+fn activate_data_channel(app: &AppHandle, handle: DataHandle, from: String) {
+    let DataHandle { sender, receiver, sealer, opener } = handle;
+    let state = app.state::<AppState>();
+    let mut state = state.0.lock().unwrap();
+    state.file_outgoing = Some(sender);
+    state.file_sealer = Some(Arc::new(Mutex::new(sealer)));
+    drop(state);
+    spawn_file_receiver(app.clone(), receiver, Arc::new(Mutex::new(opener)), from);
+}
+
+fn clear_data_channel(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let mut state = state.0.lock().unwrap();
+    state.file_outgoing = None;
+    state.file_sealer = None;
+    state.pending_file_requests.clear();
 }
 fn fresh_password() -> String {
     use rand::Rng;
@@ -365,8 +378,8 @@ async fn send_file(
     let (outgoing, sealer) = {
         let state = state.0.lock().unwrap();
         (
-            state.file_outgoing.clone(),
-            state.file_sealer.clone(),
+        state.file_outgoing.clone(),
+        state.file_sealer.clone(),
         )
     };
     let outgoing = outgoing.ok_or_else(|| "no active reliable file channel".to_owned())?;
@@ -539,9 +552,26 @@ fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<()
 
                 let cleanup_app = host_app.clone();
                 runtime.block_on(async move {
+                    let (data_ready_tx, data_ready_rx) = oneshot::channel();
+                    let mut stop_rx = stop_rx;
+                    let mut session = Box::pin(host_core::roles::run_default_host_session_with_data(
+                        ws, &password, &session, data_ready_tx,
+                    ));
                     let result = tokio::select! {
-                        result = host_core::roles::run_default_host_session(ws, &password, &session) => Some(result),
-                        _ = stop_rx => None,
+                        handle = data_ready_rx => {
+                            match handle {
+                                Ok(handle) => {
+                                    activate_data_channel(&host_app, handle, "unknown".into());
+                                    tokio::select! {
+                                        result = &mut session => Some(result),
+                                        _ = &mut stop_rx => None,
+                                    }
+                                }
+                                Err(_) => Some(Err("session ended before the data channel was ready".into())),
+                            }
+                        }
+                        result = &mut session => Some(result),
+                        _ = &mut stop_rx => None,
                     };
                     if let Some(Err(error)) = &result {
                         emit(&host_app, "error", ErrorEvent { message: error.to_string() });
@@ -553,6 +583,7 @@ fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<()
                             reason: if result.is_some() { "host session ended".into() } else { "disconnected".into() },
                         },
                     );
+                    clear_data_channel(&host_app);
                     emit(&host_app, "status_changed", StatusEvent { state: "offline" });
                 });
 
@@ -688,7 +719,31 @@ fn connect(
                     remote_id: target.clone(),
                 },
             );
-            host_core::roles::run_viewer_session(ws, &password, &session, frame_tx, input_rx).await
+            let (data_ready_tx, data_ready_rx) = oneshot::channel();
+            let session_task = tauri::async_runtime::spawn(async move {
+                host_core::roles::run_viewer_session_with_data(
+                    ws,
+                    &password,
+                    &session,
+                    frame_tx,
+                    input_rx,
+                    Some(data_ready_tx),
+                )
+                .await
+            });
+            match data_ready_rx.await {
+                Ok(handle) => {
+                    activate_data_channel(&task_app, handle, target.clone());
+                    match session_task.await {
+                        Ok(result) => result,
+                        Err(error) => Err(format!("viewer session task failed: {error}")),
+                    }
+                }
+                Err(_) => match session_task.await {
+                    Ok(result) => result,
+                    Err(error) => Err(format!("viewer session task failed: {error}")),
+                },
+            }
         }
         .await;
 
@@ -705,6 +760,9 @@ fn connect(
         let mut state = app_state.0.lock().unwrap();
         state.viewer_input = None;
         state.viewer_task = None;
+        state.file_outgoing = None;
+        state.file_sealer = None;
+        state.pending_file_requests.clear();
         drop(state);
         emit(
             &task_app,
@@ -831,28 +889,22 @@ mod tests {
     }
 
     #[test]
-    fn reliable_file_adapter_uses_sealed_data_frames() {
+    fn reliable_file_source_opens_sealed_data_bodies() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
         runtime.block_on(async {
-            let (outgoing, mut incoming) = mpsc::channel(1);
+            let (outgoing, incoming) = mpsc::channel::<Vec<u8>>(1);
             let key = [9u8; 32];
-            let transfer_id = Arc::new(Mutex::new(None));
-            let mut sink = ReliableFileSink {
-                outgoing,
-                sealer: Arc::new(Mutex::new(Sealer::new(key))),
-                offer_id: None,
-                transfer_id,
-            };
             let message = FileMsg::Done { id: 7 };
-            sink.send(message.clone()).await;
-            let wire = incoming.recv().await.expect("data frame");
-            let (tag, sealed) = frame::unwrap(&wire).expect("tagged frame");
-            assert_eq!(tag, Tag::Data);
-            let mut opener = Opener::new(key);
-            assert_eq!(FileMsg::from_bytes(&opener.open(sealed).unwrap()), Some(message));
+            let mut sealer = Sealer::new(key);
+            outgoing.send(sealer.seal(&message.to_bytes())).await.unwrap();
+            let mut source = ReliableFileSource {
+                incoming,
+                opener: Arc::new(Mutex::new(Opener::new(key))),
+            };
+            assert_eq!(source.recv().await, Some(message));
         });
     }
 }

@@ -4,19 +4,18 @@ use crate::{
     capture::{ScapCapturer, ScreenCapturer},
     encode::{self, Encoder, H264Encoder},
     inject::{EnigoInjector, InputInjector, NoopInjector},
-    transport::{self, RelayIceSignaling, RelayTransport, Transport, TransportReceiver, TransportSender},
+    transport::{self, RelayIceSignaling, RelayTransport, ReliableChannel, Transport, TransportReceiver, TransportSender},
 };
-use futures_util::{SinkExt, StreamExt};
 use protocol::{
     crypto::{Opener, Sealer},
-    frame,
     input::InputEvent,
     kex::derive_keys,
     Tag,
 };
 use std::{error::Error, fmt::Display, time::Duration};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_tungstenite::{tungstenite::Message, WebSocketStream};
+use tokio::sync::{mpsc, oneshot};
+use tokio_tungstenite::WebSocketStream;
 
 const KEX_MSG: u8 = 0x01;
 const KEX_CONFIRM: u8 = 0x02;
@@ -48,6 +47,23 @@ fn kex_body(sub: u8, payload: &[u8]) -> Vec<u8> {
 fn parse_kex(body: &[u8]) -> Option<(u8, &[u8])> {
     body.split_first().map(|(s, rest)| (*s, rest))
 }
+
+/// Live reliable session data handle. The payloads remain sealed; Task 3 owns
+/// the protocol-level sealing/opening and file-transfer dispatch.
+pub struct DataHandle {
+    pub sender: transport::reliable::ReliableSender,
+    pub receiver: mpsc::Receiver<Vec<u8>>,
+    pub sealer: Sealer,
+    pub opener: Opener,
+}
+
+impl DataHandle {
+    pub async fn send_data(&self, sealed: &[u8]) -> Result<(), transport::TransportError> {
+        self.sender.send_frame(Tag::Data, sealed).await
+    }
+}
+
+async fn recv_control(rx: &mut mpsc::Receiver<Vec<u8>>) -> Option<Vec<u8>> { rx.recv().await }
 
 fn even_frame(frame: encode::RawFrame) -> Option<encode::RawFrame> {
     let width = frame.width & !1;
@@ -86,12 +102,12 @@ fn even_frame(frame: encode::RawFrame) -> Option<encode::RawFrame> {
 /// frame. The session performs SPAKE2 confirmation before starting either
 /// capture or input injection, then runs both directions concurrently.
 pub async fn run_host_session<S, C, E, F, I>(
-    mut ws: WebSocketStream<S>,
+    ws: WebSocketStream<S>,
     password: &str,
     ice_session: &str,
-    mut capturer: C,
+    capturer: C,
     encoder_factory: F,
-    mut injector: I,
+    injector: I,
 ) -> SessionResult<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -100,58 +116,57 @@ where
     F: FnOnce(u16, u16) -> E,
     I: InputInjector + 'static,
 {
+    run_host_session_with_data(ws, password, ice_session, capturer, encoder_factory, injector, None).await
+}
+
+pub async fn run_host_session_with_data<S, C, E, F, I>(
+    ws: WebSocketStream<S>, password: &str, ice_session: &str, mut capturer: C,
+    encoder_factory: F, mut injector: I, data_ready: Option<oneshot::Sender<DataHandle>>,
+) -> SessionResult<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    C: ScreenCapturer + Send + 'static,
+    E: Encoder + Send + 'static,
+    F: FnOnce(u16, u16) -> E,
+    I: InputInjector + 'static,
+{
+    let mut reliable = ReliableChannel::spawn(ws);
+    let sender = reliable.sender();
+    let mut control_rx = reliable.take_control_rx().ok_or(SessionError("control receiver unavailable"))?;
+    let data_rx = reliable.take_data_rx().ok_or(SessionError("data receiver unavailable"))?;
     let (state, my_msg) = protocol::pake::start(password.as_bytes(), true);
-    ws.send(Message::Binary(frame::wrap(
-        Tag::Kex,
-        &kex_body(KEX_MSG, &my_msg),
-    )))
-    .await?;
+    sender.send_frame(Tag::Kex, &kex_body(KEX_MSG, &my_msg)).await?;
     let shared = loop {
-        match ws.next().await {
-            Some(Ok(Message::Binary(m))) => {
-                if let Some((Tag::Kex, body)) = frame::unwrap(&m) {
-                    if let Some((KEX_MSG, msg)) = parse_kex(body) {
-                        break protocol::pake::finish(state, msg)
-                            .ok_or(SessionError("invalid SPAKE2 message"))?;
-                    }
-                }
-            }
-            Some(Ok(_)) => {}
-            _ => return Err(Box::new(SessionError("connection closed during KEX"))),
+        match recv_control(&mut control_rx).await {
+            Some(body) => if let Some((KEX_MSG, msg)) = parse_kex(&body) {
+                break protocol::pake::finish(state, msg).ok_or(SessionError("invalid SPAKE2 message"))?;
+            },
+            None => return Err(Box::new(SessionError("connection closed during KEX"))),
         }
     };
     let my_confirm = protocol::pake::confirm_tag(&shared, true);
-    ws.send(Message::Binary(frame::wrap(
-        Tag::Kex,
-        &kex_body(KEX_CONFIRM, &my_confirm),
-    )))
-    .await?;
+    sender.send_frame(Tag::Kex, &kex_body(KEX_CONFIRM, &my_confirm)).await?;
     loop {
-        match ws.next().await {
-            Some(Ok(Message::Binary(m))) => {
-                if let Some((Tag::Kex, body)) = frame::unwrap(&m) {
-                    if let Some((KEX_CONFIRM, tag)) = parse_kex(body) {
-                        if !protocol::pake::verify_peer(&shared, false, tag) {
-                            return Err(Box::new(SessionError("key confirmation failed")));
-                        }
-                        break;
-                    }
-                }
-            }
-            Some(Ok(_)) => {}
-            _ => {
-                return Err(Box::new(SessionError(
-                    "connection closed during KEX confirmation",
-                )))
-            }
+        match recv_control(&mut control_rx).await {
+            Some(body) => if let Some((KEX_CONFIRM, tag)) = parse_kex(&body) {
+                if !protocol::pake::verify_peer(&shared, false, tag) { return Err(Box::new(SessionError("key confirmation failed"))); }
+                break;
+            },
+            None => return Err(Box::new(SessionError("connection closed during KEX confirmation"))),
         }
     }
     let (send_key, recv_key) = derive_keys(&shared, true);
     let mut sealer = Sealer::new(send_key);
     let mut opener = Opener::new(recv_key);
+    // The Data channel uses a SEPARATE key (distinct HKDF label) from media, so
+    // the two streams' independent nonce counters never collide under a shared
+    // key. Sharing the media key here would be catastrophic AEAD nonce reuse.
+    let (data_send_key, data_recv_key) = protocol::kex::derive_data_keys(&shared, true);
+    let data_sealer = Sealer::new(data_send_key);
+    let data_opener = Opener::new(data_recv_key);
 
-    let relay = RelayTransport::new(ws);
-    let signaling = RelayIceSignaling::new(&relay, ice_session);
+    let signaling: RelayIceSignaling<S> = RelayIceSignaling::new(sender.clone(), control_rx, ice_session);
+    let relay: RelayTransport<S> = RelayTransport::new(sender, reliable.take_media_rx().ok_or(SessionError("media receiver unavailable"))?);
     let transport = transport::establish(
         HOST_ICE_CONTROLLING,
         signaling,
@@ -160,6 +175,14 @@ where
         Duration::from_secs(3),
     )
     .await;
+    if let Some(ready) = data_ready {
+        let _ = ready.send(DataHandle {
+            sender: reliable.sender(),
+            receiver: data_rx,
+            sealer: data_sealer,
+            opener: data_opener,
+        });
+    }
     let (mut transport_tx, mut transport_rx) = transport.into_split();
 
     let first_frame = loop {
@@ -222,7 +245,7 @@ where
 /// SPAKE2 role and directional keys from [`run_host_session`]. No media is
 /// established or processed until peer confirmation has succeeded.
 pub async fn run_viewer_session<S>(
-    mut ws: WebSocketStream<S>,
+    ws: WebSocketStream<S>,
     password: &str,
     ice_session: &str,
     frame_sink: tokio::sync::mpsc::Sender<Vec<u8>>,
@@ -231,59 +254,56 @@ pub async fn run_viewer_session<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    run_viewer_session_with_data(ws, password, ice_session, frame_sink, input_rx, None).await
+}
+
+pub async fn run_viewer_session_with_data<S>(
+    ws: WebSocketStream<S>, password: &str, ice_session: &str,
+    frame_sink: tokio::sync::mpsc::Sender<Vec<u8>>,
+    input_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    data_ready: Option<oneshot::Sender<DataHandle>>,
+) -> Result<(), String>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let mut reliable = ReliableChannel::spawn(ws);
+    let sender = reliable.sender();
+    let mut control_rx = reliable.take_control_rx().ok_or_else(|| "control receiver unavailable".to_owned())?;
+    let data_rx = reliable.take_data_rx().ok_or_else(|| "data receiver unavailable".to_owned())?;
     let (state, my_msg) = protocol::pake::start(password.as_bytes(), false);
-    ws.send(Message::Binary(frame::wrap(
-        Tag::Kex,
-        &kex_body(KEX_MSG, &my_msg),
-    )))
-    .await
-    .map_err(|error| error.to_string())?;
+    sender.send_frame(Tag::Kex, &kex_body(KEX_MSG, &my_msg)).await.map_err(|error| error.to_string())?;
 
     let shared = loop {
-        match ws.next().await {
-            Some(Ok(Message::Binary(m))) => {
-                if let Some((Tag::Kex, body)) = frame::unwrap(&m) {
-                    if let Some((KEX_MSG, msg)) = parse_kex(body) {
-                        break protocol::pake::finish(state, msg)
-                            .ok_or_else(|| "invalid SPAKE2 message".to_owned())?;
-                    }
-                }
-            }
-            Some(Ok(_)) => {}
-            _ => return Err("connection closed during KEX".to_owned()),
+        match recv_control(&mut control_rx).await {
+            Some(body) => if let Some((KEX_MSG, msg)) = parse_kex(&body) {
+                break protocol::pake::finish(state, msg).ok_or_else(|| "invalid SPAKE2 message".to_owned())?;
+            },
+            None => return Err("connection closed during KEX".to_owned()),
         }
     };
 
     let my_confirm = protocol::pake::confirm_tag(&shared, false);
-    ws.send(Message::Binary(frame::wrap(
-        Tag::Kex,
-        &kex_body(KEX_CONFIRM, &my_confirm),
-    )))
-    .await
-    .map_err(|error| error.to_string())?;
+    sender.send_frame(Tag::Kex, &kex_body(KEX_CONFIRM, &my_confirm)).await.map_err(|error| error.to_string())?;
     loop {
-        match ws.next().await {
-            Some(Ok(Message::Binary(m))) => {
-                if let Some((Tag::Kex, body)) = frame::unwrap(&m) {
-                    if let Some((KEX_CONFIRM, tag)) = parse_kex(body) {
-                        if !protocol::pake::verify_peer(&shared, true, tag) {
-                            return Err("key confirmation failed".to_owned());
-                        }
-                        break;
-                    }
-                }
-            }
-            Some(Ok(_)) => {}
-            _ => return Err("connection closed during KEX confirmation".to_owned()),
+        match recv_control(&mut control_rx).await {
+            Some(body) => if let Some((KEX_CONFIRM, tag)) = parse_kex(&body) {
+                if !protocol::pake::verify_peer(&shared, true, tag) { return Err("key confirmation failed".to_owned()); }
+                break;
+            },
+            None => return Err("connection closed during KEX confirmation".to_owned()),
         }
     }
 
     let (send_key, recv_key) = derive_keys(&shared, false);
     let sealer = Sealer::new(send_key);
     let opener = Opener::new(recv_key);
+    // Separate Data-channel key (see host session) — avoids nonce reuse.
+    let (data_send_key, data_recv_key) = protocol::kex::derive_data_keys(&shared, false);
+    let data_sealer = Sealer::new(data_send_key);
+    let data_opener = Opener::new(data_recv_key);
 
-    let relay = RelayTransport::new(ws);
-    let signaling = RelayIceSignaling::new(&relay, ice_session);
+    let signaling: RelayIceSignaling<S> = RelayIceSignaling::new(sender.clone(), control_rx, ice_session);
+    let relay: RelayTransport<S> = RelayTransport::new(sender, reliable.take_media_rx().ok_or_else(|| "media receiver unavailable".to_owned())?);
     let transport = transport::establish(
         VIEWER_ICE_CONTROLLING,
         signaling,
@@ -292,6 +312,14 @@ where
         Duration::from_secs(3),
     )
     .await;
+    if let Some(ready) = data_ready {
+        let _ = ready.send(DataHandle {
+            sender: reliable.sender(),
+            receiver: data_rx,
+            sealer: data_sealer,
+            opener: data_opener,
+        });
+    }
     let (transport_tx, transport_rx) = transport.into_split();
 
     run_viewer_media_loop(transport_tx, transport_rx, frame_sink, input_rx, sealer, opener).await
@@ -346,6 +374,36 @@ where
         capturer,
         |w, h| H264Encoder::new(w, h, 15, 1_000_000),
         injector,
+    )
+    .await
+}
+
+pub async fn run_default_host_session_with_data<S>(
+    ws: WebSocketStream<S>,
+    password: &str,
+    ice_session: &str,
+    data_ready: oneshot::Sender<DataHandle>,
+) -> SessionResult<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let capturer = ScapCapturer::new().ok_or(SessionError("Screen capture is unavailable. Grant this app macOS Screen Recording permission and try again."))?;
+    let injector: Box<dyn InputInjector> = match EnigoInjector::new() {
+        Some(injector) => Box::new(injector),
+        None => {
+            eprintln!("Input injection unavailable: macOS Accessibility permission is required. Grant it in System Settings, then restart the host.");
+            eprintln!("Open Accessibility settings: x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility");
+            Box::new(NoopInjector::default())
+        }
+    };
+    run_host_session_with_data(
+        ws,
+        password,
+        ice_session,
+        capturer,
+        |w, h| H264Encoder::new(w, h, 15, 1_000_000),
+        injector,
+        Some(data_ready),
     )
     .await
 }

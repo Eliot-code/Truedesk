@@ -19,9 +19,39 @@ pub fn derive_keys(shared_secret: &[u8], role_is_host: bool) -> ([u8; 32], [u8; 
     }
 }
 
+/// Returns (send_key, recv_key) for the reliable DATA channel (file transfer,
+/// clipboard, ...). Distinct labels give the Data channel a completely separate
+/// keyspace from the media channel, so their independent nonce counters can
+/// never collide under a shared key (which would be catastrophic AEAD nonce
+/// reuse). Directional like `derive_keys`.
+pub fn derive_data_keys(shared_secret: &[u8], role_is_host: bool) -> ([u8; 32], [u8; 32]) {
+    let h2v = hkdf32(shared_secret, b"opendesk data h2v");
+    let v2h = hkdf32(shared_secret, b"opendesk data v2h");
+    if role_is_host {
+        (h2v, v2h)
+    } else {
+        (v2h, h2v)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn data_keys_agree_and_differ_from_media() {
+        let shared = [7u8; 32];
+        let (host_send, host_recv) = derive_data_keys(&shared, true);
+        let (viewer_send, viewer_recv) = derive_data_keys(&shared, false);
+        // Data channel directional agreement (same as media).
+        assert_eq!(host_send, viewer_recv);
+        assert_eq!(viewer_send, host_recv);
+        // Data keys MUST differ from the media keys (separate keyspace -> no
+        // nonce reuse across the two streams under a shared counter start).
+        let (media_send, media_recv) = derive_keys(&shared, true);
+        assert_ne!(host_send, media_send);
+        assert_ne!(host_recv, media_recv);
+    }
 
     #[test]
     fn host_and_viewer_agree_on_directional_keys() {
