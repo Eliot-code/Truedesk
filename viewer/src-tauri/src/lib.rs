@@ -3,10 +3,10 @@ mod permissions;
 
 use config::ConfigStore;
 use futures_util::StreamExt;
-use host_core::{filexfer::{ConsentDecision, FileReceiver, FileSink, FileSource, FileSender}, roles::DataHandle, transport::reliable::ReliableSender};
-use protocol::{crypto::{Opener, Sealer}, filexfer::FileMsg, frame, Tag};
+use host_core::{clipboard::{ArboardBackend, ClipboardSync}, filexfer::{ConsentDecision, FileReceiver, FileSink, FileSource, FileSender}, roles::DataHandle, transport::reliable::ReliableSender};
+use protocol::{crypto::{Opener, Sealer}, datamsg::DataMsg, filexfer::FileMsg, frame, Tag};
 use serde::Serialize;
-use std::{collections::HashMap, path::{Path, PathBuf}, sync::{Arc, Mutex}};
+use std::{collections::HashMap, path::{Path, PathBuf}, sync::{atomic::{AtomicBool, Ordering}, mpsc as std_mpsc, Arc, Mutex}, time::Duration};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{mpsc, oneshot};
 
@@ -20,6 +20,8 @@ struct RuntimeState {
     pending_file_requests: HashMap<u64, oneshot::Sender<bool>>,
     file_outgoing: Option<ReliableSender>,
     file_sealer: Option<Arc<Mutex<Sealer>>>,
+    clipboard_enabled: Arc<AtomicBool>,
+    clipboard_thread: Option<ClipboardThread>,
 }
 
 /// The host session owns Enigo, which is not `Send`. Keep the session and its
@@ -29,6 +31,14 @@ struct RuntimeState {
 struct HostThread {
     stop_tx: oneshot::Sender<()>,
     join: std::thread::JoinHandle<()>,
+}
+struct ClipboardThread {
+    command_tx: std_mpsc::Sender<ClipboardCommand>,
+    join: std::thread::JoinHandle<()>,
+}
+enum ClipboardCommand {
+    Apply(String),
+    Stop,
 }
 struct AppState(Mutex<RuntimeState>);
 
@@ -124,7 +134,7 @@ impl FileSink for ReliableFileSink {
                 let _ = sender.send(Ok(*id));
             }
         }
-        let plaintext = message.to_bytes();
+        let plaintext = DataMsg::FileTransfer(message).to_bytes();
         let sealed = self.sealer.lock().unwrap().seal(&plaintext);
         let _ = self.outgoing.send_frame(Tag::Data, &sealed).await;
     }
@@ -139,22 +149,13 @@ impl ReliableFileSink {
 }
 
 pub(crate) struct ReliableFileSource {
-    incoming: mpsc::Receiver<Vec<u8>>,
-    opener: Arc<Mutex<Opener>>,
+    incoming: mpsc::Receiver<FileMsg>,
 }
 
 #[async_trait::async_trait]
 impl FileSource for ReliableFileSource {
     async fn recv(&mut self) -> Option<FileMsg> {
-        while let Some(message) = self.incoming.recv().await {
-            let Some(plaintext) = self.opener.lock().unwrap().open(&message) else {
-                continue;
-            };
-            if let Some(message) = FileMsg::from_bytes(&plaintext) {
-                return Some(message);
-            }
-        }
-        None
+        self.incoming.recv().await
     }
 }
 
@@ -188,12 +189,11 @@ fn route_file_consent(
 /// file, so no Tokio worker is blocked by the UI response.
 pub(crate) fn spawn_file_receiver(
     app: AppHandle,
-    incoming: mpsc::Receiver<Vec<u8>>,
-    opener: Arc<Mutex<Opener>>,
+    incoming: mpsc::Receiver<FileMsg>,
     from: String,
 ) {
     tauri::async_runtime::spawn(async move {
-        let mut source = ReliableFileSource { incoming, opener };
+        let mut source = ReliableFileSource { incoming };
         let pending_app = app.clone();
         let transfer_id = Arc::new(Mutex::new(None));
         let progress_id = transfer_id.clone();
@@ -264,25 +264,88 @@ pub(crate) fn spawn_file_receiver(
     });
 }
 
+fn spawn_clipboard_thread(
+    outgoing: ReliableSender,
+    sealer: Arc<Mutex<Sealer>>,
+    enabled: Arc<AtomicBool>,
+) -> Option<(std_mpsc::Sender<ClipboardCommand>, std::thread::JoinHandle<()>)> {
+    let backend = ArboardBackend::new()?;
+    let (command_tx, command_rx) = std_mpsc::channel();
+    let join = std::thread::spawn(move || {
+        let mut sync = ClipboardSync::new(backend);
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build();
+        let Ok(runtime) = runtime else { return };
+        loop {
+            match command_rx.recv_timeout(Duration::from_millis(500)) {
+                Ok(ClipboardCommand::Apply(text)) => {
+                    if enabled.load(Ordering::Relaxed) { sync.apply(&text); }
+                }
+                Ok(ClipboardCommand::Stop) | Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std_mpsc::RecvTimeoutError::Timeout) => {
+                    if !enabled.load(Ordering::Relaxed) { continue; }
+                    let Some(message) = sync.poll_data() else { continue };
+                    let sealed = sealer.lock().unwrap().seal(&message.to_bytes());
+                    if runtime.block_on(outgoing.send_frame(Tag::Data, &sealed)).is_err() { break; }
+                }
+            }
+        }
+    });
+    Some((command_tx, join))
+}
+
+fn dispatch_data(
+    incoming: mpsc::Receiver<Vec<u8>>,
+    opener: Arc<Mutex<Opener>>,
+    clipboard_tx: Option<std_mpsc::Sender<ClipboardCommand>>,
+) -> mpsc::Receiver<FileMsg> {
+    let (file_tx, file_rx) = mpsc::channel(64);
+    tauri::async_runtime::spawn(async move {
+        let mut incoming = incoming;
+        while let Some(message) = incoming.recv().await {
+            let Some(plaintext) = opener.lock().unwrap().open(&message) else { continue };
+            match DataMsg::from_bytes(&plaintext) {
+                Some(DataMsg::FileTransfer(message)) => { if file_tx.send(message).await.is_err() { break; } }
+                Some(DataMsg::Clipboard(message)) => {
+                    if let Some(sender) = &clipboard_tx { let _ = sender.send(ClipboardCommand::Apply(message.text)); }
+                }
+                None => {}
+            }
+        }
+        drop(clipboard_tx);
+    });
+    file_rx
+}
+
 fn emit<T: Serialize + Clone>(app: &AppHandle, event: &str, payload: T) {
     let _ = app.emit(event, payload);
 }
 
 fn activate_data_channel(app: &AppHandle, handle: DataHandle, from: String) {
     let DataHandle { sender, receiver, sealer, opener } = handle;
+    let enabled = app.state::<AppState>().0.lock().unwrap().clipboard_enabled.clone();
+    let sealer = Arc::new(Mutex::new(sealer));
+    let clipboard_thread = spawn_clipboard_thread(sender.clone(), sealer.clone(), enabled);
+    let clipboard_tx = clipboard_thread.as_ref().map(|(tx, _)| tx.clone());
+    let file_receiver = dispatch_data(receiver, Arc::new(Mutex::new(opener)), clipboard_tx);
     let state = app.state::<AppState>();
     let mut state = state.0.lock().unwrap();
     state.file_outgoing = Some(sender);
-    state.file_sealer = Some(Arc::new(Mutex::new(sealer)));
+    state.file_sealer = Some(sealer);
+    state.clipboard_thread = clipboard_thread.map(|(command_tx, join)| ClipboardThread { command_tx, join });
     drop(state);
-    spawn_file_receiver(app.clone(), receiver, Arc::new(Mutex::new(opener)), from);
+    spawn_file_receiver(app.clone(), file_receiver, from);
 }
 
 fn clear_data_channel(app: &AppHandle) {
     let state = app.state::<AppState>();
     let mut state = state.0.lock().unwrap();
+    if let Some(thread) = state.clipboard_thread.take() {
+        let _ = thread.command_tx.send(ClipboardCommand::Stop);
+        let _ = thread.join.join();
+    }
     state.file_outgoing = None;
     state.file_sealer = None;
+    state.clipboard_enabled.store(true, Ordering::Relaxed);
     state.pending_file_requests.clear();
 }
 fn fresh_password() -> String {
@@ -760,10 +823,8 @@ fn connect(
         let mut state = app_state.0.lock().unwrap();
         state.viewer_input = None;
         state.viewer_task = None;
-        state.file_outgoing = None;
-        state.file_sealer = None;
-        state.pending_file_requests.clear();
         drop(state);
+        clear_data_channel(&task_app);
         emit(
             &task_app,
             "session_ended",
@@ -791,6 +852,11 @@ fn send_input(state: tauri::State<'_, AppState>, bytes: Vec<u8>) -> Result<(), S
 }
 
 #[tauri::command]
+fn set_clipboard_sync(state: tauri::State<'_, AppState>, enabled: bool) {
+    state.0.lock().unwrap().clipboard_enabled.store(enabled, Ordering::Relaxed);
+}
+
+#[tauri::command]
 fn disconnect(state: tauri::State<'_, AppState>, app: AppHandle) {
     let (host_thread, viewer_task) = {
         let mut s = state.0.lock().unwrap();
@@ -804,6 +870,7 @@ fn disconnect(state: tauri::State<'_, AppState>, app: AppHandle) {
         let _ = host_thread.stop_tx.send(());
         let _ = host_thread.join.join();
     }
+    clear_data_channel(&app);
     emit(
         &app,
         "session_ended",
@@ -834,6 +901,8 @@ pub fn run() {
                 pending_file_requests: HashMap::new(),
                 file_outgoing: None,
                 file_sealer: None,
+                clipboard_enabled: Arc::new(AtomicBool::new(true)),
+                clipboard_thread: None,
             })));
             Ok(())
         })
@@ -850,6 +919,7 @@ pub fn run() {
             connect,
             disconnect,
             send_input,
+            set_clipboard_sync,
             send_file,
             respond_file
         ])
@@ -895,14 +965,11 @@ mod tests {
             .build()
             .unwrap();
         runtime.block_on(async {
-            let (outgoing, incoming) = mpsc::channel::<Vec<u8>>(1);
-            let key = [9u8; 32];
             let message = FileMsg::Done { id: 7 };
-            let mut sealer = Sealer::new(key);
-            outgoing.send(sealer.seal(&message.to_bytes())).await.unwrap();
+            let (file_tx, file_rx) = mpsc::channel(1);
+            file_tx.send(message.clone()).await.unwrap();
             let mut source = ReliableFileSource {
-                incoming,
-                opener: Arc::new(Mutex::new(Opener::new(key))),
+                incoming: file_rx,
             };
             assert_eq!(source.recv().await, Some(message));
         });

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import * as api from "../lib/api";
 import { makeDecoder } from "../lib/decode";
 import { attachInput } from "../lib/input";
@@ -14,6 +14,11 @@ export interface SessionProps {
 
 export default function Session({ remoteId, role, onDisconnect }: SessionProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [clipboardSync, setClipboardSync] = useState(true);
+  const toggleClipboardSync = (enabled: boolean) => {
+    setClipboardSync(enabled);
+    void api.setClipboardSync(enabled).catch(() => setClipboardSync(!enabled));
+  };
 
   useEffect(() => {
     if (role !== "viewer" || !canvasRef.current) return;
@@ -48,7 +53,7 @@ export default function Session({ remoteId, role, onDisconnect }: SessionProps) 
     <main className={`session-screen session-screen--${role}`}>
       <canvas ref={canvasRef} className="session-canvas" tabIndex={0} aria-label="Remote screen" />
       {role === "host" && <div className="session-host-overlay"><span className="eyebrow">OPENDESK · SECURE SESSION</span><h1>You are being controlled by {remoteId}</h1><p>Your screen is shared for this session.</p></div>}
-      <Toolbar remoteId={remoteId} onDisconnect={onDisconnect} />
+      <Toolbar remoteId={remoteId} clipboardSync={clipboardSync} onClipboardSyncChange={toggleClipboardSync} onDisconnect={onDisconnect} />
       <FileTransfer />
     </main>
   );

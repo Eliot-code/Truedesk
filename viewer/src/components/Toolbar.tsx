@@ -3,6 +3,8 @@ import { useEffect, useState, type ReactNode } from "react";
 interface ToolbarProps {
   remoteId: string;
   latency?: string;
+  clipboardSync?: boolean;
+  onClipboardSyncChange?: (enabled: boolean) => void;
   onDisconnect: () => void;
 }
 
@@ -15,9 +17,8 @@ function formatDuration(seconds: number): string {
   return `${minutes}:${(seconds % 60).toString().padStart(2, "0")}`;
 }
 
-export default function Toolbar({ remoteId, latency = "18 ms", onDisconnect }: ToolbarProps) {
+export default function Toolbar({ remoteId, latency = "18 ms", clipboardSync = true, onClipboardSyncChange = () => {}, onDisconnect }: ToolbarProps) {
   const [elapsed, setElapsed] = useState(0);
-  const [clipboard, setClipboard] = useState(false);
   const [keyboard, setKeyboard] = useState(false);
 
   useEffect(() => {
@@ -46,7 +47,7 @@ export default function Toolbar({ remoteId, latency = "18 ms", onDisconnect }: T
             <span className="sr-only">Quality</span>
             <select aria-label="Quality" defaultValue="auto"><option value="auto">Auto</option><option value="high">High</option><option value="balanced">Balanced</option></select>
           </label>
-          <IconButton label="Clipboard" onClick={() => setClipboard((value) => !value)}>{clipboard ? "▣" : "□"}</IconButton>
+          <IconButton label="Sync clipboard" onClick={() => onClipboardSyncChange(!clipboardSync)}>{clipboardSync ? "▣" : "□"}</IconButton>
           <IconButton label="Keyboard" onClick={() => setKeyboard((value) => !value)}>{keyboard ? "⌨" : "⌑"}</IconButton>
         </div>
         <div className="session-toolbar__actions">

@@ -46,6 +46,7 @@ OpenDesk is under active development. What works today:
 | P2P-first ICE transport with relay fallback | ✅ |
 | End-to-end encryption (ChaCha20-Poly1305) | ✅ |
 | Password-authenticated key exchange (SPAKE2) | ✅ |
+| Clipboard sync (text-only, E2E encrypted) | ✅ |
 | Screen capture + H.264 encode (macOS/Windows/Linux via `scap` + `openh264`) | ✅ |
 | Remote input: mouse and keyboard (via `enigo`) | 🚧 in progress |
 | Desktop UI / app shell (ID, connect, accept dialog, permissions) | 🗺️ planned |
@@ -136,7 +137,14 @@ key (so Data and media never reuse AEAD nonces). The receiver requests consent,
 streams into a sanitized filename in the OS Downloads directory, verifies the
 SHA-256 before finalizing, and reserves unique paths for concurrent transfers.
 
-Remaining deferrals are audio, clipboard sync, and multi-monitor support.
+Remaining deferrals are audio and multi-monitor support.
+
+### Clipboard sync
+
+Clipboard sync shares text-only clipboard contents end-to-end encrypted over the
+session Data channel. It has a per-session toggle that is on by default, caps
+clipboard text at 1 MB (`MAX_CLIPBOARD`), and suppresses echoes when a received
+value is applied locally.
 
 ## Roadmap
 

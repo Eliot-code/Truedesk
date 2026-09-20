@@ -7,7 +7,7 @@ use host_core::{
     roles::{run_host_session, run_host_session_with_data, run_viewer_session, run_viewer_session_with_data, DataHandle},
 };
 use async_trait::async_trait;
-use protocol::{crypto::{Opener, Sealer}, filexfer::FileMsg, input::InputEvent};
+use protocol::{clipboard::ClipboardMsg, crypto::{Opener, Sealer}, datamsg::DataMsg, filexfer::FileMsg, input::InputEvent, Tag};
 use sha2::{Digest, Sha256};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -29,7 +29,7 @@ struct DataFileSink {
 #[async_trait]
 impl FileSink for DataFileSink {
     async fn send(&mut self, message: FileMsg) {
-        let sealed = self.sealer.seal(&message.to_bytes());
+        let sealed = self.sealer.seal(&DataMsg::FileTransfer(message).to_bytes());
         self.sender
             .send_frame(protocol::Tag::Data, &sealed)
             .await
@@ -47,7 +47,7 @@ impl FileSource for DataFileSource {
     async fn recv(&mut self) -> Option<FileMsg> {
         while let Some(sealed) = self.receiver.recv().await {
             if let Some(plaintext) = self.opener.open(&sealed) {
-                if let Some(message) = FileMsg::from_bytes(&plaintext) {
+                if let Some(DataMsg::FileTransfer(message)) = DataMsg::from_bytes(&plaintext) {
                     return Some(message);
                 }
             }
@@ -273,6 +273,74 @@ async fn live_file_transfer_is_sealed_and_relayed_end_to_end() {
     viewer.abort();
     host.abort();
     let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn live_clipboard_is_sealed_and_relayed_end_to_end() {
+    let addr = relay::spawn_test_server().await;
+
+    let host_ws = connect_to_peer(&addr, false).await;
+    let (host_ready_tx, host_ready_rx) = tokio::sync::oneshot::channel();
+    let host = tokio::spawn(async move {
+        run_host_session_with_data(
+            host_ws,
+            PASSWORD,
+            "e2e-clipboard",
+            FakeCapturer::new(64, 64),
+            |width, height| H264Encoder::new(width, height, 15, 1_000_000),
+            NoopInjector::default(),
+            Some(host_ready_tx),
+        )
+        .await
+    });
+
+    let viewer_ws = connect_to_peer(&addr, true).await;
+    let (frame_tx, _frame_rx) = tokio::sync::mpsc::channel(4);
+    let (_input_tx, input_rx) = tokio::sync::mpsc::channel(4);
+    let (viewer_ready_tx, viewer_ready_rx) = tokio::sync::oneshot::channel();
+    let viewer = tokio::spawn(run_viewer_session_with_data(
+        viewer_ws,
+        PASSWORD,
+        "e2e-clipboard",
+        frame_tx,
+        input_rx,
+        Some(viewer_ready_tx),
+    ));
+
+    let host_handle = timeout(Duration::from_secs(15), host_ready_rx)
+        .await
+        .expect("timed out waiting for host Data handle")
+        .expect("host session closed before Data handle");
+    let viewer_handle = timeout(Duration::from_secs(15), viewer_ready_rx)
+        .await
+        .expect("timed out waiting for viewer Data handle")
+        .expect("viewer session closed before Data handle");
+    let DataHandle { sender, mut sealer, .. } = host_handle;
+    let DataHandle { mut receiver, mut opener, .. } = viewer_handle;
+
+    let expected = ClipboardMsg {
+        seq: 27,
+        text: "clipboard round-trip: café 📋".into(),
+    };
+    let sealed = sealer.seal(&DataMsg::Clipboard(expected.clone()).to_bytes());
+    sender
+        .send_frame(Tag::Data, &sealed)
+        .await
+        .expect("live Data channel remains available");
+
+    let received = timeout(Duration::from_secs(15), receiver.recv())
+        .await
+        .expect("timed out waiting for clipboard Data frame")
+        .expect("viewer Data channel closed");
+    let plaintext = opener.open(&received).expect("clipboard frame failed to open");
+    assert_eq!(
+        DataMsg::from_bytes(&plaintext),
+        Some(DataMsg::Clipboard(expected)),
+        "sealed relay Data channel changed clipboard message bytes"
+    );
+
+    viewer.abort();
+    host.abort();
 }
 
 #[tokio::test(flavor = "multi_thread")]

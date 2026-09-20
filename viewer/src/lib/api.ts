@@ -36,6 +36,7 @@ export const stopHosting = () => invoke<void>("stop_hosting");
 export const connect = (target_id: string, password: string) => invoke<void>("connect", { targetId: target_id, password });
 export const disconnect = () => invoke<void>("disconnect");
 export const sendInput = (bytes: Uint8Array) => invoke<void>("send_input", { bytes: Array.from(bytes) });
+export const setClipboardSync = (enabled: boolean) => invoke<void>("set_clipboard_sync", { enabled });
 export const sendFile = (path: string) => invoke<number>("send_file", { path });
 export const respondFile = (id: number, accept: boolean) => invoke<void>("respond_file", { id, accept });
 

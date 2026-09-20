@@ -1,4 +1,5 @@
 pub mod capture;
+pub mod clipboard;
 pub mod encode;
 pub mod filexfer;
 pub mod inject;
