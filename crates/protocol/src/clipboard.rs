@@ -25,6 +25,9 @@ impl ClipboardMsg {
             bytes.get(length_start..length_end)?.try_into().ok()?,
         ))
         .ok()?;
+        if length > MAX_CLIPBOARD {
+            return None;
+        }
         let text_start = length_end;
         let text_end = text_start.checked_add(length)?;
         if text_end != bytes.len() {
@@ -61,5 +64,13 @@ mod tests {
         let bytes = message.to_bytes();
         assert!(ClipboardMsg::from_bytes(&bytes[..bytes.len() - 1]).is_none());
         assert!(ClipboardMsg::from_bytes(&[0xff, 0x00]).is_none());
+    }
+
+    #[test]
+    fn rejects_oversize_declared_length() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0u64.to_be_bytes());
+        bytes.extend_from_slice(&u32::try_from(MAX_CLIPBOARD + 1).unwrap().to_be_bytes());
+        assert!(ClipboardMsg::from_bytes(&bytes).is_none());
     }
 }

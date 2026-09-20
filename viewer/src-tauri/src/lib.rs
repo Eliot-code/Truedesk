@@ -338,15 +338,23 @@ fn activate_data_channel(app: &AppHandle, handle: DataHandle, from: String) {
 
 fn clear_data_channel(app: &AppHandle) {
     let state = app.state::<AppState>();
-    let mut state = state.0.lock().unwrap();
-    if let Some(thread) = state.clipboard_thread.take() {
+    // Take the thread handle out under the lock, then release the global state
+    // lock BEFORE joining. The clipboard thread may be mid `block_on(send_frame)`
+    // when it observes Stop; joining while holding the AppState mutex would
+    // freeze every other Tauri command behind a network-dependent join.
+    let thread = {
+        let mut state = state.0.lock().unwrap();
+        let thread = state.clipboard_thread.take();
+        state.file_outgoing = None;
+        state.file_sealer = None;
+        state.clipboard_enabled.store(true, Ordering::Relaxed);
+        state.pending_file_requests.clear();
+        thread
+    };
+    if let Some(thread) = thread {
         let _ = thread.command_tx.send(ClipboardCommand::Stop);
         let _ = thread.join.join();
     }
-    state.file_outgoing = None;
-    state.file_sealer = None;
-    state.clipboard_enabled.store(true, Ordering::Relaxed);
-    state.pending_file_requests.clear();
 }
 fn fresh_password() -> String {
     use rand::Rng;

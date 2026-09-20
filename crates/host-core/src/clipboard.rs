@@ -7,32 +7,35 @@ pub trait ClipboardBackend {
 }
 
 /// Clipboard backend backed by the system clipboard through `arboard`.
+///
+/// The `arboard::Clipboard` handle is kept alive for the backend's whole
+/// lifetime. On X11/Wayland the clipboard selection is served by the process
+/// that owns the live handle; a per-operation handle that drops immediately
+/// after `set_text` leaves the selection unowned and the pasted text vanishes.
+/// The backend lives entirely on the dedicated clipboard thread, so the
+/// non-`Send`, single-thread-affine handle stays on one thread; `RefCell`
+/// gives the `&self` trait methods the interior mutability arboard needs.
 pub struct ArboardBackend {
+    clipboard: std::cell::RefCell<arboard::Clipboard>,
 }
 
 impl ArboardBackend {
     pub fn new() -> Option<Self> {
         arboard::Clipboard::new()
             .ok()
-            .map(|_| Self {})
+            .map(|clipboard| Self {
+                clipboard: std::cell::RefCell::new(clipboard),
+            })
     }
 }
 
 impl ClipboardBackend for ArboardBackend {
     fn read(&self) -> Option<String> {
-        // arboard's read operation requires mutable access even though this
-        // abstraction deliberately keeps reads non-mutating for testability.
-        // Re-opening the clipboard also avoids retaining stale OS handles.
-        let mut clipboard = arboard::Clipboard::new().ok()?;
-        clipboard.get_text().ok()
+        self.clipboard.borrow_mut().get_text().ok()
     }
 
     fn write(&self, text: &str) {
-        // The backend is held by value so use a fresh handle for each write;
-        // this keeps the trait's write method ergonomic and cross-platform.
-        if let Ok(mut clipboard) = arboard::Clipboard::new() {
-            let _ = clipboard.set_text(text.to_owned());
-        }
+        let _ = self.clipboard.borrow_mut().set_text(text.to_owned());
     }
 }
 
