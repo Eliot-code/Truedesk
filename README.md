@@ -129,26 +129,14 @@ and that mouse/keyboard input controls the host. Check both logs for
 
 ### File transfer
 
-The file-transfer feature supports sending and receiving individual files during
-a session, with an incoming consent prompt, bounded streaming to the recipient's
-OS Downloads directory, and SHA-256 verification before a file is finalized.
-Filenames are sanitized and concurrent transfers reserve unique final paths.
-File messages are sealed end-to-end and are designed to use the reliable relay
-WebSocket path, never the lossy direct-UDP media path.
+The file-transfer feature is live during a session. File messages use the
+reliable relay `Tag::Data` path, independently of whether media uses Direct or
+relay transport, and are sealed end-to-end with a separate HKDF-derived Data
+key (so Data and media never reuse AEAD nonces). The receiver requests consent,
+streams into a sanitized filename in the OS Downloads directory, verifies the
+SHA-256 before finalizing, and reserves unique paths for concurrent transfers.
 
-The protocol, streaming/hash/consent core, Tauri commands/events, and session UI
-are present. Live session wiring is not complete yet: after ICE selects Direct,
-`host-core::transport::establish` consumes the relay socket and the media loops
-only retain the selected transport. The remaining work is to retain a relay
-socket for the whole session, split its WebSocket into one writer and reader per
-peer, and demultiplex incoming frames: `Tag::Data` always goes to the file
-receiver, while `Tag::Video`/`Tag::Input` go to the media transport only when
-media uses the relay. The Tauri file sender/receiver adapters are ready to attach
-to those channels. Until that demux is added, the UI reports that no reliable
-file channel is active.
-
-Remaining deferrals are the relay data demux/control-channel lifetime work,
-audio, and multi-monitor support.
+Remaining deferrals are audio, clipboard sync, and multi-monitor support.
 
 ## Roadmap
 
@@ -156,7 +144,7 @@ audio, and multi-monitor support.
 - [ ] Desktop app shell: ID display, connect screen, incoming-request accept dialog, permission onboarding, session toolbar
 - [ ] Hardware-accelerated encoders (VideoToolbox / NVENC / QSV)
 - [ ] Address book, unattended access, 2FA
-- [ ] Complete live relay data demux for file transfer; clipboard sync, multi-monitor
+- [ ] Clipboard sync, multi-monitor
 - [ ] Audio
 
 ## Contributing

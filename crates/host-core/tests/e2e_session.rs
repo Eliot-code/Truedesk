@@ -1,21 +1,60 @@
 use host_core::{
     capture::FakeCapturer,
     encode::H264Encoder,
-    inject::InputInjector,
+    filexfer::{ConsentDecision, FileReceiver, FileSink, FileSource, FileSender},
+    inject::{InputInjector, NoopInjector},
     relay_client,
-    roles::{run_host_session, run_viewer_session},
+    roles::{run_host_session, run_host_session_with_data, run_viewer_session, run_viewer_session_with_data, DataHandle},
 };
-use protocol::input::InputEvent;
+use async_trait::async_trait;
+use protocol::{crypto::{Opener, Sealer}, filexfer::FileMsg, input::InputEvent};
+use sha2::{Digest, Sha256};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
+use std::path::PathBuf;
 use tokio::time::{sleep, timeout, Duration};
 
 const PEER_ID: &str = "111111111";
 const PASSWORD: &str = "testpw";
 
 struct RecordingInjector(Arc<AtomicUsize>);
+
+struct DataFileSink {
+    sender: host_core::transport::reliable::ReliableSender,
+    sealer: Sealer,
+}
+
+#[async_trait]
+impl FileSink for DataFileSink {
+    async fn send(&mut self, message: FileMsg) {
+        let sealed = self.sealer.seal(&message.to_bytes());
+        self.sender
+            .send_frame(protocol::Tag::Data, &sealed)
+            .await
+            .expect("live Data channel remains available");
+    }
+}
+
+struct DataFileSource {
+    receiver: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    opener: Opener,
+}
+
+#[async_trait]
+impl FileSource for DataFileSource {
+    async fn recv(&mut self) -> Option<FileMsg> {
+        while let Some(sealed) = self.receiver.recv().await {
+            if let Some(plaintext) = self.opener.open(&sealed) {
+                if let Some(message) = FileMsg::from_bytes(&plaintext) {
+                    return Some(message);
+                }
+            }
+        }
+        None
+    }
+}
 
 impl InputInjector for RecordingInjector {
     fn inject(&mut self, _event: &InputEvent, _screen_w: u32, _screen_h: u32) {
@@ -132,6 +171,108 @@ async fn run_wrong_password_session() {
     );
     viewer.abort();
     host.abort();
+}
+
+fn test_temp_dir(label: &str) -> PathBuf {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock is after the epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!("opendesk-e2e-{label}-{}-{nonce}", std::process::id()))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn live_file_transfer_is_sealed_and_relayed_end_to_end() {
+    let addr = relay::spawn_test_server().await;
+    let root = test_temp_dir("filexfer");
+    let source_dir = root.join("source");
+    let downloads_dir = root.join("downloads");
+    tokio::fs::create_dir_all(&source_dir).await.expect("create source dir");
+    let source_path = source_dir.join("known-payload.bin");
+
+    let mut expected = Vec::with_capacity(200 * 1024);
+    let mut state = 0x1234_5678u32;
+    for _ in 0..(200 * 1024) {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        expected.push((state >> 24) as u8);
+    }
+    tokio::fs::write(&source_path, &expected).await.expect("write source file");
+
+    let host_ws = connect_to_peer(&addr, false).await;
+    let (host_ready_tx, host_ready_rx) = tokio::sync::oneshot::channel();
+    let host = tokio::spawn(async move {
+        run_host_session_with_data(
+            host_ws,
+            PASSWORD,
+            "e2e-filexfer",
+            FakeCapturer::new(64, 64),
+            |width, height| H264Encoder::new(width, height, 15, 1_000_000),
+            NoopInjector::default(),
+            Some(host_ready_tx),
+        )
+        .await
+    });
+
+    let viewer_ws = connect_to_peer(&addr, true).await;
+    let (frame_tx, _frame_rx) = tokio::sync::mpsc::channel(4);
+    let (_input_tx, input_rx) = tokio::sync::mpsc::channel(4);
+    let (viewer_ready_tx, viewer_ready_rx) = tokio::sync::oneshot::channel();
+    let viewer = tokio::spawn(run_viewer_session_with_data(
+        viewer_ws,
+        PASSWORD,
+        "e2e-filexfer",
+        frame_tx,
+        input_rx,
+        Some(viewer_ready_tx),
+    ));
+
+    let host_handle = timeout(Duration::from_secs(15), host_ready_rx)
+        .await
+        .expect("timed out waiting for host Data handle")
+        .expect("host session closed before Data handle");
+    let viewer_handle = timeout(Duration::from_secs(15), viewer_ready_rx)
+        .await
+        .expect("timed out waiting for viewer Data handle")
+        .expect("viewer session closed before Data handle");
+    let DataHandle { sender, sealer, .. } = host_handle;
+    let DataHandle { receiver, opener, .. } = viewer_handle;
+
+    let mut sink = DataFileSink { sender, sealer };
+    let mut source = DataFileSource { receiver, opener };
+    let receive_dir = downloads_dir.clone();
+    let receive = tokio::spawn(async move {
+        FileReceiver::receive(&mut source, &receive_dir, |_| ConsentDecision::Accept, |_, _| {})
+            .await
+    });
+    let send = FileSender::send(&source_path, &mut sink, |_, _| {});
+    timeout(Duration::from_secs(15), async {
+        let (send_result, receive_result) = tokio::join!(send, receive);
+        send_result.expect("FileSender failed");
+        receive_result
+            .expect("receiver task panicked")
+            .expect("FileReceiver failed");
+    })
+    .await
+    .expect("file transfer exceeded timeout");
+
+    let received_path = tokio::fs::read_dir(&downloads_dir)
+        .await
+        .expect("downloads directory was not created")
+        .next_entry()
+        .await
+        .expect("read downloads directory")
+        .expect("received file is missing")
+        .path();
+    let received = tokio::fs::read(&received_path).await.expect("read received file");
+    assert_eq!(received, expected, "relay Data transfer changed file bytes");
+    let expected_hash: [u8; 32] = Sha256::digest(&expected).into();
+    let received_hash: [u8; 32] = Sha256::digest(&received).into();
+    assert_eq!(received_hash, expected_hash, "received file SHA-256 differs");
+    assert_eq!(received_path.file_name().and_then(|name| name.to_str()), Some("known-payload.bin"));
+
+    viewer.abort();
+    host.abort();
+    let _ = tokio::fs::remove_dir_all(root).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
