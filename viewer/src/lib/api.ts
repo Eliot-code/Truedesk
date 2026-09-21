@@ -23,10 +23,15 @@ export interface FileOffer { id: number; name: string; size: number; from: strin
 export interface FileProgress { id: number; transferred: number; total: number; direction: "send" | "receive" | string }
 export interface FileDone { id: number }
 export interface FileError { id: number; message: string }
+export interface Contact { id: string; alias: string; last_connected: number | null }
 
 export const getIdentity = () => invoke<Identity>("get_identity");
 export const rotatePassword = () => invoke<{ password: string }>("rotate_password");
 export const getConfig = () => invoke<AppConfig>("get_config");
+export const listContacts = () => invoke<Contact[]>("list_contacts");
+export const addContact = (alias: string, peer_id: string) => invoke<Contact>("add_contact", { alias, peerId: peer_id });
+export const removeContact = (peer_id: string) => invoke<void>("remove_contact", { peerId: peer_id });
+export const touchContact = (peer_id: string) => invoke<void>("touch_contact", { peerId: peer_id });
 export const setRelay = (url: string) => invoke<void>("set_relay", { url });
 export const getUnattendedStatus = () => invoke<UnattendedStatus>("get_unattended_status");
 export const setUnattendedAccess = (enabled: boolean, password: string | null) => invoke<void>("set_unattended_access", { enabled, password });

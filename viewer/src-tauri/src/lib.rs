@@ -1,7 +1,9 @@
 mod config;
+mod contacts;
 mod permissions;
 
 use config::ConfigStore;
+use contacts::{Contact, ContactStore};
 use futures_util::StreamExt;
 use host_core::{clipboard::{ArboardBackend, ClipboardSync}, filexfer::{ConsentDecision, FileReceiver, FileSink, FileSource, FileSender}, roles::DataHandle, transport::reliable::ReliableSender};
 use protocol::{crypto::{Opener, Sealer}, datamsg::DataMsg, filexfer::FileMsg, frame, Tag};
@@ -12,6 +14,7 @@ use tokio::sync::{mpsc, oneshot};
 
 struct RuntimeState {
     config: ConfigStore,
+    contacts: ContactStore,
     password: Option<String>,
     host_thread: Option<HostThread>,
     viewer_task: Option<tauri::async_runtime::JoinHandle<()>>,
@@ -404,6 +407,26 @@ fn get_config(state: tauri::State<'_, AppState>) -> AppConfig {
     }
 }
 #[tauri::command]
+fn list_contacts(state: tauri::State<'_, AppState>) -> Vec<Contact> {
+    state.0.lock().unwrap().contacts.list()
+}
+#[tauri::command]
+fn add_contact(
+    state: tauri::State<'_, AppState>,
+    alias: String,
+    peer_id: String,
+) -> Result<Contact, String> {
+    state.0.lock().unwrap().contacts.add(alias, peer_id).map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn remove_contact(state: tauri::State<'_, AppState>, peer_id: String) -> Result<(), String> {
+    state.0.lock().unwrap().contacts.remove(&peer_id).map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn touch_contact(state: tauri::State<'_, AppState>, peer_id: String) -> Result<(), String> {
+    state.0.lock().unwrap().contacts.touch(&peer_id).map_err(|e| e.to_string())
+}
+#[tauri::command]
 fn set_relay(state: tauri::State<'_, AppState>, url: String) -> Result<(), String> {
     if url.trim().is_empty() {
         return Err("relay URL cannot be empty".into());
@@ -724,6 +747,14 @@ fn connect(
         .config
         .add_recent(&target_id)
         .map_err(|e| e.to_string())?;
+    // A contact is only touched when it already exists; the regular recent-ID
+    // history above continues to cover connections made without saving one.
+    let touch_result = state.0.lock().unwrap().contacts.touch(&target_id);
+    if let Err(error) = touch_result {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Err(error.to_string());
+        }
+    }
     emit(
         &app,
         "status_changed",
@@ -911,9 +942,11 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
-            let config = ConfigStore::load(app_data_dir)?;
+            let config = ConfigStore::load(&app_data_dir)?;
+            let contacts = ContactStore::load(&app_data_dir)?;
             app.manage(AppState(Mutex::new(RuntimeState {
                 config,
+                contacts,
                 password: None,
                 host_thread: None,
                 viewer_task: None,
@@ -931,6 +964,10 @@ pub fn run() {
             get_identity,
             rotate_password,
             get_config,
+            list_contacts,
+            add_contact,
+            remove_contact,
+            touch_contact,
             set_relay,
             get_unattended_status,
             set_unattended_access,
