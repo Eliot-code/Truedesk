@@ -12,6 +12,10 @@ pub struct Config {
     pub relay_url: String,
     pub allow_list: Vec<String>,
     pub recent_ids: Vec<String>,
+    #[serde(default)]
+    pub unattended_password: Option<String>,
+    #[serde(default)]
+    pub unattended_enabled: bool,
 }
 
 impl Default for Config {
@@ -21,6 +25,8 @@ impl Default for Config {
             relay_url: DEFAULT_RELAY_URL.to_string(),
             allow_list: Vec::new(),
             recent_ids: Vec::new(),
+            unattended_password: None,
+            unattended_enabled: false,
         }
     }
 }
@@ -122,5 +128,16 @@ mod tests {
         add_recent(&mut values, "222222222");
         add_recent(&mut values, "111111111");
         assert_eq!(values, vec!["111111111", "222222222"]);
+    }
+
+    #[test]
+    fn unattended_access_fields_round_trip() {
+        let mut config = Config::default();
+        config.unattended_password = Some("fixed-secret".into());
+        config.unattended_enabled = true;
+        let encoded = serde_json::to_string(&config).unwrap();
+        let decoded: Config = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.unattended_password.as_deref(), Some("fixed-secret"));
+        assert!(decoded.unattended_enabled);
     }
 }

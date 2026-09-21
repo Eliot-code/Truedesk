@@ -57,6 +57,11 @@ struct AppConfig {
     recent_ids: Vec<String>,
 }
 #[derive(Serialize)]
+struct UnattendedStatus {
+    enabled: bool,
+    has_password: bool,
+}
+#[derive(Serialize)]
 struct PermissionStatus {
     screen_recording: bool,
     accessibility: bool,
@@ -408,6 +413,29 @@ fn set_relay(state: tauri::State<'_, AppState>, url: String) -> Result<(), Strin
     state.config.save().map_err(|e| e.to_string())
 }
 #[tauri::command]
+fn get_unattended_status(state: tauri::State<'_, AppState>) -> UnattendedStatus {
+    let state = state.0.lock().unwrap();
+    UnattendedStatus {
+        enabled: state.config.config.unattended_enabled,
+        has_password: state.config.config.unattended_password.is_some(),
+    }
+}
+#[tauri::command]
+fn set_unattended_access(
+    state: tauri::State<'_, AppState>,
+    enabled: bool,
+    password: Option<String>,
+) -> Result<(), String> {
+    let mut state = state.0.lock().unwrap();
+    let password = password.filter(|value| !value.is_empty());
+    if enabled && password.is_none() {
+        return Err("enter an unattended access password before enabling it".into());
+    }
+    state.config.config.unattended_password = password;
+    state.config.config.unattended_enabled = enabled;
+    state.config.save().map_err(|error| error.to_string())
+}
+#[tauri::command]
 fn permission_status() -> PermissionStatus {
     PermissionStatus {
         screen_recording: permissions::screen_recording(),
@@ -520,13 +548,18 @@ fn respond_file(
 
 #[tauri::command]
 fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<(), String> {
-    let (relay_url, id, password) = {
+    let (relay_url, id, password, unattended_enabled) = {
         let mut s = state.0.lock().unwrap();
         let id = s.config.ensure_identity();
+        let unattended_enabled = s.config.config.unattended_enabled
+            && s.config.config.unattended_password.is_some();
+        let password = s.config.config.unattended_password.clone()
+            .unwrap_or_else(|| current_password(&mut s));
         (
             s.config.config.relay_url.clone(),
             id,
-            current_password(&mut s),
+            password,
+            unattended_enabled,
         )
     };
     if state.0.lock().unwrap().host_thread.is_some() {
@@ -561,48 +594,9 @@ fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<()
             else {
                 return Err("invalid pairing message".into());
             };
-            let (decision_tx, decision_rx) = oneshot::channel();
-            // Relay's current Paired frame does not carry the requester's ID.
-            emit(
-                &app,
-                "incoming_request",
-                IncomingRequest {
-                    peer_id: "unknown".into(),
-                    fingerprint: "pending".into(),
-                },
-            );
-            app.state::<AppState>().0.lock().unwrap().pending_request = Some(decision_tx);
-            if !decision_rx
-                .await
-                .map_err(|_| "incoming request expired".to_string())?
-            {
-                emit(
-                    &app,
-                    "session_ended",
-                    SessionEnded {
-                        reason: "rejected".into(),
-                    },
-                );
-                emit(&app, "status_changed", StatusEvent { state: "offline" });
-                return Ok(());
-            }
-            emit(
-                &app,
-                "status_changed",
-                StatusEvent {
-                    state: "in_session",
-                },
-            );
-            emit(
-                &app,
-                "session_started",
-                SessionStarted {
-                    role: "host",
-                    remote_id: "unknown".into(),
-                },
-            );
             let (stop_tx, stop_rx) = oneshot::channel::<()>();
             let host_app = app.clone();
+            let approve_app = app.clone();
             let join = std::thread::spawn(move || {
                 let runtime = match tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -625,8 +619,27 @@ fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<()
                 runtime.block_on(async move {
                     let (data_ready_tx, data_ready_rx) = oneshot::channel();
                     let mut stop_rx = stop_rx;
-                    let mut session = Box::pin(host_core::roles::run_default_host_session_with_data(
-                        ws, &password, &session, data_ready_tx,
+                    let approve = move || async move {
+                        if unattended_enabled {
+                            emit(&approve_app, "status_changed", StatusEvent { state: "in_session" });
+                            emit(&approve_app, "session_started", SessionStarted { role: "host", remote_id: "unknown".into() });
+                            return true;
+                        }
+                        let (decision_tx, decision_rx) = oneshot::channel();
+                        // Relay's current Paired frame does not carry the requester's ID.
+                        emit(&approve_app, "incoming_request", IncomingRequest {
+                            peer_id: "unknown".into(), fingerprint: "pending".into(),
+                        });
+                        approve_app.state::<AppState>().0.lock().unwrap().pending_request = Some(decision_tx);
+                        let allowed = decision_rx.await.unwrap_or(false);
+                        if allowed {
+                            emit(&approve_app, "status_changed", StatusEvent { state: "in_session" });
+                            emit(&approve_app, "session_started", SessionStarted { role: "host", remote_id: "unknown".into() });
+                        }
+                        allowed
+                    };
+                    let mut session = Box::pin(host_core::roles::run_default_host_session_with_data_and_accept(
+                        ws, &password, &session, unattended_enabled, approve, data_ready_tx,
                     ));
                     let result = tokio::select! {
                         handle = data_ready_rx => {
@@ -919,6 +932,8 @@ pub fn run() {
             rotate_password,
             get_config,
             set_relay,
+            get_unattended_status,
+            set_unattended_access,
             permission_status,
             open_permission_settings,
             respond_to_request,

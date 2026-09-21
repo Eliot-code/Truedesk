@@ -18,11 +18,13 @@ export default function Home({ status, onConnect, onOpenPermissions }: HomeProps
   const [remotePassword, setRemotePassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [unattended, setUnattended] = useState<api.UnattendedStatus>({ enabled: false, has_password: false });
+  const [unattendedPassword, setUnattendedPassword] = useState("");
 
   useEffect(() => {
     let mounted = true;
-    void Promise.all([api.getIdentity(), api.getConfig()]).then(([loadedIdentity, config]) => {
-      if (mounted) { setIdentity(loadedIdentity); setRecentIds(config.recent_ids); }
+    void Promise.all([api.getIdentity(), api.getConfig(), api.getUnattendedStatus()]).then(([loadedIdentity, config, unattendedStatus]) => {
+      if (mounted) { setIdentity(loadedIdentity); setRecentIds(config.recent_ids); setUnattended(unattendedStatus); }
     }).catch((error: unknown) => mounted && setMessage(String(error)));
     void api.startHosting().catch((error: unknown) => mounted && setMessage(String(error)));
     return () => { mounted = false; };
@@ -31,6 +33,14 @@ export default function Home({ status, onConnect, onOpenPermissions }: HomeProps
   const rotate = async () => {
     try { const result = await api.rotatePassword(); setIdentity((current) => current ? { ...current, password: result.password } : current); }
     catch (error) { setMessage(String(error)); }
+  };
+  const saveUnattended = async () => {
+    try {
+      await api.setUnattendedAccess(unattended.enabled, unattendedPassword || null);
+      setUnattended({ enabled: unattended.enabled, has_password: Boolean(unattendedPassword) });
+      setUnattendedPassword("");
+      setMessage("Unattended access updated.");
+    } catch (error) { setMessage(String(error)); }
   };
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -50,6 +60,7 @@ export default function Home({ status, onConnect, onOpenPermissions }: HomeProps
     <div className="cards">
       <section className="card identity-card"><span className="eyebrow">YOUR ID</span><div className="id-row"><strong className="mono identity-value">{identity?.id ?? "—"}</strong><button className="icon-button" type="button" onClick={() => void copyId()} aria-label="Copy device ID">⧉</button></div><div className="password-row"><label htmlFor="device-password">SESSION PASSWORD</label><div className="password-control"><input id="device-password" className="mono password-value" type="password" value={identity?.password ?? ""} readOnly aria-label="Session password" /><button className="quiet-button" type="button" onClick={() => void rotate()}>Rotate</button></div></div><p className="caption">Share your ID and password to let someone control this device.</p></section>
       <section className="card connect-card"><span className="eyebrow">CONTROL A REMOTE DEVICE</span><form onSubmit={(event) => void submit(event)}><div className="connect-fields"><input className="mono target-input" inputMode="numeric" maxLength={9} placeholder="000 000 000" value={targetId} onChange={(event) => setTargetId(event.target.value.replace(/\D/g, ""))} aria-label="Remote device ID" /><input className="mono remote-password-input" type="password" placeholder="Password" value={remotePassword} onChange={(event) => setRemotePassword(event.target.value)} aria-label="Remote device password" /><button className="primary-button" type="submit" disabled={busy}>{busy ? "Connecting…" : "Connect"}</button></div></form>{recentIds.length > 0 && <div className="recent"><span className="recent-label">RECENT</span>{recentIds.map((id) => <button className="chip mono" type="button" key={id} onClick={() => setTargetId(id)}>{id}</button>)}</div>}</section>
+      <section className="card unattended-card"><div className="unattended-heading"><div><span className="eyebrow">UNATTENDED ACCESS</span><h2>Connect without approval</h2></div><label className="toggle-label"><input type="checkbox" checked={unattended.enabled} onChange={(event) => setUnattended((current) => ({ ...current, enabled: event.target.checked }))} /><span>Enabled</span></label></div><input className="password-value" type="password" placeholder={unattended.has_password ? "Enter a new password to replace it" : "Set a password"} value={unattendedPassword} onChange={(event) => setUnattendedPassword(event.target.value)} aria-label="Unattended access password" /><button className="quiet-button unattended-save" type="button" onClick={() => void saveUnattended()}>Save settings</button><p className="caption">Anyone with this password can connect without approval. Protect it carefully.</p></section>
     </div>
     {message && <p className="message" role="status">{message}</p>}
   </main>;

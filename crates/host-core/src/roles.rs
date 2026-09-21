@@ -12,7 +12,7 @@ use protocol::{
     kex::derive_keys,
     Tag,
 };
-use std::{error::Error, fmt::Display, time::Duration};
+use std::{error::Error, fmt::Display, future::Future, time::Duration};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::WebSocketStream;
@@ -24,6 +24,11 @@ const KEX_CONFIRM: u8 = 0x02;
 /// These values MUST differ for ICE to nominate a connection.
 const HOST_ICE_CONTROLLING: bool = true;
 const VIEWER_ICE_CONTROLLING: bool = false;
+
+/// Whether a successfully authenticated session may bypass manual approval.
+pub fn should_auto_accept(unattended_enabled: bool, pake_succeeded: bool) -> bool {
+    unattended_enabled && pake_succeeded
+}
 
 type SessionResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -120,8 +125,8 @@ where
 }
 
 pub async fn run_host_session_with_data<S, C, E, F, I>(
-    ws: WebSocketStream<S>, password: &str, ice_session: &str, mut capturer: C,
-    encoder_factory: F, mut injector: I, data_ready: Option<oneshot::Sender<DataHandle>>,
+    ws: WebSocketStream<S>, password: &str, ice_session: &str, capturer: C,
+    encoder_factory: F, injector: I, data_ready: Option<oneshot::Sender<DataHandle>>,
 ) -> SessionResult<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -129,6 +134,30 @@ where
     E: Encoder + Send + 'static,
     F: FnOnce(u16, u16) -> E,
     I: InputInjector + 'static,
+{
+    run_host_session_with_data_and_accept(
+        ws, password, ice_session, capturer, encoder_factory, injector, false,
+        || async { true }, data_ready,
+    ).await
+}
+
+/// Host session variant with an approval callback invoked only after SPAKE2
+/// and key confirmation succeed. Unattended mode can return true without
+/// presenting a manual approval request; the default path awaits the callback.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_host_session_with_data_and_accept<S, C, E, F, I, A, Fut>(
+    ws: WebSocketStream<S>, password: &str, ice_session: &str, mut capturer: C,
+    encoder_factory: F, mut injector: I, unattended_enabled: bool, approve: A,
+    data_ready: Option<oneshot::Sender<DataHandle>>,
+) -> SessionResult<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    C: ScreenCapturer + Send + 'static,
+    E: Encoder + Send + 'static,
+    F: FnOnce(u16, u16) -> E,
+    I: InputInjector + 'static,
+    A: FnOnce() -> Fut,
+    Fut: Future<Output = bool>,
 {
     let mut reliable = ReliableChannel::spawn(ws);
     let sender = reliable.sender();
@@ -154,6 +183,9 @@ where
             },
             None => return Err(Box::new(SessionError("connection closed during KEX confirmation"))),
         }
+    }
+    if !should_auto_accept(unattended_enabled, true) && !approve().await {
+        return Err(Box::new(SessionError("session rejected")));
     }
     let (send_key, recv_key) = derive_keys(&shared, true);
     let mut sealer = Sealer::new(send_key);
@@ -387,6 +419,24 @@ pub async fn run_default_host_session_with_data<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    run_default_host_session_with_data_and_accept(
+        ws, password, ice_session, false, || async { true }, data_ready,
+    ).await
+}
+
+pub async fn run_default_host_session_with_data_and_accept<S, A, Fut>(
+    ws: WebSocketStream<S>,
+    password: &str,
+    ice_session: &str,
+    unattended_enabled: bool,
+    approve: A,
+    data_ready: oneshot::Sender<DataHandle>,
+) -> SessionResult<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    A: FnOnce() -> Fut,
+    Fut: Future<Output = bool>,
+{
     let capturer = ScapCapturer::new().ok_or(SessionError("Screen capture is unavailable. Grant this app macOS Screen Recording permission and try again."))?;
     let injector: Box<dyn InputInjector> = match EnigoInjector::new() {
         Some(injector) => Box::new(injector),
@@ -396,13 +446,15 @@ where
             Box::new(NoopInjector::default())
         }
     };
-    run_host_session_with_data(
+    run_host_session_with_data_and_accept(
         ws,
         password,
         ice_session,
         capturer,
         |w, h| H264Encoder::new(w, h, 15, 1_000_000),
         injector,
+        unattended_enabled,
+        approve,
         Some(data_ready),
     )
     .await
@@ -422,6 +474,14 @@ mod tests {
         // Compile-time invariant: host and viewer MUST take opposite ICE
         // controlling roles, or ICE never nominates a candidate pair.
         const _: () = assert!(HOST_ICE_CONTROLLING != VIEWER_ICE_CONTROLLING);
+    }
+
+    #[test]
+    fn unattended_auto_accept_requires_successful_pake() {
+        assert!(should_auto_accept(true, true));
+        assert!(!should_auto_accept(true, false));
+        assert!(!should_auto_accept(false, true));
+        assert!(!should_auto_accept(false, false));
     }
 
     #[tokio::test]

@@ -4,6 +4,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 export type Status = "offline" | "online" | "connecting" | "in_session";
 export interface Identity { id: string; password: string }
 export interface AppConfig { relay_url: string; recent_ids: string[] }
+export interface UnattendedStatus { enabled: boolean; has_password: boolean }
 export interface PermissionStatus { screen_recording: boolean; accessibility: boolean }
 export interface IncomingRequest { peer_id: string; fingerprint: string }
 export interface SessionStarted { role: "host" | "viewer"; remote_id: string }
@@ -27,6 +28,8 @@ export const getIdentity = () => invoke<Identity>("get_identity");
 export const rotatePassword = () => invoke<{ password: string }>("rotate_password");
 export const getConfig = () => invoke<AppConfig>("get_config");
 export const setRelay = (url: string) => invoke<void>("set_relay", { url });
+export const getUnattendedStatus = () => invoke<UnattendedStatus>("get_unattended_status");
+export const setUnattendedAccess = (enabled: boolean, password: string | null) => invoke<void>("set_unattended_access", { enabled, password });
 export const permissionStatus = () => invoke<PermissionStatus>("permission_status");
 export const openPermissionSettings = (which: "screen" | "accessibility") => invoke<void>("open_permission_settings", { which });
 // Tauri v2 exposes Rust snake_case params to JS as camelCase (peerId/targetId).
