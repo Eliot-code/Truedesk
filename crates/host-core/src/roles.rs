@@ -7,6 +7,7 @@ use crate::{
     transport::{self, RelayIceSignaling, RelayTransport, ReliableChannel, Transport, TransportReceiver, TransportSender},
 };
 use protocol::{
+    control::Control,
     crypto::{Opener, Sealer},
     input::InputEvent,
     kex::derive_keys,
@@ -60,6 +61,8 @@ pub struct DataHandle {
     pub receiver: mpsc::Receiver<Vec<u8>>,
     pub sealer: Sealer,
     pub opener: Opener,
+    pub control_sender: transport::reliable::ReliableSender,
+    pub control_sealer: Sealer,
 }
 
 impl DataHandle {
@@ -69,6 +72,19 @@ impl DataHandle {
 }
 
 async fn recv_control(rx: &mut mpsc::Receiver<Vec<u8>>) -> Option<Vec<u8>> { rx.recv().await }
+
+fn split_session_control(mut rx: mpsc::Receiver<Vec<u8>>, session: String) -> (mpsc::Receiver<Vec<u8>>, mpsc::Receiver<Vec<u8>>) {
+    let (ice_tx, ice_rx) = mpsc::channel(64);
+    let (session_tx, session_rx) = mpsc::channel(64);
+    tokio::spawn(async move {
+        while let Some(body) = rx.recv().await {
+            let is_ice = matches!(Control::from_bytes(&body), Some(Control::Ice { session: body_session, .. }) if body_session == session);
+            let result = if is_ice { ice_tx.send(body).await } else { session_tx.send(body).await };
+            if result.is_err() { break; }
+        }
+    });
+    (ice_rx, session_rx)
+}
 
 fn even_frame(frame: encode::RawFrame) -> Option<encode::RawFrame> {
     let width = frame.width & !1;
@@ -118,7 +134,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     C: ScreenCapturer + Send + 'static,
     E: Encoder + Send + 'static,
-    F: FnOnce(u16, u16) -> E,
+    F: Fn(u16, u16) -> E,
     I: InputInjector + 'static,
 {
     run_host_session_with_data(ws, password, ice_session, capturer, encoder_factory, injector, None).await
@@ -132,7 +148,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     C: ScreenCapturer + Send + 'static,
     E: Encoder + Send + 'static,
-    F: FnOnce(u16, u16) -> E,
+    F: Fn(u16, u16) -> E,
     I: InputInjector + 'static,
 {
     run_host_session_with_data_and_accept(
@@ -154,7 +170,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     C: ScreenCapturer + Send + 'static,
     E: Encoder + Send + 'static,
-    F: FnOnce(u16, u16) -> E,
+    F: Fn(u16, u16) -> E,
     I: InputInjector + 'static,
     A: FnOnce() -> Fut,
     Fut: Future<Output = bool>,
@@ -196,9 +212,13 @@ where
     let (data_send_key, data_recv_key) = protocol::kex::derive_data_keys(&shared, true);
     let data_sealer = Sealer::new(data_send_key);
     let data_opener = Opener::new(data_recv_key);
+    let (control_send_key, control_recv_key) = protocol::kex::derive_control_keys(&shared, true);
+    let mut control_sealer = Sealer::new(control_send_key);
+    let mut control_opener = Opener::new(control_recv_key);
+    let (ice_rx, mut session_control_rx) = split_session_control(control_rx, ice_session.to_owned());
 
-    let signaling: RelayIceSignaling<S> = RelayIceSignaling::new(sender.clone(), control_rx, ice_session);
-    let relay: RelayTransport<S> = RelayTransport::new(sender, reliable.take_media_rx().ok_or(SessionError("media receiver unavailable"))?);
+    let signaling: RelayIceSignaling<S> = RelayIceSignaling::new(sender.clone(), ice_rx, ice_session);
+    let relay: RelayTransport<S> = RelayTransport::new(sender.clone(), reliable.take_media_rx().ok_or(SessionError("media receiver unavailable"))?);
     let transport = transport::establish(
         HOST_ICE_CONTROLLING,
         signaling,
@@ -207,12 +227,20 @@ where
         Duration::from_secs(3),
     )
     .await;
+    // Send the monitor list first, then hand the SAME control sealer to the
+    // data channel. Host->viewer control frames must share one sealer (one
+    // nonce sequence) on this key: a second Sealer::new on control_send_key
+    // would restart the counter at 0 and reuse a nonce with MonitorList.
+    let monitor_list = Control::MonitorList { monitors: capturer.monitors() };
+    reliable.sender().send_frame(Tag::Control, &control_sealer.seal(&monitor_list.to_bytes())).await?;
     if let Some(ready) = data_ready {
         let _ = ready.send(DataHandle {
             sender: reliable.sender(),
             receiver: data_rx,
             sealer: data_sealer,
             opener: data_opener,
+            control_sender: reliable.sender(),
+            control_sealer,
         });
     }
     let (mut transport_tx, mut transport_rx) = transport.into_split();
@@ -226,8 +254,8 @@ where
     let first_frame = even_frame(first_frame).ok_or(SessionError(
         "screen capture returned an invalid or unusable frame",
     ))?;
-    let width = first_frame.width;
-    let height = first_frame.height;
+    let mut width = first_frame.width;
+    let mut height = first_frame.height;
     let (input_tx, mut input_rx) = tokio::sync::mpsc::channel(64);
     tokio::spawn(async move {
         loop {
@@ -248,15 +276,31 @@ where
     });
     let fps: u32 = 15;
     let mut encoder = encoder_factory(width, height);
+    let mut pending_first_frame = Some(first_frame);
     let mut seq = 0u64;
     let mut next_frame = tokio::time::Instant::now();
     let mut last_keyframe = next_frame;
     loop {
         tokio::select! {
+            Some(body) = session_control_rx.recv() => {
+                if let Some(plaintext) = control_opener.open(&body) {
+                    if let Some(Control::SelectMonitor { id }) = Control::from_bytes(&plaintext) {
+                        if capturer.select_monitor(id) {
+                            if let Some(frame) = capturer.next_frame().and_then(even_frame) {
+                                width = frame.width;
+                                height = frame.height;
+                                encoder = encoder_factory(width, height);
+                                pending_first_frame = Some(frame);
+                                seq = 0;
+                            }
+                        }
+                    }
+                }
+            },
             Some(event) = input_rx.recv() => injector.inject(&event, u32::from(width), u32::from(height)),
             _ = tokio::time::sleep_until(next_frame) => {
                 next_frame += Duration::from_millis(1_000 / u64::from(fps));
-                let frame = if seq == 0 { Some(first_frame.clone()) } else { capturer.next_frame().and_then(even_frame) };
+                let frame = pending_first_frame.take().or_else(|| capturer.next_frame().and_then(even_frame));
                 let Some(frame) = frame else { continue };
                 if frame.width != width || frame.height != height { continue; }
                 if last_keyframe.elapsed() >= Duration::from_secs(2) { encoder.force_intra_frame(); last_keyframe = next_frame; }
@@ -298,6 +342,19 @@ pub async fn run_viewer_session_with_data<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    run_viewer_session_with_monitors(ws, password, ice_session, frame_sink, input_rx, data_ready, None).await
+}
+
+pub async fn run_viewer_session_with_monitors<S>(
+    ws: WebSocketStream<S>, password: &str, ice_session: &str,
+    frame_sink: tokio::sync::mpsc::Sender<Vec<u8>>,
+    input_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    data_ready: Option<oneshot::Sender<DataHandle>>,
+    monitor_sink: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+) -> Result<(), String>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let mut reliable = ReliableChannel::spawn(ws);
     let sender = reliable.sender();
     let mut control_rx = reliable.take_control_rx().ok_or_else(|| "control receiver unavailable".to_owned())?;
@@ -333,9 +390,13 @@ where
     let (data_send_key, data_recv_key) = protocol::kex::derive_data_keys(&shared, false);
     let data_sealer = Sealer::new(data_send_key);
     let data_opener = Opener::new(data_recv_key);
+    let (control_send_key, control_recv_key) = protocol::kex::derive_control_keys(&shared, false);
+    let control_sealer = Sealer::new(control_send_key);
+    let control_opener = Opener::new(control_recv_key);
+    let (ice_rx, session_control_rx) = split_session_control(control_rx, ice_session.to_owned());
 
-    let signaling: RelayIceSignaling<S> = RelayIceSignaling::new(sender.clone(), control_rx, ice_session);
-    let relay: RelayTransport<S> = RelayTransport::new(sender, reliable.take_media_rx().ok_or_else(|| "media receiver unavailable".to_owned())?);
+    let signaling: RelayIceSignaling<S> = RelayIceSignaling::new(sender.clone(), ice_rx, ice_session);
+    let relay: RelayTransport<S> = RelayTransport::new(sender.clone(), reliable.take_media_rx().ok_or_else(|| "media receiver unavailable".to_owned())?);
     let transport = transport::establish(
         VIEWER_ICE_CONTROLLING,
         signaling,
@@ -350,23 +411,49 @@ where
             receiver: data_rx,
             sealer: data_sealer,
             opener: data_opener,
+            control_sender: reliable.sender(),
+            control_sealer,
         });
     }
     let (transport_tx, transport_rx) = transport.into_split();
 
-    run_viewer_media_loop(transport_tx, transport_rx, frame_sink, input_rx, sealer, opener).await
+    run_viewer_media_loop_with_control(transport_tx, transport_rx, frame_sink, input_rx, sealer, opener, session_control_rx, control_opener, monitor_sink).await
 }
 
+#[allow(dead_code)]
 async fn run_viewer_media_loop(
+    transport_tx: Box<dyn TransportSender>,
+    transport_rx: Box<dyn TransportReceiver>,
+    frame_sink: tokio::sync::mpsc::Sender<Vec<u8>>,
+    input_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    sealer: Sealer,
+    opener: Opener,
+) -> Result<(), String> {
+    let (_tx, rx) = mpsc::channel(1);
+    run_viewer_media_loop_with_control(transport_tx, transport_rx, frame_sink, input_rx, sealer, opener, rx, Opener::new([0; 32]), None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_viewer_media_loop_with_control(
     mut transport_tx: Box<dyn TransportSender>,
     mut transport_rx: Box<dyn TransportReceiver>,
     frame_sink: tokio::sync::mpsc::Sender<Vec<u8>>,
     mut input_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
     mut sealer: Sealer,
     mut opener: Opener,
+    mut control_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    mut control_opener: Opener,
+    monitor_sink: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
 ) -> Result<(), String> {
     loop {
         tokio::select! {
+            Some(body) = control_rx.recv() => {
+                if let Some(plaintext) = control_opener.open(&body) {
+                    if let Some(Control::MonitorList { .. }) = Control::from_bytes(&plaintext) {
+                        if let Some(sink) = &monitor_sink { let _ = sink.send(plaintext).await; }
+                    }
+                }
+            },
             received = transport_rx.recv() => {
                 let Some((Tag::Video, sealed)) = received else { return Ok(()) };
                 let Some(plaintext) = opener.open(&sealed) else { continue };

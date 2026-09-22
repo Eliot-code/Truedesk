@@ -34,6 +34,12 @@ pub fn derive_data_keys(shared_secret: &[u8], role_is_host: bool) -> ([u8; 32], 
     }
 }
 
+pub fn derive_control_keys(shared_secret: &[u8], role_is_host: bool) -> ([u8; 32], [u8; 32]) {
+    let h2v = hkdf32(shared_secret, b"opendesk control h2v");
+    let v2h = hkdf32(shared_secret, b"opendesk control v2h");
+    if role_is_host { (h2v, v2h) } else { (v2h, h2v) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

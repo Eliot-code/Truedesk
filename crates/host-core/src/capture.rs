@@ -1,9 +1,14 @@
 use crate::encode::{PixelFormat, RawFrame};
 use scap::capturer::{Capturer, Options};
 use scap::frame::{Frame, FrameType};
+use protocol::control::MonitorInfo;
 
 pub trait ScreenCapturer {
     fn next_frame(&mut self) -> Option<RawFrame>;
+
+    fn monitors(&self) -> Vec<MonitorInfo> { Vec::new() }
+
+    fn select_monitor(&mut self, _id: u32) -> bool { false }
 }
 
 pub struct ScapCapturer {
@@ -20,17 +25,25 @@ impl ScapCapturer {
             return None;
         }
 
-        let options = Options {
-            fps: 15,
-            target: None,
-            output_type: FrameType::BGRAFrame,
-            ..Default::default()
-        };
+        let options = Self::options(None);
         let mut capturer = Capturer::build(options).ok()?;
         capturer.start_capture();
 
         Some(Self { capturer })
     }
+
+    fn options(target: Option<scap::Target>) -> Options {
+        Options {
+            fps: 15,
+            target,
+            output_type: FrameType::BGRAFrame,
+            ..Default::default()
+        }
+    }
+}
+
+fn selected_monitor_id(monitors: &[MonitorInfo], id: u32) -> Option<u32> {
+    monitors.iter().find(|monitor| monitor.id == id).map(|monitor| monitor.id)
 }
 
 impl ScreenCapturer for ScapCapturer {
@@ -52,7 +65,47 @@ impl ScreenCapturer for ScapCapturer {
             timestamp_us,
         })
     }
+
+    fn monitors(&self) -> Vec<MonitorInfo> {
+        scap::get_all_targets()
+            .into_iter()
+            .enumerate()
+            .filter_map(|target| match target {
+                (index, scap::Target::Display(display)) => {
+                    // scap 0.0.8 exposes display IDs and titles publicly, but
+                    // keeps get_target_dimensions private. Keep the metadata
+                    // shape stable and report unknown dimensions as zero.
+                    let (width, height) = (0, 0);
+                    let primary = index == 0;
+                    Some(MonitorInfo {
+                        id: display.id,
+                        name: display.title,
+                        width: u32::try_from(width).ok()?,
+                        height: u32::try_from(height).ok()?,
+                        is_primary: primary,
+                    })
+                }
+                (_, scap::Target::Window(_)) => None,
+            })
+            .collect()
+    }
+
+    fn select_monitor(&mut self, id: u32) -> bool {
+        let monitors = self.monitors();
+        if selected_monitor_id(&monitors, id).is_none() { return false; }
+        let target = scap::get_all_targets().into_iter().find_map(|target| match target {
+            scap::Target::Display(display) if display.id == id => Some(scap::Target::Display(display)),
+            _ => None,
+        });
+        let Some(target) = target else { return false };
+        self.capturer.stop_capture();
+        let Ok(mut capturer) = Capturer::build(Self::options(Some(target))) else { return false };
+        capturer.start_capture();
+        self.capturer = capturer;
+        true
+    }
 }
+
 
 impl Drop for ScapCapturer {
     fn drop(&mut self) {
@@ -93,5 +146,12 @@ mod tests {
         let f = c.next_frame().expect("frame");
         assert_eq!((f.width, f.height), (320, 240));
         assert!(!f.data.is_empty());
+    }
+
+    #[test]
+    fn selected_monitor_id_only_accepts_advertised_displays() {
+        let monitors = vec![MonitorInfo { id: 4, name: "A".into(), width: 0, height: 0, is_primary: true }];
+        assert_eq!(selected_monitor_id(&monitors, 4), Some(4));
+        assert_eq!(selected_monitor_id(&monitors, 9), None);
     }
 }

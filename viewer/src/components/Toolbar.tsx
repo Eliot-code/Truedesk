@@ -6,6 +6,9 @@ interface ToolbarProps {
   clipboardSync?: boolean;
   onClipboardSyncChange?: (enabled: boolean) => void;
   onDisconnect: () => void;
+  monitors?: import("../lib/api").MonitorInfo[];
+  selectedMonitor?: number;
+  onMonitorChange?: (id: number) => void;
 }
 
 function IconButton({ label, children, onClick }: { label: string; children: ReactNode; onClick?: () => void }) {
@@ -17,7 +20,7 @@ function formatDuration(seconds: number): string {
   return `${minutes}:${(seconds % 60).toString().padStart(2, "0")}`;
 }
 
-export default function Toolbar({ remoteId, latency = "18 ms", clipboardSync = true, onClipboardSyncChange = () => {}, onDisconnect }: ToolbarProps) {
+export default function Toolbar({ remoteId, latency = "18 ms", clipboardSync = true, onClipboardSyncChange = () => {}, onDisconnect, monitors = [], selectedMonitor, onMonitorChange = () => {} }: ToolbarProps) {
   const [elapsed, setElapsed] = useState(0);
   const [keyboard, setKeyboard] = useState(false);
 
@@ -47,6 +50,12 @@ export default function Toolbar({ remoteId, latency = "18 ms", clipboardSync = t
             <span className="sr-only">Quality</span>
             <select aria-label="Quality" defaultValue="auto"><option value="auto">Auto</option><option value="high">High</option><option value="balanced">Balanced</option></select>
           </label>
+          {monitors.length > 0 && <label className="session-toolbar__select-chip">
+            <span className="sr-only">Monitor</span>
+            <select aria-label="Monitor" value={selectedMonitor ?? monitors[0].id} onChange={(event) => onMonitorChange(Number(event.target.value))}>
+              {monitors.map((monitor) => <option key={monitor.id} value={monitor.id}>{monitor.name}{monitor.width && monitor.height ? ` · ${monitor.width}×${monitor.height}` : ""}{monitor.is_primary ? " · Primary" : ""}</option>)}
+            </select>
+          </label>}
           <IconButton label="Sync clipboard" onClick={() => onClipboardSyncChange(!clipboardSync)}>{clipboardSync ? "▣" : "□"}</IconButton>
           <IconButton label="Keyboard" onClick={() => setKeyboard((value) => !value)}>{keyboard ? "⌨" : "⌑"}</IconButton>
         </div>

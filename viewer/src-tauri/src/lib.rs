@@ -6,7 +6,7 @@ use config::ConfigStore;
 use contacts::{Contact, ContactStore};
 use futures_util::StreamExt;
 use host_core::{clipboard::{ArboardBackend, ClipboardSync}, filexfer::{ConsentDecision, FileReceiver, FileSink, FileSource, FileSender}, roles::DataHandle, transport::reliable::ReliableSender};
-use protocol::{crypto::{Opener, Sealer}, datamsg::DataMsg, filexfer::FileMsg, frame, Tag};
+use protocol::{control::{Control, MonitorInfo}, crypto::{Opener, Sealer}, datamsg::DataMsg, filexfer::FileMsg, frame, Tag};
 use serde::Serialize;
 use std::{collections::HashMap, path::{Path, PathBuf}, sync::{atomic::{AtomicBool, Ordering}, mpsc as std_mpsc, Arc, Mutex}, time::Duration};
 use tauri::{AppHandle, Emitter, Manager};
@@ -23,6 +23,8 @@ struct RuntimeState {
     pending_file_requests: HashMap<u64, oneshot::Sender<bool>>,
     file_outgoing: Option<ReliableSender>,
     file_sealer: Option<Arc<Mutex<Sealer>>>,
+    control_sender: Option<ReliableSender>,
+    control_sealer: Option<Arc<Mutex<Sealer>>>,
     clipboard_enabled: Arc<AtomicBool>,
     clipboard_thread: Option<ClipboardThread>,
 }
@@ -100,6 +102,8 @@ struct VideoFrame {
     height: u16,
     data: Vec<u8>,
 }
+#[derive(Serialize, Clone)]
+struct MonitorListEvent { monitors: Vec<MonitorInfo> }
 #[derive(Serialize, Clone)]
 #[allow(dead_code)]
 pub(crate) struct FileOffer {
@@ -329,7 +333,7 @@ fn emit<T: Serialize + Clone>(app: &AppHandle, event: &str, payload: T) {
 }
 
 fn activate_data_channel(app: &AppHandle, handle: DataHandle, from: String) {
-    let DataHandle { sender, receiver, sealer, opener } = handle;
+    let DataHandle { sender, receiver, sealer, opener, control_sender, control_sealer } = handle;
     let enabled = app.state::<AppState>().0.lock().unwrap().clipboard_enabled.clone();
     let sealer = Arc::new(Mutex::new(sealer));
     let clipboard_thread = spawn_clipboard_thread(sender.clone(), sealer.clone(), enabled);
@@ -339,6 +343,8 @@ fn activate_data_channel(app: &AppHandle, handle: DataHandle, from: String) {
     let mut state = state.0.lock().unwrap();
     state.file_outgoing = Some(sender);
     state.file_sealer = Some(sealer);
+    state.control_sender = Some(control_sender);
+    state.control_sealer = Some(Arc::new(Mutex::new(control_sealer)));
     state.clipboard_thread = clipboard_thread.map(|(command_tx, join)| ClipboardThread { command_tx, join });
     drop(state);
     spawn_file_receiver(app.clone(), file_receiver, from);
@@ -355,6 +361,8 @@ fn clear_data_channel(app: &AppHandle) {
         let thread = state.clipboard_thread.take();
         state.file_outgoing = None;
         state.file_sealer = None;
+        state.control_sender = None;
+        state.control_sealer = None;
         state.clipboard_enabled.store(true, Ordering::Relaxed);
         state.pending_file_requests.clear();
         thread
@@ -790,6 +798,7 @@ fn connect(
 
             let (frame_tx, mut frame_rx) = mpsc::channel::<Vec<u8>>(64);
             let (input_tx, input_rx) = mpsc::channel::<Vec<u8>>(256);
+            let (monitor_tx, mut monitor_rx) = mpsc::channel::<Vec<u8>>(16);
             task_app.state::<AppState>().0.lock().unwrap().viewer_input = Some(input_tx);
 
             let frame_app = task_app.clone();
@@ -819,6 +828,15 @@ fn connect(
                 }
             });
 
+            let monitor_app = task_app.clone();
+            tauri::async_runtime::spawn(async move {
+                while let Some(body) = monitor_rx.recv().await {
+                    if let Some(Control::MonitorList { monitors }) = Control::from_bytes(&body) {
+                        emit(&monitor_app, "monitor_list", MonitorListEvent { monitors });
+                    }
+                }
+            });
+
             emit(
                 &task_app,
                 "status_changed",
@@ -836,13 +854,14 @@ fn connect(
             );
             let (data_ready_tx, data_ready_rx) = oneshot::channel();
             let session_task = tauri::async_runtime::spawn(async move {
-                host_core::roles::run_viewer_session_with_data(
+                host_core::roles::run_viewer_session_with_monitors(
                     ws,
                     &password,
                     &session,
                     frame_tx,
                     input_rx,
                     Some(data_ready_tx),
+                    Some(monitor_tx),
                 )
                 .await
             });
@@ -904,6 +923,19 @@ fn send_input(state: tauri::State<'_, AppState>, bytes: Vec<u8>) -> Result<(), S
 }
 
 #[tauri::command]
+async fn select_monitor(state: tauri::State<'_, AppState>, id: u32) -> Result<(), String> {
+    let (sender, sealer) = {
+        let state = state.0.lock().unwrap();
+        (state.control_sender.clone(), state.control_sealer.clone())
+    };
+    let sender = sender.ok_or_else(|| "no active viewer session".to_owned())?;
+    let sealer = sealer.ok_or_else(|| "control channel is not ready".to_owned())?;
+    let body = Control::SelectMonitor { id }.to_bytes();
+    let sealed = sealer.lock().unwrap().seal(&body);
+    sender.send_frame(Tag::Control, &sealed).await.map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn set_clipboard_sync(state: tauri::State<'_, AppState>, enabled: bool) {
     state.0.lock().unwrap().clipboard_enabled.store(enabled, Ordering::Relaxed);
 }
@@ -955,6 +987,8 @@ pub fn run() {
                 pending_file_requests: HashMap::new(),
                 file_outgoing: None,
                 file_sealer: None,
+                control_sender: None,
+                control_sealer: None,
                 clipboard_enabled: Arc::new(AtomicBool::new(true)),
                 clipboard_thread: None,
             })));
@@ -979,6 +1013,7 @@ pub fn run() {
             connect,
             disconnect,
             send_input,
+            select_monitor,
             set_clipboard_sync,
             send_file,
             respond_file

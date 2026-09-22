@@ -15,9 +15,27 @@ export interface SessionProps {
 export default function Session({ remoteId, role, onDisconnect }: SessionProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [clipboardSync, setClipboardSync] = useState(true);
+  const [monitors, setMonitors] = useState<api.MonitorInfo[]>([]);
+  const [selectedMonitor, setSelectedMonitor] = useState<number>();
   const toggleClipboardSync = (enabled: boolean) => {
     setClipboardSync(enabled);
     void api.setClipboardSync(enabled).catch(() => setClipboardSync(!enabled));
+  };
+
+  useEffect(() => {
+    if (role !== "viewer") return;
+    let stop: (() => void) | undefined;
+    const listener = api.onMonitorList(({ monitors: next }) => {
+      setMonitors(next);
+      setSelectedMonitor(next.find((monitor) => monitor.is_primary)?.id ?? next[0]?.id);
+    });
+    void listener.then((unlisten) => { stop = unlisten; });
+    return () => { if (stop) stop(); else void listener.then((unlisten) => unlisten()); };
+  }, [role]);
+
+  const chooseMonitor = (id: number) => {
+    setSelectedMonitor(id);
+    void api.selectMonitor(id).catch(() => {});
   };
 
   useEffect(() => {
@@ -53,7 +71,7 @@ export default function Session({ remoteId, role, onDisconnect }: SessionProps) 
     <main className={`session-screen session-screen--${role}`}>
       <canvas ref={canvasRef} className="session-canvas" tabIndex={0} aria-label="Remote screen" />
       {role === "host" && <div className="session-host-overlay"><span className="eyebrow">OPENDESK · SECURE SESSION</span><h1>You are being controlled by {remoteId}</h1><p>Your screen is shared for this session.</p></div>}
-      <Toolbar remoteId={remoteId} clipboardSync={clipboardSync} onClipboardSyncChange={toggleClipboardSync} onDisconnect={onDisconnect} />
+      <Toolbar remoteId={remoteId} monitors={monitors} selectedMonitor={selectedMonitor} onMonitorChange={chooseMonitor} clipboardSync={clipboardSync} onClipboardSyncChange={toggleClipboardSync} onDisconnect={onDisconnect} />
       <FileTransfer />
     </main>
   );

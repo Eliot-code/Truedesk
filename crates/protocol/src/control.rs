@@ -9,6 +9,17 @@ pub enum Control {
     Ice { session: String, cand: String },
     Error { code: String },
     Bye { session: String },
+    MonitorList { monitors: Vec<MonitorInfo> },
+    SelectMonitor { id: u32 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MonitorInfo {
+    pub id: u32,
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    pub is_primary: bool,
 }
 
 impl Control {
@@ -56,5 +67,25 @@ mod tests {
         };
         let json = String::from_utf8(c.to_bytes()).unwrap();
         assert!(json.contains("\"t\":\"ice\""));
+    }
+
+    #[test]
+    fn monitor_list_roundtrips() {
+        let c = Control::MonitorList {
+            monitors: vec![MonitorInfo {
+                id: 42,
+                name: "Built-in Display".into(),
+                width: 2560,
+                height: 1600,
+                is_primary: true,
+            }],
+        };
+        assert_eq!(Control::from_bytes(&c.to_bytes()), Some(c));
+    }
+
+    #[test]
+    fn select_monitor_roundtrips() {
+        let c = Control::SelectMonitor { id: 7 };
+        assert_eq!(Control::from_bytes(&c.to_bytes()), Some(c));
     }
 }
