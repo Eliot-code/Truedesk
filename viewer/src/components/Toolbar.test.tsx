@@ -18,4 +18,13 @@ describe("Toolbar", () => {
     expect(screen.getByText("987654321")).toBeTruthy();
     expect(screen.getByLabelText("Session timer").textContent).toMatch(/^\d{2}:\d{2}$/);
   });
+
+  it("calls the recording handler for start and stop", () => {
+    const onRecordingToggle = vi.fn();
+    const { rerender } = render(<Toolbar remoteId="123" onDisconnect={vi.fn()} onRecordingToggle={onRecordingToggle} />);
+    fireEvent.click(screen.getByRole("button", { name: "Record" }));
+    rerender(<Toolbar remoteId="123" onDisconnect={vi.fn()} recordingActive onRecordingToggle={onRecordingToggle} />);
+    fireEvent.click(screen.getByRole("button", { name: "Stop recording" }));
+    expect(onRecordingToggle).toHaveBeenCalledTimes(2);
+  });
 });

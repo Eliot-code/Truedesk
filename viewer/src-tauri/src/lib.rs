@@ -9,7 +9,7 @@ use futures_util::StreamExt;
 use host_core::{clipboard::{ArboardBackend, ClipboardSync}, filexfer::{ConsentDecision, FileReceiver, FileSink, FileSource, FileSender}, roles::DataHandle, transport::reliable::ReliableSender};
 use protocol::{control::{Control, MonitorInfo}, crypto::{Opener, Sealer}, datamsg::DataMsg, filexfer::FileMsg, frame, Tag};
 use serde::Serialize;
-use std::{collections::HashMap, path::{Path, PathBuf}, sync::{atomic::{AtomicBool, Ordering}, mpsc as std_mpsc, Arc, Mutex}, time::Duration};
+use std::{collections::HashMap, fs, path::{Path, PathBuf}, sync::{atomic::{AtomicBool, Ordering}, mpsc as std_mpsc, Arc, Mutex}, time::Duration};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{mpsc, oneshot};
 
@@ -186,6 +186,35 @@ pub(crate) fn downloads_dir() -> PathBuf {
         .map(PathBuf::from);
     home.map(|path| path.join("Downloads"))
         .unwrap_or_else(|| PathBuf::from("Downloads"))
+}
+
+fn recording_path(suggested_name: &str) -> PathBuf {
+    downloads_dir().join(sanitize_recording_name(suggested_name))
+}
+
+fn sanitize_recording_name(suggested_name: &str) -> String {
+    let name = Path::new(suggested_name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .replace('\\', "_");
+    let sanitized: String = name
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let sanitized = sanitized.trim_matches('.');
+    let sanitized = if sanitized.is_empty() { "recording" } else { sanitized };
+    if sanitized.to_ascii_lowercase().ends_with(".webm") {
+        sanitized.to_owned()
+    } else {
+        format!("{sanitized}.webm")
+    }
 }
 
 fn route_file_consent(
@@ -585,6 +614,15 @@ fn respond_file(
         id,
         accept,
     )
+}
+
+#[tauri::command]
+fn save_recording(bytes: Vec<u8>, suggested_name: String) -> Result<String, String> {
+    let directory = downloads_dir();
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let path = recording_path(&suggested_name);
+    fs::write(&path, bytes).map_err(|error| error.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
 }
 
 #[tauri::command]
@@ -1051,7 +1089,8 @@ pub fn run() {
             set_clipboard_sync,
             set_audio_muted,
             send_file,
-            respond_file
+            respond_file,
+            save_recording
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -1103,5 +1142,19 @@ mod tests {
             };
             assert_eq!(source.recv().await, Some(message));
         });
+    }
+
+    #[test]
+    fn recording_name_is_sanitized_and_has_webm_extension() {
+        assert_eq!(sanitize_recording_name("../remote:session?.webm"), "remote_session_.webm");
+        assert_eq!(sanitize_recording_name("nested/name"), "name.webm");
+        assert_eq!(sanitize_recording_name("..."), "recording.webm");
+    }
+
+    #[test]
+    fn recording_path_stays_in_downloads_directory() {
+        let path = recording_path("../../capture");
+        assert_eq!(path.parent(), Some(downloads_dir().as_path()));
+        assert_eq!(path.file_name().and_then(|name| name.to_str()), Some("capture.webm"));
     }
 }

@@ -17,6 +17,12 @@ export default function Session({ remoteId, role, onDisconnect }: SessionProps) 
   const [clipboardSync, setClipboardSync] = useState(true);
   const [audioMuted, setAudioMuted] = useState(false);
   const audioRef = useRef<{ context: AudioContext; nextTime: number } | undefined>(undefined);
+  const recorderRef = useRef<MediaRecorder | undefined>(undefined);
+  const recordingStreamRef = useRef<MediaStream | undefined>(undefined);
+  const recordingChunksRef = useRef<Blob[]>([]);
+  const [recordingActive, setRecordingActive] = useState(false);
+  const [recordingElapsed, setRecordingElapsed] = useState(0);
+  const recordingStartedAtRef = useRef<number | undefined>(undefined);
   const [monitors, setMonitors] = useState<api.MonitorInfo[]>([]);
   const [selectedMonitor, setSelectedMonitor] = useState<number>();
   const toggleClipboardSync = (enabled: boolean) => {
@@ -44,6 +50,61 @@ export default function Session({ remoteId, role, onDisconnect }: SessionProps) 
     setAudioMuted(muted);
     void api.setAudioMuted(muted).catch(() => setAudioMuted(!muted));
   };
+
+  const stopRecording = () => {
+    const recorder = recorderRef.current;
+    if (!recorder || recorder.state === "inactive") return;
+    recorder.stop();
+    setRecordingActive(false);
+    recordingStartedAtRef.current = undefined;
+    recordingStreamRef.current?.getTracks().forEach((track) => track.stop());
+    recordingStreamRef.current = undefined;
+  };
+
+  const toggleRecording = () => {
+    if (role !== "viewer") return;
+    if (recordingActive) {
+      stopRecording();
+      return;
+    }
+
+    const canvas = canvasRef.current;
+    if (!canvas?.captureStream || typeof MediaRecorder === "undefined") return;
+    try {
+      const stream = canvas.captureStream(60);
+      const recorder = new MediaRecorder(stream, { mimeType: "video/webm" });
+      recordingChunksRef.current = [];
+      recordingStreamRef.current = stream;
+      recorderRef.current = recorder;
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) recordingChunksRef.current.push(event.data);
+      };
+      recorder.onstop = () => {
+        const blob = new Blob(recordingChunksRef.current, { type: "video/webm" });
+        recordingChunksRef.current = [];
+        void blob.arrayBuffer().then((buffer) => api.saveRecording(new Uint8Array(buffer), `opendesk-session-${new Date().toISOString()}.webm`)).catch(() => {});
+        recorderRef.current = undefined;
+      };
+      recordingStartedAtRef.current = Date.now();
+      setRecordingElapsed(0);
+      setRecordingActive(true);
+      recorder.start();
+    } catch {
+      recordingStreamRef.current?.getTracks().forEach((track) => track.stop());
+      recordingStreamRef.current = undefined;
+      recorderRef.current = undefined;
+    }
+  };
+
+  useEffect(() => {
+    if (!recordingActive) return;
+    const timer = window.setInterval(() => {
+      if (recordingStartedAtRef.current) setRecordingElapsed(Math.floor((Date.now() - recordingStartedAtRef.current) / 1000));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [recordingActive]);
+
+  useEffect(() => () => stopRecording(), []);
 
   useEffect(() => {
     if (role !== "viewer") return;
@@ -101,7 +162,7 @@ export default function Session({ remoteId, role, onDisconnect }: SessionProps) 
     <main className={`session-screen session-screen--${role}`}>
       <canvas ref={canvasRef} className="session-canvas" tabIndex={0} aria-label="Remote screen" />
       {role === "host" && <div className="session-host-overlay"><span className="eyebrow">OPENDESK · SECURE SESSION</span><h1>You are being controlled by {remoteId}</h1><p>Your screen is shared for this session.</p></div>}
-      <Toolbar remoteId={remoteId} monitors={monitors} selectedMonitor={selectedMonitor} onMonitorChange={chooseMonitor} clipboardSync={clipboardSync} onClipboardSyncChange={toggleClipboardSync} audioMuted={audioMuted} onAudioMutedChange={toggleAudioMuted} onDisconnect={onDisconnect} />
+      <Toolbar remoteId={remoteId} monitors={monitors} selectedMonitor={selectedMonitor} onMonitorChange={chooseMonitor} clipboardSync={clipboardSync} onClipboardSyncChange={toggleClipboardSync} audioMuted={audioMuted} onAudioMutedChange={toggleAudioMuted} recordingActive={recordingActive} recordingElapsed={recordingElapsed} recordingDisabled={role !== "viewer"} onRecordingToggle={toggleRecording} onDisconnect={onDisconnect} />
       <FileTransfer />
     </main>
   );

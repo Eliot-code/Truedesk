@@ -51,6 +51,7 @@ export const setClipboardSync = (enabled: boolean) => invoke<void>("set_clipboar
 export const setAudioMuted = (muted: boolean) => invoke<void>("set_audio_muted", { muted });
 export const sendFile = (path: string) => invoke<number>("send_file", { path });
 export const respondFile = (id: number, accept: boolean) => invoke<void>("respond_file", { id, accept });
+export const saveRecording = (bytes: Uint8Array, suggestedName: string) => invoke<string>("save_recording", { bytes: Array.from(bytes), suggestedName });
 
 const on = <T>(event: string, handler: (payload: T) => void): Promise<UnlistenFn> => listen<T>(event, ({ payload }) => handler(payload));
 export const onStatusChanged = (handler: (payload: StatusChanged) => void) => on("status_changed", handler);

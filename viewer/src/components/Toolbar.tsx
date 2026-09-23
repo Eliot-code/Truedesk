@@ -11,10 +11,14 @@ interface ToolbarProps {
   onMonitorChange?: (id: number) => void;
   audioMuted?: boolean;
   onAudioMutedChange?: (muted: boolean) => void;
+  recordingActive?: boolean;
+  recordingElapsed?: number;
+  recordingDisabled?: boolean;
+  onRecordingToggle?: () => void;
 }
 
-function IconButton({ label, children, onClick }: { label: string; children: ReactNode; onClick?: () => void }) {
-  return <button className="session-toolbar__icon" type="button" aria-label={label} onClick={onClick}>{children}</button>;
+function IconButton({ label, children, onClick, disabled = false }: { label: string; children: ReactNode; onClick?: () => void; disabled?: boolean }) {
+  return <button className="session-toolbar__icon" type="button" aria-label={label} onClick={onClick} disabled={disabled}>{children}</button>;
 }
 
 function formatDuration(seconds: number): string {
@@ -22,7 +26,7 @@ function formatDuration(seconds: number): string {
   return `${minutes}:${(seconds % 60).toString().padStart(2, "0")}`;
 }
 
-export default function Toolbar({ remoteId, latency = "18 ms", clipboardSync = true, onClipboardSyncChange = () => {}, onDisconnect, monitors = [], selectedMonitor, onMonitorChange = () => {}, audioMuted = false, onAudioMutedChange = () => {} }: ToolbarProps) {
+export default function Toolbar({ remoteId, latency = "18 ms", clipboardSync = true, onClipboardSyncChange = () => {}, onDisconnect, monitors = [], selectedMonitor, onMonitorChange = () => {}, audioMuted = false, onAudioMutedChange = () => {}, recordingActive = false, recordingElapsed = 0, recordingDisabled = false, onRecordingToggle = () => {} }: ToolbarProps) {
   const [elapsed, setElapsed] = useState(0);
   const [keyboard, setKeyboard] = useState(false);
 
@@ -60,6 +64,11 @@ export default function Toolbar({ remoteId, latency = "18 ms", clipboardSync = t
           </label>}
           <IconButton label="Sync clipboard" onClick={() => onClipboardSyncChange(!clipboardSync)}>{clipboardSync ? "▣" : "□"}</IconButton>
           <IconButton label="Mute audio" onClick={() => onAudioMutedChange(!audioMuted)}>{audioMuted ? "🔇" : "🔊"}</IconButton>
+          {recordingActive && <span className="session-toolbar__recording-status" aria-label="Recording elapsed"><span className="session-toolbar__recording-dot" aria-hidden="true" />{formatDuration(recordingElapsed)}</span>}
+          <IconButton label={recordingActive ? "Stop recording" : "Record"} onClick={onRecordingToggle} disabled={recordingDisabled}>
+            {recordingActive ? "■" : "●"}
+          </IconButton>
+          {recordingDisabled && <span className="sr-only">Recording is only available while viewing a session</span>}
           <IconButton label="Keyboard" onClick={() => setKeyboard((value) => !value)}>{keyboard ? "⌨" : "⌑"}</IconButton>
         </div>
         <div className="session-toolbar__actions">
