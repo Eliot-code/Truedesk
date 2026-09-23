@@ -29,6 +29,32 @@ server-reflexive addresses. A self-hosted STUN service can be substituted in
 the host-core `AgentConfig.urls` configuration. STUN helps discover addresses;
 it is not a media relay and does not receive desktop contents.
 
+## Features and quickstart
+
+- End-to-end encrypted screen, input, and microphone-audio payloads
+- End-to-end encrypted file transfer and text-only clipboard sync
+- Optional unattended access with a stored password
+- Local address book and recent peer IDs
+- Multi-monitor discovery and monitor selection
+
+Audio currently means microphone/input capture, not system-loopback audio. Two-factor authentication is not implemented, and Windows/Linux host support is still less mature than the macOS-tested path.
+
+For the architecture, security model, and self-hosting instructions, see
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
+[`docs/SECURITY.md`](docs/SECURITY.md), and
+[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
+
+Quickstart:
+
+1. Deploy the relay and configure clients with its `wss://.../ws` URL.
+2. Start hosting on the host device and note its nine-digit peer ID.
+3. From the viewer, enter that ID and the matching session password, then
+   approve the request on the host unless unattended access is enabled.
+
+For local development, run `cargo run -p relay`, use
+`ws://127.0.0.1:8080/ws`, and start the host/viewer development commands
+described below.
+
 ## Why
 
 - **Zero-knowledge by design.** Two crypto layers: TLS on the wire, and an inner ChaCha20-Poly1305 layer end-to-end. Whoever runs the relay sees nothing.

@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust protocol and relay
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p protocol -p relay
+      - run: cargo test -p protocol -p relay
+      - run: cargo clippy -p protocol -p relay --all-targets -- -D warnings
+
+  host-core:
+    name: Rust host-core
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p host-core
+      - run: cargo test -p host-core
+      - run: cargo clippy -p host-core --all-targets -- -D warnings
+
+  tauri:
+    name: Tauri Rust crate
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: viewer/src-tauri -> viewer/src-tauri/target
+      - run: cargo check --manifest-path viewer/src-tauri/Cargo.toml
+      - run: cargo clippy --manifest-path viewer/src-tauri/Cargo.toml --all-targets -- -D warnings
+
+  viewer:
+    name: Viewer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: viewer/package-lock.json
+      - run: npm ci
+        working-directory: viewer
+      - run: npm run build
+        working-directory: viewer
+      - run: npx vitest run
+        working-directory: viewer
