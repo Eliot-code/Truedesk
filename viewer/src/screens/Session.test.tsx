@@ -2,8 +2,10 @@
 import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { onVideoFrame, onFileOffer, onFileProgress, onFileDone, onFileError, sendFile, respondFile, sendInput, decode } = vi.hoisted(() => ({
+const { onVideoFrame, onAudioFrame, onMonitorList, onFileOffer, onFileProgress, onFileDone, onFileError, sendFile, respondFile, sendInput, selectMonitor, setAudioMuted, setClipboardSync, decode } = vi.hoisted(() => ({
   onVideoFrame: vi.fn(),
+  onAudioFrame: vi.fn(() => Promise.resolve(vi.fn())),
+  onMonitorList: vi.fn(() => Promise.resolve(vi.fn())),
   onFileOffer: vi.fn(() => Promise.resolve(vi.fn())),
   onFileProgress: vi.fn(() => Promise.resolve(vi.fn())),
   onFileDone: vi.fn(() => Promise.resolve(vi.fn())),
@@ -11,10 +13,13 @@ const { onVideoFrame, onFileOffer, onFileProgress, onFileDone, onFileError, send
   sendFile: vi.fn(),
   respondFile: vi.fn(),
   sendInput: vi.fn<(bytes: Uint8Array) => Promise<void>>(() => Promise.resolve()),
+  selectMonitor: vi.fn(() => Promise.resolve()),
+  setAudioMuted: vi.fn(() => Promise.resolve()),
+  setClipboardSync: vi.fn(() => Promise.resolve()),
   decode: vi.fn(),
 }));
 
-vi.mock("../lib/api", () => ({ onVideoFrame, onFileOffer, onFileProgress, onFileDone, onFileError, sendFile, respondFile, sendInput }));
+vi.mock("../lib/api", () => ({ onVideoFrame, onAudioFrame, onMonitorList, onFileOffer, onFileProgress, onFileDone, onFileError, sendFile, respondFile, sendInput, selectMonitor, setAudioMuted, setClipboardSync }));
 vi.mock("../lib/decode", () => ({ makeDecoder: vi.fn(() => decode) }));
 
 import Session from "./Session";

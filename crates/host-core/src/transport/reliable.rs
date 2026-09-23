@@ -107,7 +107,7 @@ where
                     }
                     // Media is lossy under pressure. Dropping the newest item
                     // keeps a slow media consumer from stopping the demux.
-                    Tag::Video | Tag::Input => {
+                    Tag::Video | Tag::Audio | Tag::Input => {
                         let item = (tag, body.to_vec());
                         let _ = media_tx.try_send(item);
                     }
@@ -118,7 +118,6 @@ where
                             break;
                         }
                     }
-                    Tag::Audio => {}
                 }
             }
         });
@@ -146,7 +145,7 @@ where
         self.data_rx.take()
     }
 
-    /// Take the lossy Video/Input stream, retaining each frame's tag.
+    /// Take the lossy Video/Audio/Input stream, retaining each frame's tag.
     pub fn take_media_rx(&mut self) -> Option<mpsc::Receiver<(Tag, Vec<u8>)>> {
         self.media_rx.take()
     }
@@ -189,7 +188,7 @@ mod tests {
         });
         let media_reader = tokio::spawn(async move {
             let mut received = Vec::new();
-            for _ in 0..32 {
+            for _ in 0..64 {
                 received.push(media_rx.recv().await.unwrap());
             }
             received
@@ -199,6 +198,7 @@ mod tests {
             for index in 0..32u8 {
                 a.send_frame(Tag::Data, &[index]).await.unwrap();
                 a.send_frame(Tag::Video, &[index + 32]).await.unwrap();
+                a.send_frame(Tag::Audio, &[index + 64]).await.unwrap();
             }
         };
         timeout(Duration::from_secs(2), sends)
@@ -210,8 +210,7 @@ mod tests {
         assert_eq!(data, (0..32u8).map(|n| vec![n]).collect::<Vec<_>>());
         assert_eq!(
             media,
-            (32..64u8)
-                .map(|n| (Tag::Video, vec![n]))
+            (0..32u8).flat_map(|n| [(Tag::Video, vec![n + 32]), (Tag::Audio, vec![n + 64])])
                 .collect::<Vec<_>>()
         );
     }

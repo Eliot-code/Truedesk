@@ -9,6 +9,8 @@ interface ToolbarProps {
   monitors?: import("../lib/api").MonitorInfo[];
   selectedMonitor?: number;
   onMonitorChange?: (id: number) => void;
+  audioMuted?: boolean;
+  onAudioMutedChange?: (muted: boolean) => void;
 }
 
 function IconButton({ label, children, onClick }: { label: string; children: ReactNode; onClick?: () => void }) {
@@ -20,7 +22,7 @@ function formatDuration(seconds: number): string {
   return `${minutes}:${(seconds % 60).toString().padStart(2, "0")}`;
 }
 
-export default function Toolbar({ remoteId, latency = "18 ms", clipboardSync = true, onClipboardSyncChange = () => {}, onDisconnect, monitors = [], selectedMonitor, onMonitorChange = () => {} }: ToolbarProps) {
+export default function Toolbar({ remoteId, latency = "18 ms", clipboardSync = true, onClipboardSyncChange = () => {}, onDisconnect, monitors = [], selectedMonitor, onMonitorChange = () => {}, audioMuted = false, onAudioMutedChange = () => {} }: ToolbarProps) {
   const [elapsed, setElapsed] = useState(0);
   const [keyboard, setKeyboard] = useState(false);
 
@@ -57,6 +59,7 @@ export default function Toolbar({ remoteId, latency = "18 ms", clipboardSync = t
             </select>
           </label>}
           <IconButton label="Sync clipboard" onClick={() => onClipboardSyncChange(!clipboardSync)}>{clipboardSync ? "▣" : "□"}</IconButton>
+          <IconButton label="Mute audio" onClick={() => onAudioMutedChange(!audioMuted)}>{audioMuted ? "🔇" : "🔊"}</IconButton>
           <IconButton label="Keyboard" onClick={() => setKeyboard((value) => !value)}>{keyboard ? "⌨" : "⌑"}</IconButton>
         </div>
         <div className="session-toolbar__actions">

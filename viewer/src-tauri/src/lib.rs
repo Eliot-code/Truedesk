@@ -26,6 +26,7 @@ struct RuntimeState {
     control_sender: Option<ReliableSender>,
     control_sealer: Option<Arc<Mutex<Sealer>>>,
     clipboard_enabled: Arc<AtomicBool>,
+    audio_muted: Arc<AtomicBool>,
     clipboard_thread: Option<ClipboardThread>,
 }
 
@@ -104,6 +105,8 @@ struct VideoFrame {
 }
 #[derive(Serialize, Clone)]
 struct MonitorListEvent { monitors: Vec<MonitorInfo> }
+#[derive(Serialize, Clone)]
+struct AudioFrameEvent { sample_rate: u32, channels: u8, samples: Vec<i16> }
 #[derive(Serialize, Clone)]
 #[allow(dead_code)]
 pub(crate) struct FileOffer {
@@ -799,6 +802,7 @@ fn connect(
             let (frame_tx, mut frame_rx) = mpsc::channel::<Vec<u8>>(64);
             let (input_tx, input_rx) = mpsc::channel::<Vec<u8>>(256);
             let (monitor_tx, mut monitor_rx) = mpsc::channel::<Vec<u8>>(16);
+            let (audio_tx, mut audio_rx) = mpsc::channel::<Vec<u8>>(16);
             task_app.state::<AppState>().0.lock().unwrap().viewer_input = Some(input_tx);
 
             let frame_app = task_app.clone();
@@ -825,6 +829,17 @@ fn connect(
                             data: plaintext[18..].to_vec(),
                         },
                     );
+                }
+            });
+
+            let audio_app = task_app.clone();
+            let audio_muted = task_app.state::<AppState>().0.lock().unwrap().audio_muted.clone();
+            tauri::async_runtime::spawn(async move {
+                while let Some(body) = audio_rx.recv().await {
+                    if audio_muted.load(Ordering::Relaxed) { continue; }
+                    if let Some(frame) = protocol::audio::AudioFrame::from_bytes(&body) {
+                        emit(&audio_app, "audio_frame", AudioFrameEvent { sample_rate: frame.sample_rate, channels: frame.channels, samples: frame.samples });
+                    }
                 }
             });
 
@@ -862,6 +877,7 @@ fn connect(
                     input_rx,
                     Some(data_ready_tx),
                     Some(monitor_tx),
+                    Some(audio_tx),
                 )
                 .await
             });
@@ -941,6 +957,11 @@ fn set_clipboard_sync(state: tauri::State<'_, AppState>, enabled: bool) {
 }
 
 #[tauri::command]
+fn set_audio_muted(state: tauri::State<'_, AppState>, muted: bool) {
+    state.0.lock().unwrap().audio_muted.store(muted, Ordering::Relaxed);
+}
+
+#[tauri::command]
 fn disconnect(state: tauri::State<'_, AppState>, app: AppHandle) {
     let (host_thread, viewer_task) = {
         let mut s = state.0.lock().unwrap();
@@ -990,6 +1011,7 @@ pub fn run() {
                 control_sender: None,
                 control_sealer: None,
                 clipboard_enabled: Arc::new(AtomicBool::new(true)),
+                audio_muted: Arc::new(AtomicBool::new(false)),
                 clipboard_thread: None,
             })));
             Ok(())
@@ -1015,6 +1037,7 @@ pub fn run() {
             send_input,
             select_monitor,
             set_clipboard_sync,
+            set_audio_muted,
             send_file,
             respond_file
         ])

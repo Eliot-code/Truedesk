@@ -19,6 +19,7 @@ export interface VideoFrame {
   height: number;
   data: number[];
 }
+export interface AudioFrame { sample_rate: number; channels: number; samples: number[] }
 export interface FileOffer { id: number; name: string; size: number; from: string }
 export interface FileProgress { id: number; transferred: number; total: number; direction: "send" | "receive" | string }
 export interface FileDone { id: number }
@@ -47,6 +48,7 @@ export const disconnect = () => invoke<void>("disconnect");
 export const sendInput = (bytes: Uint8Array) => invoke<void>("send_input", { bytes: Array.from(bytes) });
 export const selectMonitor = (id: number) => invoke<void>("select_monitor", { id });
 export const setClipboardSync = (enabled: boolean) => invoke<void>("set_clipboard_sync", { enabled });
+export const setAudioMuted = (muted: boolean) => invoke<void>("set_audio_muted", { muted });
 export const sendFile = (path: string) => invoke<number>("send_file", { path });
 export const respondFile = (id: number, accept: boolean) => invoke<void>("respond_file", { id, accept });
 
@@ -58,6 +60,7 @@ export const onSessionEnded = (handler: (payload: SessionEnded) => void) => on("
 export const onError = (handler: (payload: ErrorEvent) => void) => on("error", handler);
 export const onVideoFrame = (handler: (frame: VideoFrame) => void) => on("video_frame", handler);
 export const onMonitorList = (handler: (payload: { monitors: MonitorInfo[] }) => void) => on("monitor_list", handler);
+export const onAudioFrame = (handler: (frame: AudioFrame) => void) => on("audio_frame", handler);
 export const onFileOffer = (handler: (payload: FileOffer) => void) => on("file_offer", handler);
 export const onFileProgress = (handler: (payload: FileProgress) => void) => on("file_progress", handler);
 export const onFileDone = (handler: (payload: FileDone) => void) => on("file_done", handler);

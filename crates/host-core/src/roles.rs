@@ -1,6 +1,7 @@
 //! Host-role session orchestration.
 
 use crate::{
+    audio,
     capture::{ScapCapturer, ScreenCapturer},
     encode::{self, Encoder, H264Encoder},
     inject::{EnigoInjector, InputInjector, NoopInjector},
@@ -244,6 +245,7 @@ where
         });
     }
     let (mut transport_tx, mut transport_rx) = transport.into_split();
+    let mut audio_rx = audio::spawn_capture();
 
     let first_frame = loop {
         if let Some(frame) = capturer.next_frame() {
@@ -282,6 +284,10 @@ where
     let mut last_keyframe = next_frame;
     loop {
         tokio::select! {
+            Some(audio_frame) = audio_rx.recv() => {
+                let sealed = sealer.seal(&audio_frame.to_bytes());
+                let _ = transport_tx.send(Tag::Audio, &sealed).await;
+            },
             Some(body) = session_control_rx.recv() => {
                 if let Some(plaintext) = control_opener.open(&body) {
                     if let Some(Control::SelectMonitor { id }) = Control::from_bytes(&plaintext) {
@@ -342,15 +348,17 @@ pub async fn run_viewer_session_with_data<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    run_viewer_session_with_monitors(ws, password, ice_session, frame_sink, input_rx, data_ready, None).await
+    run_viewer_session_with_monitors(ws, password, ice_session, frame_sink, input_rx, data_ready, None, None).await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_viewer_session_with_monitors<S>(
     ws: WebSocketStream<S>, password: &str, ice_session: &str,
     frame_sink: tokio::sync::mpsc::Sender<Vec<u8>>,
     input_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
     data_ready: Option<oneshot::Sender<DataHandle>>,
     monitor_sink: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    audio_sink: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
 ) -> Result<(), String>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -417,7 +425,7 @@ where
     }
     let (transport_tx, transport_rx) = transport.into_split();
 
-    run_viewer_media_loop_with_control(transport_tx, transport_rx, frame_sink, input_rx, sealer, opener, session_control_rx, control_opener, monitor_sink).await
+    run_viewer_media_loop_with_control(transport_tx, transport_rx, frame_sink, input_rx, sealer, opener, session_control_rx, control_opener, monitor_sink, audio_sink).await
 }
 
 #[allow(dead_code)]
@@ -430,7 +438,7 @@ async fn run_viewer_media_loop(
     opener: Opener,
 ) -> Result<(), String> {
     let (_tx, rx) = mpsc::channel(1);
-    run_viewer_media_loop_with_control(transport_tx, transport_rx, frame_sink, input_rx, sealer, opener, rx, Opener::new([0; 32]), None).await
+    run_viewer_media_loop_with_control(transport_tx, transport_rx, frame_sink, input_rx, sealer, opener, rx, Opener::new([0; 32]), None, None).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -444,6 +452,7 @@ async fn run_viewer_media_loop_with_control(
     mut control_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
     mut control_opener: Opener,
     monitor_sink: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    audio_sink: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
 ) -> Result<(), String> {
     loop {
         tokio::select! {
@@ -455,9 +464,13 @@ async fn run_viewer_media_loop_with_control(
                 }
             },
             received = transport_rx.recv() => {
-                let Some((Tag::Video, sealed)) = received else { return Ok(()) };
+                let Some((tag, sealed)) = received else { return Ok(()) };
                 let Some(plaintext) = opener.open(&sealed) else { continue };
-                if frame_sink.send(plaintext).await.is_err() { return Ok(()) }
+                match tag {
+                    Tag::Video => if frame_sink.send(plaintext).await.is_err() { return Ok(()) },
+                    Tag::Audio => if let Some(sink) = &audio_sink { if sink.send(plaintext).await.is_err() { return Ok(()) } },
+                    _ => {}
+                }
             }
             input = input_rx.recv() => {
                 let Some(bytes) = input else { return Ok(()) };
