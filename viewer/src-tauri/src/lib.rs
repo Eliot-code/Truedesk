@@ -61,6 +61,7 @@ struct PasswordResponse {
 #[derive(Serialize)]
 struct AppConfig {
     relay_url: String,
+    relay_urls: Vec<String>,
     recent_ids: Vec<String>,
 }
 #[derive(Serialize)]
@@ -444,6 +445,7 @@ fn get_config(state: tauri::State<'_, AppState>) -> AppConfig {
     let state = state.0.lock().unwrap();
     AppConfig {
         relay_url: state.config.config.relay_url.clone(),
+        relay_urls: state.config.config.relay_urls.clone(),
         recent_ids: state.config.config.recent_ids.clone(),
     }
 }
@@ -474,7 +476,18 @@ fn set_relay(state: tauri::State<'_, AppState>, url: String) -> Result<(), Strin
     }
     let mut state = state.0.lock().unwrap();
     state.config.config.relay_url = url;
+    state.config.config.relay_urls = vec![state.config.config.relay_url.clone()];
     state.config.save().map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn set_relays(state: tauri::State<'_, AppState>, urls: Vec<String>) -> Result<(), String> {
+    let urls: Vec<String> = urls.into_iter().map(|url| url.trim().to_owned()).filter(|url| !url.is_empty()).collect();
+    if urls.is_empty() { return Err("at least one relay URL is required".into()); }
+    state.0.lock().unwrap().config.set_relays(urls).map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn list_relays(state: tauri::State<'_, AppState>) -> Vec<String> {
+    state.0.lock().unwrap().config.config.relay_urls.clone()
 }
 #[tauri::command]
 fn get_unattended_status(state: tauri::State<'_, AppState>) -> UnattendedStatus {
@@ -658,9 +671,7 @@ fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<()
     );
     let task = tauri::async_runtime::spawn(async move {
         let result = async {
-            let mut ws = host_core::relay_client::connect(&relay_url)
-                .await
-                .map_err(|e| e.to_string())?;
+            let (_, mut ws) = host_core::relay_client::connect_best(&[relay_url]).await?;
             host_core::relay_client::register(&mut ws, &id)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -823,14 +834,12 @@ fn connect(
             state: "connecting",
         },
     );
-    let relay_url = state.0.lock().unwrap().config.config.relay_url.clone();
+    let relay_urls = state.0.lock().unwrap().config.config.relay_urls.clone();
     let target = target_id.clone();
     let task_app = app.clone();
     let task = tauri::async_runtime::spawn(async move {
         let result = async {
-            let mut ws = host_core::relay_client::connect(&relay_url)
-                .await
-                .map_err(|error| error.to_string())?;
+            let (_, mut ws) = host_core::relay_client::connect_best(&relay_urls).await?;
             host_core::relay_client::connect_to(&mut ws, &target)
                 .await
                 .map_err(|error| error.to_string())?;
@@ -1090,7 +1099,9 @@ pub fn run() {
             set_audio_muted,
             send_file,
             respond_file,
-            save_recording
+            save_recording,
+            set_relays,
+            list_relays
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -12,6 +12,8 @@ const DEFAULT_RELAY_URL: &str = "ws://127.0.0.1:8080/ws";
 pub struct Config {
     pub id: String,
     pub relay_url: String,
+    #[serde(default)]
+    pub relay_urls: Vec<String>,
     pub allow_list: Vec<String>,
     pub recent_ids: Vec<String>,
     #[serde(default)]
@@ -28,6 +30,7 @@ impl Default for Config {
         Self {
             id: generate_id(),
             relay_url: DEFAULT_RELAY_URL.to_string(),
+            relay_urls: vec![DEFAULT_RELAY_URL.to_string()],
             allow_list: Vec::new(),
             recent_ids: Vec::new(),
             unattended_password_set: false,
@@ -64,6 +67,14 @@ impl ConfigStore {
             // in-memory config regardless, so save() cannot preserve it.
             config.unattended_password_set = unattended::set_password(&password).is_ok();
         }
+        // Migrate legacy configs without relay_urls while retaining relay_url
+        // as the primary/back-compat field.
+        if config.relay_urls.is_empty() && !config.relay_url.trim().is_empty() {
+            config.relay_urls.push(config.relay_url.clone());
+        }
+        if config.relay_url.trim().is_empty() {
+            config.relay_url = config.relay_urls.first().cloned().unwrap_or_else(|| DEFAULT_RELAY_URL.to_string());
+        }
         let store = Self { path, config };
         store.save()?;
         Ok(store)
@@ -96,6 +107,12 @@ impl ConfigStore {
 
     pub fn add_recent(&mut self, id: &str) -> io::Result<()> {
         add_recent(&mut self.config.recent_ids, id);
+        self.save()
+    }
+
+    pub fn set_relays(&mut self, urls: Vec<String>) -> io::Result<()> {
+        self.config.relay_url = urls[0].clone();
+        self.config.relay_urls = urls;
         self.save()
     }
 }
@@ -174,5 +191,12 @@ mod tests {
         let decoded: Config = serde_json::from_str(&encoded).unwrap();
         assert!(decoded.unattended_password_set);
         assert!(decoded.unattended_enabled);
+    }
+
+    #[test]
+    fn legacy_single_relay_migrates_to_list() {
+        let mut config: Config = serde_json::from_str(r#"{"id":"123456789","relay_url":"wss://legacy","allow_list":[],"recent_ids":[]}"#).unwrap();
+        if config.relay_urls.is_empty() { config.relay_urls.push(config.relay_url.clone()); }
+        assert_eq!(config.relay_urls, vec!["wss://legacy"]);
     }
 }

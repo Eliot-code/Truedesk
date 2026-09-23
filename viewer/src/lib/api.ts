@@ -3,7 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type Status = "offline" | "online" | "connecting" | "in_session";
 export interface Identity { id: string; password: string }
-export interface AppConfig { relay_url: string; recent_ids: string[] }
+export interface AppConfig { relay_url: string; relay_urls: string[]; recent_ids: string[] }
 export interface UnattendedStatus { enabled: boolean; has_password: boolean }
 export interface PermissionStatus { screen_recording: boolean; accessibility: boolean }
 export interface IncomingRequest { peer_id: string; fingerprint: string }
@@ -35,6 +35,8 @@ export const addContact = (alias: string, peer_id: string) => invoke<Contact>("a
 export const removeContact = (peer_id: string) => invoke<void>("remove_contact", { peerId: peer_id });
 export const touchContact = (peer_id: string) => invoke<void>("touch_contact", { peerId: peer_id });
 export const setRelay = (url: string) => invoke<void>("set_relay", { url });
+export const setRelays = (urls: string[]) => invoke<void>("set_relays", { urls });
+export const listRelays = () => invoke<string[]>("list_relays");
 export const getUnattendedStatus = () => invoke<UnattendedStatus>("get_unattended_status");
 export const setUnattendedAccess = (enabled: boolean, password: string | null) => invoke<void>("set_unattended_access", { enabled, password });
 export const permissionStatus = () => invoke<PermissionStatus>("permission_status");

@@ -5,5 +5,6 @@ pub mod encode;
 pub mod filexfer;
 pub mod inject;
 pub mod relay_client;
+pub mod reconnect;
 pub mod roles;
 pub mod transport;
