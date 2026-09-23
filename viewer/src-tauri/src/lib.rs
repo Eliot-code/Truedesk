@@ -1,6 +1,7 @@
 mod config;
 mod contacts;
 mod permissions;
+mod unattended;
 
 use config::ConfigStore;
 use contacts::{Contact, ContactStore};
@@ -451,7 +452,7 @@ fn get_unattended_status(state: tauri::State<'_, AppState>) -> UnattendedStatus 
     let state = state.0.lock().unwrap();
     UnattendedStatus {
         enabled: state.config.config.unattended_enabled,
-        has_password: state.config.config.unattended_password.is_some(),
+        has_password: unattended::has_password(state.config.config.unattended_password_set),
     }
 }
 #[tauri::command]
@@ -462,10 +463,16 @@ fn set_unattended_access(
 ) -> Result<(), String> {
     let mut state = state.0.lock().unwrap();
     let password = password.filter(|value| !value.is_empty());
-    if enabled && password.is_none() {
+    if let Some(password) = password {
+        unattended::set_password(&password).map_err(|error| format!("could not store unattended access password: {error}"))?;
+    } else {
+        unattended::delete_password().map_err(|error| format!("could not clear unattended access password: {error}"))?;
+    }
+    let has_password = unattended::get_password().is_ok();
+    if enabled && !has_password {
         return Err("enter an unattended access password before enabling it".into());
     }
-    state.config.config.unattended_password = password;
+    state.config.config.unattended_password_set = has_password;
     state.config.config.unattended_enabled = enabled;
     state.config.save().map_err(|error| error.to_string())
 }
@@ -585,10 +592,15 @@ fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<()
     let (relay_url, id, password, unattended_enabled) = {
         let mut s = state.0.lock().unwrap();
         let id = s.config.ensure_identity();
-        let unattended_enabled = s.config.config.unattended_enabled
-            && s.config.config.unattended_password.is_some();
-        let password = s.config.config.unattended_password.clone()
-            .unwrap_or_else(|| current_password(&mut s));
+        let unattended_password = if s.config.config.unattended_enabled {
+            unattended::get_password().ok()
+        } else {
+            None
+        };
+        // A keychain failure deliberately disables unattended approval for
+        // this session and uses the normal manual-accept PAKE path.
+        let unattended_enabled = unattended_password.is_some();
+        let password = unattended_password.unwrap_or_else(|| current_password(&mut s));
         (
             s.config.config.relay_url.clone(),
             id,

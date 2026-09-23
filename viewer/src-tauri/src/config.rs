@@ -4,6 +4,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::unattended;
+
 const DEFAULT_RELAY_URL: &str = "ws://127.0.0.1:8080/ws";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -13,7 +15,10 @@ pub struct Config {
     pub allow_list: Vec<String>,
     pub recent_ids: Vec<String>,
     #[serde(default)]
-    pub unattended_password: Option<String>,
+    pub unattended_password_set: bool,
+    // Read only for migration. This field is never serialized back to disk.
+    #[serde(default, rename = "unattended_password", skip_serializing)]
+    legacy_unattended_password: Option<String>,
     #[serde(default)]
     pub unattended_enabled: bool,
 }
@@ -25,9 +30,16 @@ impl Default for Config {
             relay_url: DEFAULT_RELAY_URL.to_string(),
             allow_list: Vec::new(),
             recent_ids: Vec::new(),
-            unattended_password: None,
+            unattended_password_set: false,
+            legacy_unattended_password: None,
             unattended_enabled: false,
         }
+    }
+}
+
+impl Config {
+    fn take_legacy_unattended_password(&mut self) -> Option<String> {
+        self.legacy_unattended_password.take()
     }
 }
 
@@ -42,11 +54,16 @@ impl ConfigStore {
         let dir = app_data_dir.as_ref();
         fs::create_dir_all(dir)?;
         let path = dir.join("config.json");
-        let config = match fs::read_to_string(&path) {
+        let mut config = match fs::read_to_string(&path) {
             Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Config::default(),
             Err(error) => return Err(error),
         };
+        if let Some(password) = config.take_legacy_unattended_password() {
+            // Migration is best effort. The plaintext is removed from the
+            // in-memory config regardless, so save() cannot preserve it.
+            config.unattended_password_set = unattended::set_password(&password).is_ok();
+        }
         let store = Self { path, config };
         store.save()?;
         Ok(store)
@@ -131,13 +148,31 @@ mod tests {
     }
 
     #[test]
-    fn unattended_access_fields_round_trip() {
-        let mut config = Config::default();
-        config.unattended_password = Some("fixed-secret".into());
-        config.unattended_enabled = true;
+    fn legacy_unattended_password_is_migrated_to_a_marker() {
+        let mut config = Config {
+            legacy_unattended_password: Some("fixed-secret".into()),
+            unattended_enabled: true,
+            ..Config::default()
+        };
+        let password = config.take_legacy_unattended_password();
+        config.unattended_password_set = password.is_some();
+        let encoded = serde_json::to_string(&config).unwrap();
+        assert_eq!(password.as_deref(), Some("fixed-secret"));
+        assert!(config.unattended_password_set);
+        assert!(!encoded.contains("fixed-secret"));
+        assert!(!encoded.contains("\"unattended_password\""));
+    }
+
+    #[test]
+    fn unattended_access_marker_round_trips_without_a_secret() {
+        let config = Config {
+            unattended_password_set: true,
+            unattended_enabled: true,
+            ..Config::default()
+        };
         let encoded = serde_json::to_string(&config).unwrap();
         let decoded: Config = serde_json::from_str(&encoded).unwrap();
-        assert_eq!(decoded.unattended_password.as_deref(), Some("fixed-secret"));
+        assert!(decoded.unattended_password_set);
         assert!(decoded.unattended_enabled);
     }
 }
