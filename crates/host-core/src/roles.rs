@@ -32,6 +32,40 @@ pub fn should_auto_accept(unattended_enabled: bool, pake_succeeded: bool) -> boo
     unattended_enabled && pake_succeeded
 }
 
+pub fn should_auto_accept_with_2fa(unattended_enabled: bool, pake_succeeded: bool, twofa_enabled: bool, code_valid: bool) -> bool {
+    unattended_enabled && pake_succeeded && (!twofa_enabled || code_valid)
+}
+
+pub fn totp_is_valid(secret: &str, code: &str, unix_time: u64) -> bool {
+    if code.len() != 6 || !code.bytes().all(|byte| byte.is_ascii_digit()) { return false; }
+    let decoded = decode_base32(secret).unwrap_or_else(|| secret.as_bytes().to_vec());
+    [unix_time.saturating_sub(30), unix_time, unix_time.saturating_add(30)]
+        .into_iter()
+        .any(|time| totp_lite::totp_custom::<totp_lite::Sha1>(30, 6, &decoded, time) == code)
+}
+
+fn decode_base32(value: &str) -> Option<Vec<u8>> {
+    let mut output = Vec::new();
+    let mut buffer = 0u32;
+    let mut bits = 0u8;
+    for byte in value.bytes().filter(|byte| *byte != b'=') {
+        let upper = byte.to_ascii_uppercase();
+        let digit = match upper {
+            b'A'..=b'Z' => upper - b'A',
+            b'2'..=b'7' => upper - b'2' + 26,
+            _ => return None,
+        } as u32;
+        buffer = (buffer << 5) | digit;
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            output.push((buffer >> bits) as u8);
+            buffer &= (1 << bits) - 1;
+        }
+    }
+    (!output.is_empty()).then_some(output)
+}
+
 type SessionResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 #[derive(Debug)]
@@ -163,8 +197,30 @@ where
 /// presenting a manual approval request; the default path awaits the callback.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_host_session_with_data_and_accept<S, C, E, F, I, A, Fut>(
+    ws: WebSocketStream<S>, password: &str, ice_session: &str, capturer: C,
+    encoder_factory: F, injector: I, unattended_enabled: bool, approve: A,
+    data_ready: Option<oneshot::Sender<DataHandle>>,
+) -> SessionResult<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    C: ScreenCapturer + Send + 'static,
+    E: Encoder + Send + 'static,
+    F: Fn(u16, u16) -> E,
+    I: InputInjector + 'static,
+    A: FnOnce() -> Fut,
+    Fut: Future<Output = bool>,
+{
+    run_host_session_with_data_and_accept_and_2fa(
+        ws, password, ice_session, capturer, encoder_factory, injector,
+        unattended_enabled, false, None, approve, data_ready,
+    ).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn run_host_session_with_data_and_accept_and_2fa<S, C, E, F, I, A, Fut>(
     ws: WebSocketStream<S>, password: &str, ice_session: &str, mut capturer: C,
-    encoder_factory: F, mut injector: I, unattended_enabled: bool, approve: A,
+    encoder_factory: F, mut injector: I, unattended_enabled: bool,
+    twofa_enabled: bool, totp_secret: Option<&str>, approve: A,
     data_ready: Option<oneshot::Sender<DataHandle>>,
 ) -> SessionResult<()>
 where
@@ -201,7 +257,20 @@ where
             None => return Err(Box::new(SessionError("connection closed during KEX confirmation"))),
         }
     }
-    if !should_auto_accept(unattended_enabled, true) && !approve().await {
+    let (control_send_key, control_recv_key) = protocol::kex::derive_control_keys(&shared, true);
+    let mut control_sealer = Sealer::new(control_send_key);
+    let mut control_opener = Opener::new(control_recv_key);
+    let code_valid = if unattended_enabled && twofa_enabled {
+        let body = tokio::time::timeout(Duration::from_secs(30), recv_control(&mut control_rx)).await.ok().flatten();
+        let code = body.and_then(|body| control_opener.open(&body)).and_then(|body| match Control::from_bytes(&body) {
+            Some(Control::AuthCode { code }) => Some(code),
+            _ => None,
+        });
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |duration| duration.as_secs());
+        code.as_deref().zip(totp_secret).is_some_and(|(code, secret)| totp_is_valid(secret, code, now))
+    } else { true };
+    if (unattended_enabled && twofa_enabled && !code_valid)
+        || (!should_auto_accept_with_2fa(unattended_enabled, true, twofa_enabled, code_valid) && !approve().await) {
         return Err(Box::new(SessionError("session rejected")));
     }
     let (send_key, recv_key) = derive_keys(&shared, true);
@@ -213,9 +282,6 @@ where
     let (data_send_key, data_recv_key) = protocol::kex::derive_data_keys(&shared, true);
     let data_sealer = Sealer::new(data_send_key);
     let data_opener = Opener::new(data_recv_key);
-    let (control_send_key, control_recv_key) = protocol::kex::derive_control_keys(&shared, true);
-    let mut control_sealer = Sealer::new(control_send_key);
-    let mut control_opener = Opener::new(control_recv_key);
     let (ice_rx, mut session_control_rx) = split_session_control(control_rx, ice_session.to_owned());
 
     let signaling: RelayIceSignaling<S> = RelayIceSignaling::new(sender.clone(), ice_rx, ice_session);
@@ -363,6 +429,25 @@ pub async fn run_viewer_session_with_monitors<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    run_viewer_session_with_monitors_and_auth_code(
+        ws, password, ice_session, frame_sink, input_rx, data_ready,
+        monitor_sink, audio_sink, None,
+    ).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn run_viewer_session_with_monitors_and_auth_code<S>(
+    ws: WebSocketStream<S>, password: &str, ice_session: &str,
+    frame_sink: tokio::sync::mpsc::Sender<Vec<u8>>,
+    input_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    data_ready: Option<oneshot::Sender<DataHandle>>,
+    monitor_sink: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    audio_sink: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    auth_code: Option<String>,
+) -> Result<(), String>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let mut reliable = ReliableChannel::spawn(ws);
     let sender = reliable.sender();
     let mut control_rx = reliable.take_control_rx().ok_or_else(|| "control receiver unavailable".to_owned())?;
@@ -399,8 +484,12 @@ where
     let data_sealer = Sealer::new(data_send_key);
     let data_opener = Opener::new(data_recv_key);
     let (control_send_key, control_recv_key) = protocol::kex::derive_control_keys(&shared, false);
-    let control_sealer = Sealer::new(control_send_key);
+    let mut control_sealer = Sealer::new(control_send_key);
     let control_opener = Opener::new(control_recv_key);
+    if let Some(code) = auth_code {
+        let body = Control::AuthCode { code }.to_bytes();
+        sender.send_frame(Tag::Control, &control_sealer.seal(&body)).await.map_err(|error| error.to_string())?;
+    }
     let (ice_rx, session_control_rx) = split_session_control(control_rx, ice_session.to_owned());
 
     let signaling: RelayIceSignaling<S> = RelayIceSignaling::new(sender.clone(), ice_rx, ice_session);
@@ -537,6 +626,22 @@ where
     A: FnOnce() -> Fut,
     Fut: Future<Output = bool>,
 {
+    run_default_host_session_with_data_and_accept_and_2fa(
+        ws, password, ice_session, unattended_enabled, false, None, approve, data_ready,
+    ).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn run_default_host_session_with_data_and_accept_and_2fa<S, A, Fut>(
+    ws: WebSocketStream<S>, password: &str, ice_session: &str,
+    unattended_enabled: bool, twofa_enabled: bool, totp_secret: Option<&str>,
+    approve: A, data_ready: oneshot::Sender<DataHandle>,
+) -> SessionResult<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    A: FnOnce() -> Fut,
+    Fut: Future<Output = bool>,
+{
     let capturer = ScapCapturer::new().ok_or(SessionError("Screen capture is unavailable. Grant this app macOS Screen Recording permission and try again."))?;
     let injector: Box<dyn InputInjector> = match EnigoInjector::new() {
         Some(injector) => Box::new(injector),
@@ -546,7 +651,7 @@ where
             Box::new(NoopInjector::default())
         }
     };
-    run_host_session_with_data_and_accept(
+    run_host_session_with_data_and_accept_and_2fa(
         ws,
         password,
         ice_session,
@@ -554,6 +659,8 @@ where
         |w, h| H264Encoder::new(w, h, 15, 1_000_000),
         injector,
         unattended_enabled,
+        twofa_enabled,
+        totp_secret,
         approve,
         Some(data_ready),
     )
@@ -582,6 +689,29 @@ mod tests {
         assert!(!should_auto_accept(true, false));
         assert!(!should_auto_accept(false, true));
         assert!(!should_auto_accept(false, false));
+    }
+
+    #[test]
+    fn totp_accepts_current_and_adjacent_steps_but_not_wrong_or_expired_codes() {
+        let secret = "12345678901234567890";
+        let now = 1_700_000_000;
+        let current = totp_lite::totp_custom::<totp_lite::Sha1>(30, 6, secret.as_bytes(), now);
+        let previous = totp_lite::totp_custom::<totp_lite::Sha1>(30, 6, secret.as_bytes(), now - 30);
+        let next = totp_lite::totp_custom::<totp_lite::Sha1>(30, 6, secret.as_bytes(), now + 30);
+        let expired = totp_lite::totp_custom::<totp_lite::Sha1>(30, 6, secret.as_bytes(), now - 60);
+        assert!(totp_is_valid(secret, &current, now));
+        assert!(totp_is_valid(secret, &previous, now));
+        assert!(totp_is_valid(secret, &next, now));
+        assert!(!totp_is_valid(secret, "000000", now));
+        assert!(!totp_is_valid(secret, &expired, now));
+    }
+
+    #[test]
+    fn twofa_gate_requires_a_valid_code() {
+        assert!(should_auto_accept_with_2fa(true, true, false, false));
+        assert!(should_auto_accept_with_2fa(true, true, true, true));
+        assert!(!should_auto_accept_with_2fa(true, true, true, false));
+        assert!(!should_auto_accept_with_2fa(false, true, true, true));
     }
 
     #[tokio::test]

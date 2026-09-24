@@ -68,6 +68,7 @@ struct AppConfig {
 struct UnattendedStatus {
     enabled: bool,
     has_password: bool,
+    twofa_enabled: bool,
 }
 #[derive(Serialize)]
 struct PermissionStatus {
@@ -495,6 +496,44 @@ fn get_unattended_status(state: tauri::State<'_, AppState>) -> UnattendedStatus 
     UnattendedStatus {
         enabled: state.config.config.unattended_enabled,
         has_password: unattended::has_password(state.config.config.unattended_password_set),
+        twofa_enabled: state.config.config.unattended_twofa_enabled && unattended::get_totp_secret().is_ok(),
+    }
+}
+
+fn random_base32_secret() -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let mut bytes = [0u8; 20];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut bytes);
+    let mut output = String::with_capacity(32);
+    let mut buffer = 0u32;
+    let mut bits = 0u8;
+    for byte in bytes {
+        buffer = (buffer << 8) | u16::from(byte);
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            output.push(ALPHABET[((buffer >> bits) & 31) as usize] as char);
+            buffer &= (1 << bits) - 1;
+        }
+    }
+    if bits > 0 { output.push(ALPHABET[((buffer << (5 - bits)) & 31) as usize] as char); }
+    output
+}
+
+#[tauri::command]
+fn set_unattended_2fa(state: tauri::State<'_, AppState>, enabled: bool) -> Result<Option<String>, String> {
+    let mut state = state.0.lock().unwrap();
+    if enabled {
+        let secret = random_base32_secret();
+        unattended::set_totp_secret(&secret).map_err(|error| format!("could not store TOTP secret: {error}"))?;
+        state.config.config.unattended_twofa_enabled = true;
+        state.config.save().map_err(|error| error.to_string())?;
+        Ok(Some(format!("otpauth://totp/OpenDesk?secret={secret}&issuer=OpenDesk")))
+    } else {
+        unattended::delete_totp_secret().map_err(|error| format!("could not clear TOTP secret: {error}"))?;
+        state.config.config.unattended_twofa_enabled = false;
+        state.config.save().map_err(|error| error.to_string())?;
+        Ok(None)
     }
 }
 #[tauri::command]
@@ -640,7 +679,7 @@ fn save_recording(bytes: Vec<u8>, suggested_name: String) -> Result<String, Stri
 
 #[tauri::command]
 fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<(), String> {
-    let (relay_url, id, password, unattended_enabled) = {
+    let (relay_url, id, password, unattended_enabled, twofa_enabled, totp_secret) = {
         let mut s = state.0.lock().unwrap();
         let id = s.config.ensure_identity();
         let unattended_password = if s.config.config.unattended_enabled {
@@ -651,12 +690,14 @@ fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<()
         // A keychain failure deliberately disables unattended approval for
         // this session and uses the normal manual-accept PAKE path.
         let unattended_enabled = unattended_password.is_some();
+        let twofa_enabled = unattended_enabled && s.config.config.unattended_twofa_enabled;
+        let totp_secret = if twofa_enabled { unattended::get_totp_secret().ok() } else { None };
         let password = unattended_password.unwrap_or_else(|| current_password(&mut s));
         (
             s.config.config.relay_url.clone(),
             id,
             password,
-            unattended_enabled,
+            unattended_enabled, twofa_enabled, totp_secret,
         )
     };
     if state.0.lock().unwrap().host_thread.is_some() {
@@ -733,8 +774,8 @@ fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<()
                         }
                         allowed
                     };
-                    let mut session = Box::pin(host_core::roles::run_default_host_session_with_data_and_accept(
-                        ws, &password, &session, unattended_enabled, approve, data_ready_tx,
+                    let mut session = Box::pin(host_core::roles::run_default_host_session_with_data_and_accept_and_2fa(
+                        ws, &password, &session, unattended_enabled, twofa_enabled, totp_secret.as_deref(), approve, data_ready_tx,
                     ));
                     let result = tokio::select! {
                         handle = data_ready_rx => {
@@ -808,6 +849,7 @@ fn connect(
     app: AppHandle,
     target_id: String,
     password: String,
+    auth_code: Option<String>,
 ) -> Result<(), String> {
     if target_id.len() != 9 || !target_id.bytes().all(|b| b.is_ascii_digit()) {
         return Err("target ID must be 9 digits".into());
@@ -928,7 +970,7 @@ fn connect(
             );
             let (data_ready_tx, data_ready_rx) = oneshot::channel();
             let session_task = tauri::async_runtime::spawn(async move {
-                host_core::roles::run_viewer_session_with_monitors(
+                host_core::roles::run_viewer_session_with_monitors_and_auth_code(
                     ws,
                     &password,
                     &session,
@@ -937,6 +979,7 @@ fn connect(
                     Some(data_ready_tx),
                     Some(monitor_tx),
                     Some(audio_tx),
+                    auth_code,
                 )
                 .await
             });
@@ -1007,6 +1050,15 @@ async fn select_monitor(state: tauri::State<'_, AppState>, id: u32) -> Result<()
     let sealer = sealer.ok_or_else(|| "control channel is not ready".to_owned())?;
     let body = Control::SelectMonitor { id }.to_bytes();
     let sealed = sealer.lock().unwrap().seal(&body);
+    sender.send_frame(Tag::Control, &sealed).await.map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn send_auth_code(state: tauri::State<'_, AppState>, code: String) -> Result<(), String> {
+    let (sender, sealer) = { let state = state.0.lock().unwrap(); (state.control_sender.clone(), state.control_sealer.clone()) };
+    let sender = sender.ok_or_else(|| "no active viewer session".to_owned())?;
+    let sealer = sealer.ok_or_else(|| "control channel is not ready".to_owned())?;
+    let sealed = sealer.lock().unwrap().seal(&Control::AuthCode { code }.to_bytes());
     sender.send_frame(Tag::Control, &sealed).await.map_err(|error| error.to_string())
 }
 
@@ -1086,6 +1138,7 @@ pub fn run() {
             set_relay,
             get_unattended_status,
             set_unattended_access,
+            set_unattended_2fa,
             permission_status,
             open_permission_settings,
             respond_to_request,
@@ -1095,6 +1148,7 @@ pub fn run() {
             disconnect,
             send_input,
             select_monitor,
+            send_auth_code,
             set_clipboard_sync,
             set_audio_muted,
             send_file,

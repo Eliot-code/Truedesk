@@ -2,6 +2,7 @@ use keyring::Entry;
 
 pub const SERVICE: &str = "opendesk";
 pub const USER: &str = "unattended";
+pub const TOTP_USER: &str = "unattended-totp";
 
 pub fn set_password(password: &str) -> Result<(), String> {
     Entry::new(SERVICE, USER)
@@ -22,6 +23,18 @@ pub fn delete_password() -> Result<(), String> {
         .map_err(|error| error.to_string())?
         .delete_credential()
         .map_err(|error| error.to_string())
+}
+
+pub fn set_totp_secret(secret: &str) -> Result<(), String> {
+    Entry::new(SERVICE, TOTP_USER).map_err(|error| error.to_string())?.set_password(secret).map_err(|error| error.to_string())
+}
+
+pub fn get_totp_secret() -> Result<String, String> {
+    Entry::new(SERVICE, TOTP_USER).map_err(|error| error.to_string())?.get_password().map_err(|error| error.to_string())
+}
+
+pub fn delete_totp_secret() -> Result<(), String> {
+    Entry::new(SERVICE, TOTP_USER).map_err(|error| error.to_string())?.delete_credential().map_err(|error| error.to_string())
 }
 
 pub fn derive_has_password(config_marker: bool, keychain_has_password: Option<bool>) -> bool {

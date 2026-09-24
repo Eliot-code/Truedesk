@@ -11,6 +11,7 @@ pub enum Control {
     Bye { session: String },
     MonitorList { monitors: Vec<MonitorInfo> },
     SelectMonitor { id: u32 },
+    AuthCode { code: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,6 +87,12 @@ mod tests {
     #[test]
     fn select_monitor_roundtrips() {
         let c = Control::SelectMonitor { id: 7 };
+        assert_eq!(Control::from_bytes(&c.to_bytes()), Some(c));
+    }
+
+    #[test]
+    fn auth_code_roundtrips() {
+        let c = Control::AuthCode { code: "123456".into() };
         assert_eq!(Control::from_bytes(&c.to_bytes()), Some(c));
     }
 }

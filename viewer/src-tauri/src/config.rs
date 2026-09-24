@@ -23,6 +23,8 @@ pub struct Config {
     legacy_unattended_password: Option<String>,
     #[serde(default)]
     pub unattended_enabled: bool,
+    #[serde(default)]
+    pub unattended_twofa_enabled: bool,
 }
 
 impl Default for Config {
@@ -36,6 +38,7 @@ impl Default for Config {
             unattended_password_set: false,
             legacy_unattended_password: None,
             unattended_enabled: false,
+            unattended_twofa_enabled: false,
         }
     }
 }

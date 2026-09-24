@@ -4,7 +4,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 export type Status = "offline" | "online" | "connecting" | "in_session";
 export interface Identity { id: string; password: string }
 export interface AppConfig { relay_url: string; relay_urls: string[]; recent_ids: string[] }
-export interface UnattendedStatus { enabled: boolean; has_password: boolean }
+export interface UnattendedStatus { enabled: boolean; has_password: boolean; twofa_enabled: boolean }
 export interface PermissionStatus { screen_recording: boolean; accessibility: boolean }
 export interface IncomingRequest { peer_id: string; fingerprint: string }
 export interface SessionStarted { role: "host" | "viewer"; remote_id: string }
@@ -39,13 +39,15 @@ export const setRelays = (urls: string[]) => invoke<void>("set_relays", { urls }
 export const listRelays = () => invoke<string[]>("list_relays");
 export const getUnattendedStatus = () => invoke<UnattendedStatus>("get_unattended_status");
 export const setUnattendedAccess = (enabled: boolean, password: string | null) => invoke<void>("set_unattended_access", { enabled, password });
+export const setUnattended2fa = (enabled: boolean) => invoke<string | null>("set_unattended_2fa", { enabled });
 export const permissionStatus = () => invoke<PermissionStatus>("permission_status");
 export const openPermissionSettings = (which: "screen" | "accessibility") => invoke<void>("open_permission_settings", { which });
 // Tauri v2 exposes Rust snake_case params to JS as camelCase (peerId/targetId).
 export const respondToRequest = (peer_id: string, allow: boolean, always: boolean) => invoke<void>("respond_to_request", { peerId: peer_id, allow, always });
 export const startHosting = () => invoke<void>("start_hosting");
 export const stopHosting = () => invoke<void>("stop_hosting");
-export const connect = (target_id: string, password: string) => invoke<void>("connect", { targetId: target_id, password });
+export const connect = (target_id: string, password: string, auth_code?: string) => invoke<void>("connect", auth_code ? { targetId: target_id, password, authCode: auth_code } : { targetId: target_id, password });
+export const sendAuthCode = (code: string) => invoke<void>("send_auth_code", { code });
 export const disconnect = () => invoke<void>("disconnect");
 export const sendInput = (bytes: Uint8Array) => invoke<void>("send_input", { bytes: Array.from(bytes) });
 export const selectMonitor = (id: number) => invoke<void>("select_monitor", { id });

@@ -15,9 +15,9 @@ export default function App() {
   const [viewerCredentials, setViewerCredentials] = useState<{ remoteId: string; password: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const handleConnect = async (remoteId: string, password: string) => {
+  const handleConnect = async (remoteId: string, password: string, authCode?: string) => {
     setViewerCredentials({ remoteId, password });
-    await api.connect(remoteId, password);
+    await api.connect(remoteId, password, authCode);
     setSession({ role: "viewer", remote_id: remoteId });
     setScreen("session");
   };
