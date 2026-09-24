@@ -9,7 +9,7 @@ use tokio::sync::oneshot;
 pub enum Bridge {
     /// This connection is a host that just parked its sender. Resolves to
     /// the viewer's sender once a matching `connect` takes it.
-    HostRegistered(oneshot::Receiver<Outbound>),
+    HostRegistered { peer_id: String, notify_rx: oneshot::Receiver<Outbound> },
     /// This connection is a viewer bridged to the given host sender.
     ViewerPaired(Outbound),
 }
@@ -25,8 +25,8 @@ pub fn classify(msg: &[u8], me: Outbound, reg: &Registry) -> Option<Bridge> {
     match Control::from_bytes(body)? {
         Control::Register { peer_id, .. } => {
             let (notify_tx, notify_rx) = oneshot::channel();
-            reg.register(peer_id, me, notify_tx);
-            Some(Bridge::HostRegistered(notify_rx))
+            reg.register(peer_id.clone(), me, notify_tx);
+            Some(Bridge::HostRegistered { peer_id, notify_rx })
         }
         Control::Connect { target, .. } => {
             let (host_tx, notify) = reg.take(&target)?;
