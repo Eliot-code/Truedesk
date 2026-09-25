@@ -7,6 +7,7 @@ use crate::{
     inject::{EnigoInjector, InputInjector, NoopInjector},
     transport::{self, RelayIceSignaling, RelayTransport, ReliableChannel, Transport, TransportReceiver, TransportSender},
 };
+use crate::reconnect::{classify_viewer_error, DisconnectReason};
 use protocol::{
     control::Control,
     crypto::{Opener, Sealer},
@@ -98,6 +99,21 @@ pub struct DataHandle {
     pub opener: Opener,
     pub control_sender: transport::reliable::ReliableSender,
     pub control_sealer: Sealer,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewerSessionError {
+    pub reason: DisconnectReason,
+    pub message: String,
+}
+
+impl Display for ViewerSessionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(&self.message) }
+}
+impl Error for ViewerSessionError {}
+
+fn viewer_session_error(message: String) -> ViewerSessionError {
+    ViewerSessionError { reason: classify_viewer_error(&message), message }
 }
 
 impl DataHandle {
@@ -398,7 +414,7 @@ pub async fn run_viewer_session<S>(
     ice_session: &str,
     frame_sink: tokio::sync::mpsc::Sender<Vec<u8>>,
     input_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
-) -> Result<(), String>
+) -> Result<(), ViewerSessionError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -410,7 +426,7 @@ pub async fn run_viewer_session_with_data<S>(
     frame_sink: tokio::sync::mpsc::Sender<Vec<u8>>,
     input_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
     data_ready: Option<oneshot::Sender<DataHandle>>,
-) -> Result<(), String>
+) -> Result<(), ViewerSessionError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -425,7 +441,7 @@ pub async fn run_viewer_session_with_monitors<S>(
     data_ready: Option<oneshot::Sender<DataHandle>>,
     monitor_sink: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
     audio_sink: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
-) -> Result<(), String>
+) -> Result<(), ViewerSessionError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -437,6 +453,23 @@ where
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run_viewer_session_with_monitors_and_auth_code<S>(
+    ws: WebSocketStream<S>, password: &str, ice_session: &str,
+    frame_sink: tokio::sync::mpsc::Sender<Vec<u8>>,
+    input_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    data_ready: Option<oneshot::Sender<DataHandle>>,
+    monitor_sink: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    audio_sink: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    auth_code: Option<String>,
+) -> Result<(), ViewerSessionError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let result = run_viewer_session_inner(ws, password, ice_session, frame_sink, input_rx, data_ready, monitor_sink, audio_sink, auth_code).await;
+    result.map_err(viewer_session_error)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_viewer_session_inner<S>(
     ws: WebSocketStream<S>, password: &str, ice_session: &str,
     frame_sink: tokio::sync::mpsc::Sender<Vec<u8>>,
     input_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
@@ -553,18 +586,18 @@ async fn run_viewer_media_loop_with_control(
                 }
             },
             received = transport_rx.recv() => {
-                let Some((tag, sealed)) = received else { return Ok(()) };
+                let Some((tag, sealed)) = received else { return Err("connection closed during session".into()) };
                 let Some(plaintext) = opener.open(&sealed) else { continue };
                 match tag {
-                    Tag::Video => if frame_sink.send(plaintext).await.is_err() { return Ok(()) },
-                    Tag::Audio => if let Some(sink) = &audio_sink { if sink.send(plaintext).await.is_err() { return Ok(()) } },
+                    Tag::Video => if frame_sink.send(plaintext).await.is_err() { return Err("viewer frame channel closed".into()) },
+                    Tag::Audio => if let Some(sink) = &audio_sink { if sink.send(plaintext).await.is_err() { return Err("viewer audio channel closed".into()) } },
                     _ => {}
                 }
             }
             input = input_rx.recv() => {
                 let Some(bytes) = input else { return Ok(()) };
                 let sealed = sealer.seal(&bytes);
-                if transport_tx.send(Tag::Input, &sealed).await.is_err() { return Ok(()) }
+                if transport_tx.send(Tag::Input, &sealed).await.is_err() { return Err("viewer input transport closed".into()) }
             }
         }
     }

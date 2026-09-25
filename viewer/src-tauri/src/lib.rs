@@ -19,6 +19,7 @@ struct RuntimeState {
     password: Option<String>,
     host_thread: Option<HostThread>,
     viewer_task: Option<tauri::async_runtime::JoinHandle<()>>,
+    viewer_stop: Option<Arc<AtomicBool>>,
     viewer_input: Option<mpsc::Sender<Vec<u8>>>,
     pending_request: Option<oneshot::Sender<bool>>,
     pending_file_requests: HashMap<u64, oneshot::Sender<bool>>,
@@ -508,7 +509,7 @@ fn random_base32_secret() -> String {
     let mut buffer = 0u32;
     let mut bits = 0u8;
     for byte in bytes {
-        buffer = (buffer << 8) | u16::from(byte);
+        buffer = (buffer << 8) | u32::from(byte);
         bits += 8;
         while bits >= 5 {
             bits -= 5;
@@ -879,8 +880,23 @@ fn connect(
     let relay_urls = state.0.lock().unwrap().config.config.relay_urls.clone();
     let target = target_id.clone();
     let task_app = app.clone();
+    let viewer_stop = Arc::new(AtomicBool::new(false));
+    if state.0.lock().unwrap().viewer_task.is_some() {
+        return Err("viewer session is already active".into());
+    }
+    state.0.lock().unwrap().viewer_stop = Some(viewer_stop.clone());
     let task = tauri::async_runtime::spawn(async move {
         let result = async {
+            let mut reconnect_attempt = 0;
+            let mut session_started = false;
+            loop {
+                if viewer_stop.load(Ordering::Relaxed) { break Ok(()); }
+                emit(&task_app, "status_changed", StatusEvent { state: "connecting" });
+                // Clone per attempt: each iteration moves these into the session
+                // task, so the originals must survive for the next reconnect.
+                let password = password.clone();
+                let auth_code = auth_code.clone();
+                let attempt_result = async {
             let (_, mut ws) = host_core::relay_client::connect_best(&relay_urls).await?;
             host_core::relay_client::connect_to(&mut ws, &target)
                 .await
@@ -899,6 +915,7 @@ fn connect(
             else {
                 return Err("invalid pairing message".into());
             };
+            emit(&task_app, "status_changed", StatusEvent { state: "online" });
 
             let (frame_tx, mut frame_rx) = mpsc::channel::<Vec<u8>>(64);
             let (input_tx, input_rx) = mpsc::channel::<Vec<u8>>(256);
@@ -960,14 +977,17 @@ fn connect(
                     state: "in_session",
                 },
             );
-            emit(
-                &task_app,
-                "session_started",
-                SessionStarted {
-                    role: "viewer",
-                    remote_id: target.clone(),
-                },
-            );
+            if !session_started {
+                emit(
+                    &task_app,
+                    "session_started",
+                    SessionStarted {
+                        role: "viewer",
+                        remote_id: target.clone(),
+                    },
+                );
+                session_started = true;
+            }
             let (data_ready_tx, data_ready_rx) = oneshot::channel();
             let session_task = tauri::async_runtime::spawn(async move {
                 host_core::roles::run_viewer_session_with_monitors_and_auth_code(
@@ -979,7 +999,7 @@ fn connect(
                     Some(data_ready_tx),
                     Some(monitor_tx),
                     Some(audio_tx),
-                    auth_code,
+                    auth_code.clone(),
                 )
                 .await
             });
@@ -987,24 +1007,49 @@ fn connect(
                 Ok(handle) => {
                     activate_data_channel(&task_app, handle, target.clone());
                     match session_task.await {
-                        Ok(result) => result,
+                        Ok(result) => result.map_err(|error| error.to_string()),
                         Err(error) => Err(format!("viewer session task failed: {error}")),
                     }
                 }
                 Err(_) => match session_task.await {
-                    Ok(result) => result,
+                    Ok(result) => result.map_err(|error| error.to_string()),
                     Err(error) => Err(format!("viewer session task failed: {error}")),
                 },
             }
-        }
-        .await;
+                }
+                .await;
+                match attempt_result {
+                    Ok(()) => break Ok(()),
+                    Err(message) => {
+                        clear_data_channel(&task_app);
+                        task_app.state::<AppState>().0.lock().unwrap().viewer_input = None;
+                        let reason = host_core::reconnect::classify_viewer_error(&message);
+                        if !host_core::reconnect::should_reconnect(reason)
+                            || reconnect_attempt >= host_core::reconnect::MAX_RECONNECT_ATTEMPTS
+                        {
+                            break Err(message);
+                        }
+                        reconnect_attempt += 1;
+                        emit(&task_app, "error", ErrorEvent { message: format!("viewer session dropped; reconnecting ({reconnect_attempt}/{})", host_core::reconnect::MAX_RECONNECT_ATTEMPTS) });
+                        tokio::time::sleep(host_core::reconnect::backoff_delay(reconnect_attempt - 1)).await;
+                    }
+                }
+            }
+        }.await;
 
         if let Err(message) = &result {
+            let message = if host_core::reconnect::classify_viewer_error(message)
+                == host_core::reconnect::DisconnectReason::AuthFailure
+            {
+                format!("{message}; authentication failed—if two-factor authentication is enabled, enter a fresh code and reconnect manually")
+            } else {
+                message.clone()
+            };
             emit(
                 &task_app,
                 "error",
                 ErrorEvent {
-                    message: message.clone(),
+                    message,
                 },
             );
         }
@@ -1012,6 +1057,7 @@ fn connect(
         let mut state = app_state.0.lock().unwrap();
         state.viewer_input = None;
         state.viewer_task = None;
+        state.viewer_stop = None;
         drop(state);
         clear_data_channel(&task_app);
         emit(
@@ -1077,6 +1123,8 @@ fn disconnect(state: tauri::State<'_, AppState>, app: AppHandle) {
     let (host_thread, viewer_task) = {
         let mut s = state.0.lock().unwrap();
         s.viewer_input = None;
+        if let Some(stop) = &s.viewer_stop { stop.store(true, Ordering::Relaxed); }
+        s.viewer_stop = None;
         (s.host_thread.take(), s.viewer_task.take())
     };
     if let Some(viewer_task) = viewer_task {
@@ -1114,6 +1162,7 @@ pub fn run() {
                 password: None,
                 host_thread: None,
                 viewer_task: None,
+                viewer_stop: None,
                 viewer_input: None,
                 pending_request: None,
                 pending_file_requests: HashMap::new(),
