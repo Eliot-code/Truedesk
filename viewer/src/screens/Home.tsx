@@ -15,6 +15,8 @@ export default function Home({ status, onConnect, onOpenPermissions }: HomeProps
   const [identity, setIdentity] = useState<api.Identity | null>(null);
   const [recentIds, setRecentIds] = useState<string[]>([]);
   const [contacts, setContacts] = useState<api.Contact[]>([]);
+  const [allowedDevices, setAllowedDevices] = useState<string[]>([]);
+  const [allowedId, setAllowedId] = useState("");
   const [targetId, setTargetId] = useState("");
   const [remotePassword, setRemotePassword] = useState("");
   const [alias, setAlias] = useState("");
@@ -29,8 +31,8 @@ export default function Home({ status, onConnect, onOpenPermissions }: HomeProps
 
   useEffect(() => {
     let mounted = true;
-    void Promise.all([api.getIdentity(), api.getConfig(), api.getUnattendedStatus(), api.listContacts()]).then(([loadedIdentity, config, unattendedStatus, loadedContacts]) => {
-      if (mounted) { const configuredRelays = config.relay_urls?.length ? config.relay_urls : [config.relay_url]; setIdentity(loadedIdentity); setRecentIds(config.recent_ids); setRelays(configuredRelays); setRelayText(configuredRelays.join("\n")); setUnattended(unattendedStatus); setContacts(loadedContacts); }
+    void Promise.all([api.getIdentity(), api.getConfig(), api.getUnattendedStatus(), api.listContacts(), api.listAllowed()]).then(([loadedIdentity, config, unattendedStatus, loadedContacts, loadedAllowed]) => {
+      if (mounted) { const configuredRelays = config.relay_urls?.length ? config.relay_urls : [config.relay_url]; setIdentity(loadedIdentity); setRecentIds(config.recent_ids); setRelays(configuredRelays); setRelayText(configuredRelays.join("\n")); setUnattended(unattendedStatus); setContacts(loadedContacts); setAllowedDevices(loadedAllowed); }
     }).catch((error: unknown) => mounted && setMessage(String(error)));
     void api.startHosting().catch((error: unknown) => mounted && setMessage(String(error)));
     return () => { mounted = false; };
@@ -81,6 +83,14 @@ export default function Home({ status, onConnect, onOpenPermissions }: HomeProps
   const remove = async (id: string) => {
     try { await api.removeContact(id); setContacts((current) => current.filter((contact) => contact.id !== id)); } catch (error) { setMessage(String(error)); }
   };
+  const addAllowedDevice = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!/^\d{9}$/.test(allowedId)) { setMessage("Enter a 9-digit device ID."); return; }
+    try { await api.addAllowed(allowedId); setAllowedDevices((current) => current.includes(allowedId) ? current : [...current, allowedId]); setAllowedId(""); setMessage(null); } catch (error) { setMessage(String(error)); }
+  };
+  const removeAllowedDevice = async (id: string) => {
+    try { await api.removeAllowed(id); setAllowedDevices((current) => current.filter((device) => device !== id)); } catch (error) { setMessage(String(error)); }
+  };
   const relativeLastConnected = (timestamp: number | null) => {
     if (timestamp === null) return "Never connected";
     const seconds = Math.max(0, Math.floor(Date.now() / 1000) - timestamp);
@@ -103,6 +113,7 @@ export default function Home({ status, onConnect, onOpenPermissions }: HomeProps
       <section className="card unattended-card"><div className="unattended-heading"><div><span className="eyebrow">UNATTENDED ACCESS</span><h2>Connect without approval</h2></div><label className="toggle-label"><input type="checkbox" checked={unattended.enabled} onChange={(event) => setUnattended((current) => ({ ...current, enabled: event.target.checked }))} /><span>Enabled</span></label></div><input className="password-value" type="password" placeholder={unattended.has_password ? "Enter a new password to replace it" : "Set a password"} value={unattendedPassword} onChange={(event) => setUnattendedPassword(event.target.value)} aria-label="Unattended access password" /><button className="quiet-button unattended-save" type="button" onClick={() => void saveUnattended()}>Save settings</button><label className="toggle-label"><input type="checkbox" checked={unattended.twofa_enabled} onChange={(event) => void toggleTwofa(event.target.checked)} /><span>Require 2FA code</span></label>{enrollmentUri && <p className="caption mono">Enrollment URI (save once): {enrollmentUri}</p>}<p className="caption">Anyone with this password can connect without approval. Protect it carefully.</p></section>
       <section className="card relay-card"><span className="eyebrow">RELAY REGIONS</span><h2>Relay endpoints</h2><textarea className="relay-editor mono" value={relayText} onChange={(event) => setRelayText(event.target.value)} aria-label="Relay URLs" rows={Math.max(2, relays.length)} /><button className="quiet-button" type="button" onClick={() => void saveRelays()}>Save relay list</button><p className="caption">One WebSocket URL per line. OpenDesk tries them in this order and uses the first reachable relay.</p></section>
       <section className="card address-book"><div className="address-book-heading"><span className="eyebrow">ADDRESS BOOK</span><span className="caption">Known devices</span></div>{contacts.length > 0 ? <div className="contact-list">{contacts.map((contact) => <div className="contact-row" key={contact.id}><div><strong>{contact.alias}</strong><span className="mono">{contact.id}</span><small>{relativeLastConnected(contact.last_connected)}</small></div><div className="contact-actions"><button className="quiet-button" type="button" disabled={busy} onClick={() => void connectContact(contact)}>Connect</button><button className="icon-button" type="button" onClick={() => void remove(contact.id)} aria-label={`Remove ${contact.alias}`}>×</button></div></div>)}</div> : <p className="caption">Save a device to reconnect without retyping its ID.</p>}<form className="contact-form" onSubmit={(event) => void add(event)}><input value={alias} onChange={(event) => setAlias(event.target.value)} placeholder="Alias" aria-label="Contact alias" /><input className="mono" inputMode="numeric" maxLength={9} value={contactId} onChange={(event) => setContactId(event.target.value.replace(/\D/g, ""))} placeholder="Device ID" aria-label="Contact device ID" /><button className="primary-button" type="submit">Add</button></form></section>
+      <section className="card allow-list-card"><span className="eyebrow">ALLOWED DEVICES</span><h2>Auto-accept trusted peers</h2><p className="caption">Allowed devices skip the approval dialog, but still must authenticate with the session password.</p>{allowedDevices.length > 0 ? <div className="contact-list">{allowedDevices.map((id) => <div className="contact-row" key={id}><span className="mono">{id}</span><button className="icon-button" type="button" onClick={() => void removeAllowedDevice(id)} aria-label={`Remove allowed device ${id}`}>×</button></div>)}</div> : <p className="caption">No devices are allowed yet.</p>}<form className="contact-form" onSubmit={(event) => void addAllowedDevice(event)}><input className="mono" inputMode="numeric" maxLength={9} value={allowedId} onChange={(event) => setAllowedId(event.target.value.replace(/\D/g, ""))} placeholder="Device ID" aria-label="Allowed device ID" /><button className="primary-button" type="submit">Add</button></form></section>
     </div>
     {message && <p className="message" role="status">{message}</p>}
   </main>;

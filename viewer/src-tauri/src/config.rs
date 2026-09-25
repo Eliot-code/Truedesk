@@ -101,11 +101,13 @@ impl ConfigStore {
         self.save()
     }
 
-    // TODO(Task 6): call from start_hosting to auto-accept allow-listed peers
-    // once the relay's Paired frame carries the requester ID.
-    #[allow(dead_code)]
     pub fn is_allowed(&self, id: &str) -> bool {
         self.config.allow_list.iter().any(|allowed| allowed == id)
+    }
+
+    pub fn remove_allow(&mut self, id: &str) -> io::Result<()> {
+        self.config.allow_list.retain(|allowed| allowed != id);
+        self.save()
     }
 
     pub fn add_recent(&mut self, id: &str) -> io::Result<()> {
@@ -156,6 +158,13 @@ mod tests {
         add_unique(&mut values, "123456789");
         assert_eq!(values, vec!["123456789"]);
         assert!(values.iter().any(|id| id == "123456789"));
+    }
+
+    #[test]
+    fn allow_list_removes_ids() {
+        let mut values = vec!["123456789".to_string(), "987654321".to_string()];
+        values.retain(|id| id != "123456789");
+        assert_eq!(values, vec!["987654321"]);
     }
 
     #[test]

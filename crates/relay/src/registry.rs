@@ -7,7 +7,7 @@ pub type Outbound = Sender<Vec<u8>>;
 
 /// Delivered to a parked host once a viewer takes its registration: the
 /// viewer's own sender, so the host can start forwarding its traffic there.
-pub type PeerNotify = oneshot::Sender<Outbound>;
+pub type PeerNotify = oneshot::Sender<(Outbound, String)>;
 
 #[derive(Clone, Default)]
 pub struct Registry {

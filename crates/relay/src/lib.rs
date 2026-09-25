@@ -195,9 +195,9 @@ async fn handle(socket: WebSocket, state: RelayState, addr: SocketAddr, guard: O
 
     let bridge = session::classify(&first, my_tx.clone(), &state.registry);
     let (peer_tx, registered_peer) = match bridge {
-        Some(Bridge::ViewerPaired(host_tx)) => {
-            let _ = host_tx.send(session::paired_frame("host")).await;
-            let _ = my_tx.send(session::paired_frame("viewer")).await;
+        Some(Bridge::ViewerPaired { host_tx, requester_id, target_id }) => {
+            let _ = host_tx.send(session::paired_frame("host", &requester_id)).await;
+            let _ = my_tx.send(session::paired_frame("viewer", &target_id)).await;
             log_event("pairing_success", addr, "viewer");
             (host_tx, None)
         }
@@ -206,7 +206,8 @@ async fn handle(socket: WebSocket, state: RelayState, addr: SocketAddr, guard: O
                 _ = shutdown.changed() => { state.registry.unregister(&peer_id, &my_tx); writer.abort(); log_event("connection_close", addr, "shutdown"); return; }
                 result = tokio::time::timeout(state.config.pair_timeout, notify_rx) => result.ok().and_then(Result::ok),
             };
-            let Some(peer) = peer else { state.registry.unregister(&peer_id, &my_tx); writer.abort(); log_event("pairing_failure", addr, "pair_timeout"); return; };
+            let Some((peer, requester_id)) = peer else { state.registry.unregister(&peer_id, &my_tx); writer.abort(); log_event("pairing_failure", addr, "pair_timeout"); return; };
+            let _ = my_tx.send(session::paired_frame("host", &requester_id)).await;
             log_event("pairing_success", addr, "host");
             (peer, Some(peer_id))
         }

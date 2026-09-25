@@ -62,11 +62,13 @@ pub async fn register(
 pub async fn connect_to(
     ws: &mut RelayWebSocket,
     target: &str,
+    peer_id: &str,
 ) -> Result<(), tokio_tungstenite::tungstenite::Error> {
     ws.send(Message::Binary(frame::wrap(
         Tag::Control,
         &Control::Connect {
             target: target.into(),
+            peer_id: peer_id.into(),
             ver: 1,
         }
         .to_bytes(),

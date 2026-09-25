@@ -66,7 +66,7 @@ async fn connect_to_peer(addr: &str, viewer: bool) -> relay_client::RelayWebSock
     let ws_url = format!("ws://{addr}/ws");
     let mut ws = relay_client::connect(&ws_url).await.expect("relay connect");
     if viewer {
-        relay_client::connect_to(&mut ws, PEER_ID)
+        relay_client::connect_to(&mut ws, PEER_ID, if viewer { "viewer-id" } else { "host-id" })
             .await
             .expect("relay connect_to");
     } else {

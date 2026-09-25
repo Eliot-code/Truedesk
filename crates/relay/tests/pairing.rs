@@ -23,7 +23,7 @@ async fn host_frame_reaches_viewer_unchanged() {
 
     viewer.send(Message::Binary(frame::wrap(
         Tag::Control,
-        &Control::Connect { target: "abc".into(), ver: 1 }.to_bytes(),
+        &Control::Connect { target: "abc".into(), peer_id: "viewer-1".into(), ver: 1 }.to_bytes(),
     ))).await.unwrap();
 
     // drain the `paired` control message on the viewer side

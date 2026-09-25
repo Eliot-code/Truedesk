@@ -33,6 +33,9 @@ pub fn should_auto_accept(unattended_enabled: bool, pake_succeeded: bool) -> boo
     unattended_enabled && pake_succeeded
 }
 
+/// Allow-list approval only skips the UI dialog; PAKE authentication still runs first.
+pub fn should_auto_accept_allowlisted(is_allowed: bool) -> bool { is_allowed }
+
 pub fn should_auto_accept_with_2fa(unattended_enabled: bool, pake_succeeded: bool, twofa_enabled: bool, code_valid: bool) -> bool {
     unattended_enabled && pake_succeeded && (!twofa_enabled || code_valid)
 }
@@ -722,6 +725,12 @@ mod tests {
         assert!(!should_auto_accept(true, false));
         assert!(!should_auto_accept(false, true));
         assert!(!should_auto_accept(false, false));
+    }
+
+    #[test]
+    fn allow_list_auto_accept_depends_only_on_membership() {
+        assert!(should_auto_accept_allowlisted(true));
+        assert!(!should_auto_accept_allowlisted(false));
     }
 
     #[test]

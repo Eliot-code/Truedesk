@@ -456,6 +456,21 @@ fn list_contacts(state: tauri::State<'_, AppState>) -> Vec<Contact> {
     state.0.lock().unwrap().contacts.list()
 }
 #[tauri::command]
+fn list_allowed(state: tauri::State<'_, AppState>) -> Vec<String> {
+    state.0.lock().unwrap().config.config.allow_list.clone()
+}
+#[tauri::command]
+fn add_allowed(state: tauri::State<'_, AppState>, peer_id: String) -> Result<(), String> {
+    if peer_id.len() != 9 || !peer_id.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("peer ID must be 9 digits".into());
+    }
+    state.0.lock().unwrap().config.add_allow(&peer_id).map_err(|error| error.to_string())
+}
+#[tauri::command]
+fn remove_allowed(state: tauri::State<'_, AppState>, peer_id: String) -> Result<(), String> {
+    state.0.lock().unwrap().config.remove_allow(&peer_id).map_err(|error| error.to_string())
+}
+#[tauri::command]
 fn add_contact(
     state: tauri::State<'_, AppState>,
     alias: String,
@@ -726,11 +741,15 @@ fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<()
             let Some((Tag::Control, body)) = frame::unwrap(&message) else {
                 return Err("invalid pairing message".into());
             };
-            let Some(protocol::control::Control::Paired { session, .. }) =
+            let Some(protocol::control::Control::Paired { session, peer_id, .. }) =
                 protocol::control::Control::from_bytes(body)
             else {
                 return Err("invalid pairing message".into());
             };
+            let allowlisted = host_core::roles::should_auto_accept_allowlisted(
+                app.state::<AppState>().0.lock().unwrap().config.is_allowed(&peer_id),
+            );
+            let remote_id = peer_id.clone();
             let (stop_tx, stop_rx) = oneshot::channel::<()>();
             let host_app = app.clone();
             let approve_app = app.clone();
@@ -757,21 +776,25 @@ fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<()
                     let (data_ready_tx, data_ready_rx) = oneshot::channel();
                     let mut stop_rx = stop_rx;
                     let approve = move || async move {
+                        if allowlisted {
+                            emit(&approve_app, "status_changed", StatusEvent { state: "in_session" });
+                            emit(&approve_app, "session_started", SessionStarted { role: "host", remote_id: peer_id.clone() });
+                            return true;
+                        }
                         if unattended_enabled {
                             emit(&approve_app, "status_changed", StatusEvent { state: "in_session" });
-                            emit(&approve_app, "session_started", SessionStarted { role: "host", remote_id: "unknown".into() });
+                            emit(&approve_app, "session_started", SessionStarted { role: "host", remote_id: peer_id.clone() });
                             return true;
                         }
                         let (decision_tx, decision_rx) = oneshot::channel();
-                        // Relay's current Paired frame does not carry the requester's ID.
                         emit(&approve_app, "incoming_request", IncomingRequest {
-                            peer_id: "unknown".into(), fingerprint: "pending".into(),
+                            peer_id: peer_id.clone(), fingerprint: "pending".into(),
                         });
                         approve_app.state::<AppState>().0.lock().unwrap().pending_request = Some(decision_tx);
                         let allowed = decision_rx.await.unwrap_or(false);
                         if allowed {
                             emit(&approve_app, "status_changed", StatusEvent { state: "in_session" });
-                            emit(&approve_app, "session_started", SessionStarted { role: "host", remote_id: "unknown".into() });
+                            emit(&approve_app, "session_started", SessionStarted { role: "host", remote_id: peer_id.clone() });
                         }
                         allowed
                     };
@@ -782,7 +805,7 @@ fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<()
                         handle = data_ready_rx => {
                             match handle {
                                 Ok(handle) => {
-                                    activate_data_channel(&host_app, handle, "unknown".into());
+                                    activate_data_channel(&host_app, handle, remote_id.clone());
                                     tokio::select! {
                                         result = &mut session => Some(result),
                                         _ = &mut stop_rx => None,
@@ -877,7 +900,10 @@ fn connect(
             state: "connecting",
         },
     );
-    let relay_urls = state.0.lock().unwrap().config.config.relay_urls.clone();
+    let (relay_urls, viewer_id) = {
+        let mut state = state.0.lock().unwrap();
+        (state.config.config.relay_urls.clone(), state.config.ensure_identity())
+    };
     let target = target_id.clone();
     let task_app = app.clone();
     let viewer_stop = Arc::new(AtomicBool::new(false));
@@ -898,7 +924,7 @@ fn connect(
                 let auth_code = auth_code.clone();
                 let attempt_result = async {
             let (_, mut ws) = host_core::relay_client::connect_best(&relay_urls).await?;
-            host_core::relay_client::connect_to(&mut ws, &target)
+            host_core::relay_client::connect_to(&mut ws, &target, &viewer_id)
                 .await
                 .map_err(|error| error.to_string())?;
 
@@ -1181,6 +1207,9 @@ pub fn run() {
             rotate_password,
             get_config,
             list_contacts,
+            list_allowed,
+            add_allowed,
+            remove_allowed,
             add_contact,
             remove_contact,
             touch_contact,

@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum Control {
     Register { peer_id: String, ver: u32 },
-    Connect { target: String, ver: u32 },
-    Paired { session: String, peer_role: String },
+    Connect { target: String, peer_id: String, ver: u32 },
+    Paired { session: String, peer_role: String, peer_id: String },
     Ice { session: String, cand: String },
     Error { code: String },
     Bye { session: String },
@@ -45,9 +45,15 @@ mod tests {
 
     #[test]
     fn wire_uses_t_discriminator() {
-        let c = Control::Connect { target: "1".into(), ver: 1 };
+        let c = Control::Connect { target: "1".into(), peer_id: "2".into(), ver: 1 };
         let json = String::from_utf8(c.to_bytes()).unwrap();
         assert!(json.contains("\"t\":\"connect\""));
+    }
+
+    #[test]
+    fn paired_with_peer_id_roundtrips() {
+        let c = Control::Paired { session: "s1".into(), peer_role: "host".into(), peer_id: "987654321".into() };
+        assert_eq!(Control::from_bytes(&c.to_bytes()), Some(c));
     }
 
     #[test]
