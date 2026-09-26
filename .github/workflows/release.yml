@@ -42,7 +42,15 @@ jobs:
             librsvg2-dev \
             patchelf \
             libssl-dev \
-            libxdo-dev
+            libxdo-dev \
+            libopus-dev \
+            libasound2-dev
+
+      - name: Install macOS audio dependency (libopus for the opus crate)
+        if: runner.os == 'macOS'
+        run: brew install opus
+      # Windows: audiopus_sys builds libopus from source via CMake (present on
+      # windows-latest); no extra install step is needed.
 
       - name: Install frontend dependencies
         working-directory: viewer

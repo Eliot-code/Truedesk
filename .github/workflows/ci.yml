@@ -32,6 +32,7 @@ jobs:
         with:
           components: clippy,rustfmt
       - uses: Swatinem/rust-cache@v2
+      - run: brew install opus
       - run: cargo build -p host-core
       - run: cargo test -p host-core
       - run: cargo clippy -p host-core --all-targets -- -D warnings
@@ -47,6 +48,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: viewer/src-tauri -> viewer/src-tauri/target
+      - run: brew install opus
       - run: cargo check --manifest-path viewer/src-tauri/Cargo.toml
       - run: cargo clippy --manifest-path viewer/src-tauri/Cargo.toml --all-targets -- -D warnings
 

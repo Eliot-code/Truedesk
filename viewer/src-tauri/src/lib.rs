@@ -979,10 +979,21 @@ fn connect(
             let audio_app = task_app.clone();
             let audio_muted = task_app.state::<AppState>().0.lock().unwrap().audio_muted.clone();
             tauri::async_runtime::spawn(async move {
+                let mut decoder: Option<(u32, u8, opus::Decoder)> = None;
                 while let Some(body) = audio_rx.recv().await {
                     if audio_muted.load(Ordering::Relaxed) { continue; }
                     if let Some(frame) = protocol::audio::AudioFrame::from_bytes(&body) {
-                        emit(&audio_app, "audio_frame", AudioFrameEvent { sample_rate: frame.sample_rate, channels: frame.channels, samples: frame.samples });
+                        let needs_new_decoder = decoder.as_ref().is_none_or(|(rate, channels, _)| *rate != frame.sample_rate || *channels != frame.channels);
+                        if needs_new_decoder {
+                            let channels = if frame.channels == 1 { opus::Channels::Mono } else { opus::Channels::Stereo };
+                            decoder = opus::Decoder::new(frame.sample_rate, channels).ok().map(|decoder| (frame.sample_rate, frame.channels, decoder));
+                        }
+                        let Some((_, channels, decoder_ref)) = decoder.as_mut() else { continue };
+                        let frame_capacity = usize::from(frame.frame_duration_ms) * frame.sample_rate as usize / 1_000 * usize::from(*channels);
+                        let mut samples = vec![0i16; frame_capacity];
+                        let Ok(sample_count) = decoder_ref.decode(&frame.payload, &mut samples, false) else { continue };
+                        samples.truncate(sample_count * usize::from(*channels));
+                        emit(&audio_app, "audio_frame", AudioFrameEvent { sample_rate: frame.sample_rate, channels: *channels, samples });
                     }
                 }
             });
