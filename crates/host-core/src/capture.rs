@@ -3,6 +3,23 @@ use scap::capturer::{Capturer, Options};
 use scap::frame::{Frame, FrameType};
 use protocol::control::MonitorInfo;
 
+// Scap 0.0.8 supplies the platform engines here: ScreenCaptureKit on macOS,
+// Windows.Graphics.Capture on Windows, and PipeWire/portal on Linux. The
+// Windows and Linux branches are compile-tested only on their respective CI
+// runners; this macOS build verifies the unchanged macOS engine.
+
+#[cfg(target_os = "macos")]
+fn capture_permission_available() -> bool {
+    scap::has_permission() || scap::request_permission()
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn capture_permission_available() -> bool {
+    // Scap reports these platforms as available and performs any platform
+    // interaction while building/starting its capturer.
+    true
+}
+
 pub trait ScreenCapturer {
     fn next_frame(&mut self) -> Option<RawFrame>;
 
@@ -21,7 +38,7 @@ impl ScapCapturer {
             return None;
         }
 
-        if !scap::has_permission() && !scap::request_permission() {
+        if !capture_permission_available() {
             return None;
         }
 

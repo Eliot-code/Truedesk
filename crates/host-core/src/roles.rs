@@ -606,6 +606,29 @@ async fn run_viewer_media_loop_with_control(
     }
 }
 
+fn capture_unavailable_message() -> &'static str {
+    #[cfg(target_os = "macos")]
+    return "Screen capture is unavailable. Grant this app macOS Screen Recording permission and try again.";
+
+    #[cfg(target_os = "windows")]
+    return "Screen capture is unavailable. Windows Graphics Capture could not be started.";
+
+    #[cfg(target_os = "linux")]
+    return "Screen capture is unavailable. Approve the Linux desktop portal capture request and try again.";
+}
+
+#[cfg(target_os = "macos")]
+fn report_input_unavailable() {
+    eprintln!("Input injection unavailable: macOS Accessibility permission is required. Grant it in System Settings, then restart the host.");
+    eprintln!("Open Accessibility settings: x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility");
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn report_input_unavailable() {
+    // Enigo is backed by SendInput on Windows and XTest/uinput on Linux.
+    eprintln!("Input injection unavailable: the platform input backend could not be initialized.");
+}
+
 /// Run a host session with the production capture, H.264 encoder, and Enigo injector.
 pub async fn run_default_host_session<S>(
     ws: WebSocketStream<S>,
@@ -615,12 +638,11 @@ pub async fn run_default_host_session<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let capturer = ScapCapturer::new().ok_or(SessionError("Screen capture is unavailable. Grant this app macOS Screen Recording permission and try again."))?;
+    let capturer = ScapCapturer::new().ok_or(SessionError(capture_unavailable_message()))?;
     let injector: Box<dyn InputInjector> = match EnigoInjector::new() {
         Some(injector) => Box::new(injector),
         None => {
-            eprintln!("Input injection unavailable: macOS Accessibility permission is required. Grant it in System Settings, then restart the host.");
-            eprintln!("Open Accessibility settings: x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility");
+            report_input_unavailable();
             Box::new(NoopInjector::default())
         }
     };
@@ -678,12 +700,11 @@ where
     A: FnOnce() -> Fut,
     Fut: Future<Output = bool>,
 {
-    let capturer = ScapCapturer::new().ok_or(SessionError("Screen capture is unavailable. Grant this app macOS Screen Recording permission and try again."))?;
+    let capturer = ScapCapturer::new().ok_or(SessionError(capture_unavailable_message()))?;
     let injector: Box<dyn InputInjector> = match EnigoInjector::new() {
         Some(injector) => Box::new(injector),
         None => {
-            eprintln!("Input injection unavailable: macOS Accessibility permission is required. Grant it in System Settings, then restart the host.");
-            eprintln!("Open Accessibility settings: x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility");
+            report_input_unavailable();
             Box::new(NoopInjector::default())
         }
     };
