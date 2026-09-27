@@ -23,9 +23,11 @@ pub fn classify(msg: &[u8], me: Outbound, reg: &Registry) -> Option<Bridge> {
         return None;
     }
     match Control::from_bytes(body)? {
-        Control::Register { peer_id, .. } => {
+        Control::Register { peer_id, token, .. } => {
             let (notify_tx, notify_rx) = oneshot::channel();
-            reg.register(peer_id.clone(), me, notify_tx);
+            if reg.register(peer_id.clone(), token, me, notify_tx) == crate::registry::Registration::Rejected {
+                return None;
+            }
             Some(Bridge::HostRegistered { peer_id, notify_rx })
         }
         Control::Connect { target, peer_id, .. } => {

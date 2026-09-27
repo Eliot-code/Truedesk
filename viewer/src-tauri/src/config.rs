@@ -11,6 +11,8 @@ const DEFAULT_RELAY_URL: &str = "ws://127.0.0.1:8080/ws";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub id: String,
+    #[serde(default)]
+    pub registration_token: String,
     pub relay_url: String,
     #[serde(default)]
     pub relay_urls: Vec<String>,
@@ -31,6 +33,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             id: generate_id(),
+            registration_token: generate_registration_token(),
             relay_url: DEFAULT_RELAY_URL.to_string(),
             relay_urls: vec![DEFAULT_RELAY_URL.to_string()],
             allow_list: Vec::new(),
@@ -96,6 +99,16 @@ impl ConfigStore {
         self.config.id.clone()
     }
 
+    pub fn ensure_registration_token(&mut self) -> String {
+        if self.config.registration_token.len() != 64
+            || !self.config.registration_token.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            self.config.registration_token = generate_registration_token();
+            let _ = self.save();
+        }
+        self.config.registration_token.clone()
+    }
+
     pub fn add_allow(&mut self, id: &str) -> io::Result<()> {
         add_unique(&mut self.config.allow_list, id);
         self.save()
@@ -129,6 +142,13 @@ pub fn generate_id() -> String {
         .to_string()
 }
 
+pub fn generate_registration_token() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 fn add_unique(values: &mut Vec<String>, value: &str) {
     if !values.iter().any(|existing| existing == value) {
         values.push(value.to_string());
@@ -149,6 +169,13 @@ mod tests {
         let id = generate_id();
         assert_eq!(id.len(), 9);
         assert!(id.bytes().all(|byte| byte.is_ascii_digit()));
+    }
+
+    #[test]
+    fn generated_registration_token_is_32_random_bytes_as_hex() {
+        let token = generate_registration_token();
+        assert_eq!(token.len(), 64);
+        assert!(token.bytes().all(|byte| byte.is_ascii_hexdigit()));
     }
 
     #[test]

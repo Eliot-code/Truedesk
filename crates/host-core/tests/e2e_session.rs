@@ -70,7 +70,7 @@ async fn connect_to_peer(addr: &str, viewer: bool) -> relay_client::RelayWebSock
             .await
             .expect("relay connect_to");
     } else {
-        relay_client::register(&mut ws, PEER_ID)
+        relay_client::register(&mut ws, PEER_ID, &"00".repeat(32))
             .await
             .expect("relay register");
     }

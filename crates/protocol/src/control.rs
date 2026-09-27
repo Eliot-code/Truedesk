@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum Control {
-    Register { peer_id: String, ver: u32 },
+    Register { peer_id: String, token: String, ver: u32 },
     Connect { target: String, peer_id: String, ver: u32 },
     Paired { session: String, peer_role: String, peer_id: String },
     Ice { session: String, cand: String },
@@ -38,7 +38,7 @@ mod tests {
 
     #[test]
     fn register_roundtrips() {
-        let c = Control::Register { peer_id: "123-456-789".into(), ver: 1 };
+        let c = Control::Register { peer_id: "123-456-789".into(), token: "00".repeat(32), ver: 1 };
         let bytes = c.to_bytes();
         assert_eq!(Control::from_bytes(&bytes), Some(c));
     }

@@ -695,9 +695,10 @@ fn save_recording(bytes: Vec<u8>, suggested_name: String) -> Result<String, Stri
 
 #[tauri::command]
 fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<(), String> {
-    let (relay_url, id, password, unattended_enabled, twofa_enabled, totp_secret) = {
+    let (relay_url, id, registration_token, password, unattended_enabled, twofa_enabled, totp_secret) = {
         let mut s = state.0.lock().unwrap();
         let id = s.config.ensure_identity();
+        let registration_token = s.config.ensure_registration_token();
         let unattended_password = if s.config.config.unattended_enabled {
             unattended::get_password().ok()
         } else {
@@ -712,6 +713,7 @@ fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<()
         (
             s.config.config.relay_url.clone(),
             id,
+            registration_token,
             password,
             unattended_enabled, twofa_enabled, totp_secret,
         )
@@ -729,7 +731,7 @@ fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<()
     let task = tauri::async_runtime::spawn(async move {
         let result = async {
             let (_, mut ws) = host_core::relay_client::connect_best(&[relay_url]).await?;
-            host_core::relay_client::register(&mut ws, &id)
+            host_core::relay_client::register(&mut ws, &id, &registration_token)
                 .await
                 .map_err(|e| e.to_string())?;
             emit(&app, "status_changed", StatusEvent { state: "online" });
