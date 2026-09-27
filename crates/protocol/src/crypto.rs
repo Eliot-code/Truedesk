@@ -1,4 +1,4 @@
-use chacha20poly1305::aead::{Aead, KeyInit};
+use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 
 fn nonce_from_counter(counter: u64) -> [u8; 12] {
@@ -16,11 +16,11 @@ impl Sealer {
     pub fn new(key: [u8; 32]) -> Sealer {
         Sealer { cipher: ChaCha20Poly1305::new((&key).into()), counter: 0 }
     }
-    pub fn seal(&mut self, plaintext: &[u8]) -> Vec<u8> {
+    pub fn seal(&mut self, aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
         let nbytes = nonce_from_counter(self.counter);
         self.counter += 1;
         let nonce = Nonce::from_slice(&nbytes);
-        let ct = self.cipher.encrypt(nonce, plaintext).expect("seal");
+        let ct = self.cipher.encrypt(nonce, Payload { msg: plaintext, aad }).expect("seal");
         let mut wire = Vec::with_capacity(12 + ct.len());
         wire.extend_from_slice(&nbytes);
         wire.extend_from_slice(&ct);
@@ -54,14 +54,14 @@ impl Opener {
         }
     }
 
-    pub fn open(&mut self, wire: &[u8]) -> Option<Vec<u8>> {
+    pub fn open(&mut self, aad: &[u8], wire: &[u8]) -> Option<Vec<u8>> {
         if wire.len() < 12 + 16 {
             return None;
         }
         let (nbytes, ct) = wire.split_at(12);
         let nonce = Nonce::from_slice(nbytes);
         // Authenticate first: only genuine frames may touch replay state.
-        let plaintext = self.cipher.decrypt(nonce, ct).ok()?;
+        let plaintext = self.cipher.decrypt(nonce, Payload { msg: ct, aad }).ok()?;
         let counter = u64::from_be_bytes(nbytes[4..12].try_into().ok()?);
         if !self.accept_counter(counter) {
             return None; // authentic but replayed or too old — drop it.
@@ -112,15 +112,15 @@ mod tests {
         let key = [7u8; 32];
         let mut s = Sealer::new(key);
         let mut o = Opener::new(key);
-        let wire = s.seal(b"secret frame");
-        assert_eq!(o.open(&wire).as_deref(), Some(&b"secret frame"[..]));
+        let wire = s.seal(&[0x10], b"secret frame");
+        assert_eq!(o.open(&[0x10], &wire).as_deref(), Some(&b"secret frame"[..]));
     }
 
     #[test]
     fn nonces_advance_and_stay_unique() {
         let mut s = Sealer::new([1u8; 32]);
-        let a = s.seal(b"x");
-        let b = s.seal(b"x");
+        let a = s.seal(&[0x10], b"x");
+        let b = s.seal(&[0x10], b"x");
         assert_ne!(&a[..12], &b[..12]); // nonce prefix differs
     }
 
@@ -128,10 +128,10 @@ mod tests {
     fn tampered_ciphertext_fails() {
         let mut s = Sealer::new([2u8; 32]);
         let mut o = Opener::new([2u8; 32]);
-        let mut wire = s.seal(b"data");
+        let mut wire = s.seal(&[0x10], b"data");
         let last = wire.len() - 1;
         wire[last] ^= 0xFF;
-        assert!(o.open(&wire).is_none());
+        assert!(o.open(&[0x10], &wire).is_none());
     }
 
     #[test]
@@ -139,9 +139,9 @@ mod tests {
         let key = [3u8; 32];
         let mut s = Sealer::new(key);
         let mut o = Opener::new(key);
-        let wire = s.seal(b"move mouse");
-        assert!(o.open(&wire).is_some()); // first delivery accepted
-        assert!(o.open(&wire).is_none()); // exact replay rejected
+        let wire = s.seal(&[0x12], b"move mouse");
+        assert!(o.open(&[0x12], &wire).is_some()); // first delivery accepted
+        assert!(o.open(&[0x12], &wire).is_none()); // exact replay rejected
     }
 
     #[test]
@@ -149,16 +149,16 @@ mod tests {
         let key = [4u8; 32];
         let mut s = Sealer::new(key);
         let mut o = Opener::new(key);
-        let f0 = s.seal(b"0");
-        let f1 = s.seal(b"1");
-        let f2 = s.seal(b"2");
+        let f0 = s.seal(&[0x10], b"0");
+        let f1 = s.seal(&[0x10], b"1");
+        let f2 = s.seal(&[0x10], b"2");
         // Deliver reordered: 2, 0, 1 — all fresh, all accepted.
-        assert!(o.open(&f2).is_some());
-        assert!(o.open(&f0).is_some());
-        assert!(o.open(&f1).is_some());
+        assert!(o.open(&[0x10], &f2).is_some());
+        assert!(o.open(&[0x10], &f0).is_some());
+        assert!(o.open(&[0x10], &f1).is_some());
         // Any of them replayed is now rejected.
-        assert!(o.open(&f0).is_none());
-        assert!(o.open(&f2).is_none());
+        assert!(o.open(&[0x10], &f0).is_none());
+        assert!(o.open(&[0x10], &f2).is_none());
     }
 
     #[test]
@@ -166,13 +166,24 @@ mod tests {
         let key = [5u8; 32];
         let mut s = Sealer::new(key);
         let mut o = Opener::new(key);
-        let first = s.seal(b"old"); // counter 0
+        let first = s.seal(&[0x13], b"old"); // counter 0
         // Advance the sender well past the replay window.
         for _ in 0..(REPLAY_WINDOW + 5) {
-            let w = s.seal(b"x");
-            assert!(o.open(&w).is_some());
+            let w = s.seal(&[0x13], b"x");
+            assert!(o.open(&[0x13], &w).is_some());
         }
         // The very first frame is now older than the window: dropped.
-        assert!(o.open(&first).is_none());
+        assert!(o.open(&[0x13], &first).is_none());
+    }
+
+    #[test]
+    fn different_aad_fails_but_matching_aad_succeeds() {
+        let key = [6u8; 32];
+        let mut s = Sealer::new(key);
+        let wire = s.seal(&[0x10], b"video");
+        let mut wrong_opener = Opener::new(key);
+        assert!(wrong_opener.open(&[0x11], &wire).is_none());
+        let mut matching_opener = Opener::new(key);
+        assert_eq!(matching_opener.open(&[0x10], &wire).as_deref(), Some(&b"video"[..]));
     }
 }

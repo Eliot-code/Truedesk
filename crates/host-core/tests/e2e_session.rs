@@ -29,7 +29,7 @@ struct DataFileSink {
 #[async_trait]
 impl FileSink for DataFileSink {
     async fn send(&mut self, message: FileMsg) {
-        let sealed = self.sealer.seal(&DataMsg::FileTransfer(message).to_bytes());
+        let sealed = self.sealer.seal(&[Tag::Data as u8], &DataMsg::FileTransfer(message).to_bytes());
         self.sender
             .send_frame(protocol::Tag::Data, &sealed)
             .await
@@ -46,7 +46,7 @@ struct DataFileSource {
 impl FileSource for DataFileSource {
     async fn recv(&mut self) -> Option<FileMsg> {
         while let Some(sealed) = self.receiver.recv().await {
-            if let Some(plaintext) = self.opener.open(&sealed) {
+            if let Some(plaintext) = self.opener.open(&[Tag::Data as u8], &sealed) {
                 if let Some(DataMsg::FileTransfer(message)) = DataMsg::from_bytes(&plaintext) {
                     return Some(message);
                 }
@@ -322,7 +322,7 @@ async fn live_clipboard_is_sealed_and_relayed_end_to_end() {
         seq: 27,
         text: "clipboard round-trip: café 📋".into(),
     };
-    let sealed = sealer.seal(&DataMsg::Clipboard(expected.clone()).to_bytes());
+    let sealed = sealer.seal(&[Tag::Data as u8], &DataMsg::Clipboard(expected.clone()).to_bytes());
     sender
         .send_frame(Tag::Data, &sealed)
         .await
@@ -332,7 +332,7 @@ async fn live_clipboard_is_sealed_and_relayed_end_to_end() {
         .await
         .expect("timed out waiting for clipboard Data frame")
         .expect("viewer Data channel closed");
-    let plaintext = opener.open(&received).expect("clipboard frame failed to open");
+    let plaintext = opener.open(&[Tag::Data as u8], &received).expect("clipboard frame failed to open");
     assert_eq!(
         DataMsg::from_bytes(&plaintext),
         Some(DataMsg::Clipboard(expected)),

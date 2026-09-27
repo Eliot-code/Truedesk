@@ -281,7 +281,7 @@ where
     let mut control_opener = Opener::new(control_recv_key);
     let code_valid = if unattended_enabled && twofa_enabled {
         let body = tokio::time::timeout(Duration::from_secs(30), recv_control(&mut control_rx)).await.ok().flatten();
-        let code = body.and_then(|body| control_opener.open(&body)).and_then(|body| match Control::from_bytes(&body) {
+        let code = body.and_then(|body| control_opener.open(&[Tag::Control as u8], &body)).and_then(|body| match Control::from_bytes(&body) {
             Some(Control::AuthCode { code }) => Some(code),
             _ => None,
         });
@@ -318,7 +318,7 @@ where
     // nonce sequence) on this key: a second Sealer::new on control_send_key
     // would restart the counter at 0 and reuse a nonce with MonitorList.
     let monitor_list = Control::MonitorList { monitors: capturer.monitors() };
-    reliable.sender().send_frame(Tag::Control, &control_sealer.seal(&monitor_list.to_bytes())).await?;
+    reliable.sender().send_frame(Tag::Control, &control_sealer.seal(&[Tag::Control as u8], &monitor_list.to_bytes())).await?;
     if let Some(ready) = data_ready {
         let _ = ready.send(DataHandle {
             sender: reliable.sender(),
@@ -350,7 +350,7 @@ where
             let Some((Tag::Input, body)) = received else {
                 break;
             };
-            let Some(plaintext) = opener.open(&body) else {
+            let Some(plaintext) = opener.open(&[Tag::Input as u8], &body) else {
                 continue;
             };
             let Some((event, _timestamp_us)) = InputEvent::from_bytes(&plaintext) else {
@@ -370,11 +370,11 @@ where
     loop {
         tokio::select! {
             Some(audio_frame) = audio_rx.recv() => {
-                let sealed = sealer.seal(&audio_frame.to_bytes());
+                let sealed = sealer.seal(&[Tag::Audio as u8], &audio_frame.to_bytes());
                 let _ = transport_tx.send(Tag::Audio, &sealed).await;
             },
             Some(body) = session_control_rx.recv() => {
-                if let Some(plaintext) = control_opener.open(&body) {
+                if let Some(plaintext) = control_opener.open(&[Tag::Control as u8], &body) {
                     if let Some(Control::SelectMonitor { id }) = Control::from_bytes(&plaintext) {
                         if capturer.select_monitor(id) {
                             if let Some(frame) = capturer.next_frame().and_then(even_frame) {
@@ -398,7 +398,7 @@ where
                 let Some(encoded) = encoder.encode(&frame) else { continue };
                 let mut plaintext = encode::video_header(seq, frame.timestamp_us, encoded.keyframe, width, height);
                 plaintext.extend_from_slice(&encoded.data);
-                let sealed = sealer.seal(&plaintext);
+                let sealed = sealer.seal(&[Tag::Video as u8], &plaintext);
                 transport_tx.send(Tag::Video, &sealed).await?;
                 seq += 1;
             }
@@ -524,7 +524,7 @@ where
     let control_opener = Opener::new(control_recv_key);
     if let Some(code) = auth_code {
         let body = Control::AuthCode { code }.to_bytes();
-        sender.send_frame(Tag::Control, &control_sealer.seal(&body)).await.map_err(|error| error.to_string())?;
+        sender.send_frame(Tag::Control, &control_sealer.seal(&[Tag::Control as u8], &body)).await.map_err(|error| error.to_string())?;
     }
     let (ice_rx, session_control_rx) = split_session_control(control_rx, ice_session.to_owned());
 
@@ -582,7 +582,7 @@ async fn run_viewer_media_loop_with_control(
     loop {
         tokio::select! {
             Some(body) = control_rx.recv() => {
-                if let Some(plaintext) = control_opener.open(&body) {
+                if let Some(plaintext) = control_opener.open(&[Tag::Control as u8], &body) {
                     if let Some(Control::MonitorList { .. }) = Control::from_bytes(&plaintext) {
                         if let Some(sink) = &monitor_sink { let _ = sink.send(plaintext).await; }
                     }
@@ -590,7 +590,7 @@ async fn run_viewer_media_loop_with_control(
             },
             received = transport_rx.recv() => {
                 let Some((tag, sealed)) = received else { return Err("connection closed during session".into()) };
-                let Some(plaintext) = opener.open(&sealed) else { continue };
+                let Some(plaintext) = opener.open(&[tag as u8], &sealed) else { continue };
                 match tag {
                     Tag::Video => if frame_sink.send(plaintext).await.is_err() { return Err("viewer frame channel closed".into()) },
                     Tag::Audio => if let Some(sink) = &audio_sink { if sink.send(plaintext).await.is_err() { return Err("viewer audio channel closed".into()) } },
@@ -599,7 +599,7 @@ async fn run_viewer_media_loop_with_control(
             }
             input = input_rx.recv() => {
                 let Some(bytes) = input else { return Ok(()) };
-                let sealed = sealer.seal(&bytes);
+                let sealed = sealer.seal(&[Tag::Input as u8], &bytes);
                 if transport_tx.send(Tag::Input, &sealed).await.is_err() { return Err("viewer input transport closed".into()) }
             }
         }
@@ -801,7 +801,7 @@ mod tests {
         ));
 
         let video = b"18-byte-header-plus-h264".to_vec();
-        let sealed_video = host_video_sealer.seal(&video);
+        let sealed_video = host_video_sealer.seal(&[Tag::Video as u8], &video);
         host_tx.send(Tag::Video, &sealed_video).await.unwrap();
         assert_eq!(timeout(Duration::from_secs(1), frames.recv()).await.unwrap(), Some(video));
 
@@ -812,7 +812,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(tag, Tag::Input);
-        assert_eq!(host_input_opener.open(&sealed_input), Some(input));
+        assert_eq!(host_input_opener.open(&[Tag::Input as u8], &sealed_input), Some(input));
 
         drop(input_tx);
         assert!(timeout(Duration::from_secs(1), viewer).await.unwrap().unwrap().is_ok());

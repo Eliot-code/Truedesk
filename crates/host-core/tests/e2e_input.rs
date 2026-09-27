@@ -1,4 +1,4 @@
-use protocol::crypto::{Opener, Sealer};
+use protocol::{crypto::{Opener, Sealer}, Tag};
 use protocol::input::InputEvent;
 use protocol::kex::derive_keys;
 
@@ -15,8 +15,8 @@ fn input_event_roundtrips_viewer_to_host() {
         modifiers: 0,
     };
     let plaintext = ev.to_bytes(42);
-    let sealed = sealer.seal(&plaintext);
-    let opened = opener.open(&sealed).expect("host opens viewer input");
+    let sealed = sealer.seal(&[Tag::Input as u8], &plaintext);
+    let opened = opener.open(&[Tag::Input as u8], &sealed).expect("host opens viewer input");
     assert_eq!(opened, plaintext);
     assert_eq!(InputEvent::from_bytes(&opened), Some((ev, 42)));
 }

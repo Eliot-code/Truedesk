@@ -154,7 +154,7 @@ impl FileSink for ReliableFileSink {
             }
         }
         let plaintext = DataMsg::FileTransfer(message).to_bytes();
-        let sealed = self.sealer.lock().unwrap().seal(&plaintext);
+        let sealed = self.sealer.lock().unwrap().seal(&[Tag::Data as u8], &plaintext);
         let _ = self.outgoing.send_frame(Tag::Data, &sealed).await;
     }
 }
@@ -332,7 +332,7 @@ fn spawn_clipboard_thread(
                 Err(std_mpsc::RecvTimeoutError::Timeout) => {
                     if !enabled.load(Ordering::Relaxed) { continue; }
                     let Some(message) = sync.poll_data() else { continue };
-                    let sealed = sealer.lock().unwrap().seal(&message.to_bytes());
+                    let sealed = sealer.lock().unwrap().seal(&[Tag::Data as u8], &message.to_bytes());
                     if runtime.block_on(outgoing.send_frame(Tag::Data, &sealed)).is_err() { break; }
                 }
             }
@@ -350,7 +350,7 @@ fn dispatch_data(
     tauri::async_runtime::spawn(async move {
         let mut incoming = incoming;
         while let Some(message) = incoming.recv().await {
-            let Some(plaintext) = opener.lock().unwrap().open(&message) else { continue };
+            let Some(plaintext) = opener.lock().unwrap().open(&[Tag::Data as u8], &message) else { continue };
             match DataMsg::from_bytes(&plaintext) {
                 Some(DataMsg::FileTransfer(message)) => { if file_tx.send(message).await.is_err() { break; } }
                 Some(DataMsg::Clipboard(message)) => {
@@ -1134,7 +1134,7 @@ async fn select_monitor(state: tauri::State<'_, AppState>, id: u32) -> Result<()
     let sender = sender.ok_or_else(|| "no active viewer session".to_owned())?;
     let sealer = sealer.ok_or_else(|| "control channel is not ready".to_owned())?;
     let body = Control::SelectMonitor { id }.to_bytes();
-    let sealed = sealer.lock().unwrap().seal(&body);
+    let sealed = sealer.lock().unwrap().seal(&[Tag::Control as u8], &body);
     sender.send_frame(Tag::Control, &sealed).await.map_err(|error| error.to_string())
 }
 
@@ -1143,7 +1143,7 @@ async fn send_auth_code(state: tauri::State<'_, AppState>, code: String) -> Resu
     let (sender, sealer) = { let state = state.0.lock().unwrap(); (state.control_sender.clone(), state.control_sealer.clone()) };
     let sender = sender.ok_or_else(|| "no active viewer session".to_owned())?;
     let sealer = sealer.ok_or_else(|| "control channel is not ready".to_owned())?;
-    let sealed = sealer.lock().unwrap().seal(&Control::AuthCode { code }.to_bytes());
+    let sealed = sealer.lock().unwrap().seal(&[Tag::Control as u8], &Control::AuthCode { code }.to_bytes());
     sender.send_frame(Tag::Control, &sealed).await.map_err(|error| error.to_string())
 }
 

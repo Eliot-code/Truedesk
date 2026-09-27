@@ -1,5 +1,5 @@
 use host_core::encode::{video_header, Encoder, H264Encoder, PixelFormat, RawFrame};
-use protocol::crypto::{Opener, Sealer};
+use protocol::{crypto::{Opener, Sealer}, Tag};
 use protocol::kex::derive_keys;
 
 #[test]
@@ -22,8 +22,8 @@ fn captured_frame_roundtrips_through_e2ee() {
     let mut plaintext = video_header(0, 0, encoded.keyframe, 64, 64);
     plaintext.extend_from_slice(&encoded.data);
 
-    let sealed = sealer.seal(&plaintext);
-    let opened = opener.open(&sealed).expect("decrypts with derived key");
+    let sealed = sealer.seal(&[Tag::Data as u8], &plaintext);
+    let opened = opener.open(&[Tag::Data as u8], &sealed).expect("decrypts with derived key");
     assert_eq!(opened, plaintext, "E2EE round-trip preserves the frame");
     assert_eq!(opened[12], 1);
     assert!(opened.len() > 18);
