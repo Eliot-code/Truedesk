@@ -42,7 +42,11 @@ pub fn should_auto_accept_with_2fa(unattended_enabled: bool, pake_succeeded: boo
 
 pub fn totp_is_valid(secret: &str, code: &str, unix_time: u64) -> bool {
     if code.len() != 6 || !code.bytes().all(|byte| byte.is_ascii_digit()) { return false; }
-    let decoded = decode_base32(secret).unwrap_or_else(|| secret.as_bytes().to_vec());
+    // Fail closed on a malformed secret. Authenticator apps base32-decode the
+    // enrolled secret to get the HMAC key; falling back to the raw ASCII bytes
+    // would compute TOTP over the wrong key and could never match, so a decode
+    // failure must reject rather than silently use a different key.
+    let Some(decoded) = decode_base32(secret) else { return false; };
     [unix_time.saturating_sub(30), unix_time, unix_time.saturating_add(30)]
         .into_iter()
         .any(|time| totp_lite::totp_custom::<totp_lite::Sha1>(30, 6, &decoded, time) == code)
@@ -756,12 +760,15 @@ mod tests {
 
     #[test]
     fn totp_accepts_current_and_adjacent_steps_but_not_wrong_or_expired_codes() {
-        let secret = "12345678901234567890";
+        // A real authenticator base32-decodes the enrolled secret to get the
+        // HMAC key, so the expected codes must be computed over the DECODED key.
+        let secret = "JBSWY3DPEHPK3PXP"; // valid RFC 4648 base32
+        let key = decode_base32(secret).expect("valid base32 secret");
         let now = 1_700_000_000;
-        let current = totp_lite::totp_custom::<totp_lite::Sha1>(30, 6, secret.as_bytes(), now);
-        let previous = totp_lite::totp_custom::<totp_lite::Sha1>(30, 6, secret.as_bytes(), now - 30);
-        let next = totp_lite::totp_custom::<totp_lite::Sha1>(30, 6, secret.as_bytes(), now + 30);
-        let expired = totp_lite::totp_custom::<totp_lite::Sha1>(30, 6, secret.as_bytes(), now - 60);
+        let current = totp_lite::totp_custom::<totp_lite::Sha1>(30, 6, &key, now);
+        let previous = totp_lite::totp_custom::<totp_lite::Sha1>(30, 6, &key, now - 30);
+        let next = totp_lite::totp_custom::<totp_lite::Sha1>(30, 6, &key, now + 30);
+        let expired = totp_lite::totp_custom::<totp_lite::Sha1>(30, 6, &key, now - 60);
         assert!(totp_is_valid(secret, &current, now));
         assert!(totp_is_valid(secret, &previous, now));
         assert!(totp_is_valid(secret, &next, now));

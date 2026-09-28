@@ -82,3 +82,14 @@ see routing and network metadata, but it has no session decryption keys. Use
 `wss://` in production; plain `ws://` is appropriate only for trusted local
 development or an already-protected network.
 
+
+## Transport security: use `wss://` for remote relays
+
+Session payloads are end-to-end encrypted regardless of transport, so the relay
+never sees plaintext. However, a plain `ws://` relay exposes connection
+**metadata** (IP addresses, timing, message sizes, the 9-digit IDs being paired)
+to any on-path observer. For any relay reachable over the network, always use a
+`wss://` URL (TLS). Coolify (or your reverse proxy) terminates TLS in front of
+the relay's single HTTP port, so point clients at `wss://your-relay-host` while
+the relay itself listens on plain HTTP behind the proxy. Plain `ws://` is
+intended only for `127.0.0.1`/LAN development.
