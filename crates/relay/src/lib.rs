@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio::sync::watch;
 
 const DEFAULT_MAX_CONNECTIONS: usize = 10_000;
@@ -28,6 +29,18 @@ const DEFAULT_BYTE_BURST: u64 = 8 * 1024 * 1024;
 const DEFAULT_HANDSHAKE_TIMEOUT_SECS: u64 = 15;
 const DEFAULT_PAIR_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 300;
+// The relay is a blind forwarder: a single WebSocket message carries either a
+// tiny Register/Connect signal OR an opaque payload frame it pipes between
+// peers. The cap therefore has to clear the largest legitimate forwarded frame
+// (the host caps a video frame at 4 MiB), so it cannot be a signaling-sized
+// value without dropping real media/file frames. 8 MiB bounds a single message
+// well below tungstenite's 64 MiB default while passing all legitimate
+// traffic; the retained-memory DoS is closed by strict Register field
+// validation (9-digit id, 64-hex token) plus the per-IP limits, not by this.
+const DEFAULT_MAX_SIGNAL_MESSAGE: usize = 8 * 1024 * 1024;
+const DEFAULT_OWNERSHIP_GRACE_SECS: u64 = 300;
+const DEFAULT_CONNECTION_ATTEMPT_BURST: u32 = 20;
+const DEFAULT_CONNECTION_ATTEMPT_REFILL_SECS: u64 = 10;
 
 #[derive(Clone)]
 pub struct RelayState {
@@ -47,6 +60,10 @@ struct RelayConfig {
     handshake_timeout: Duration,
     pair_timeout: Duration,
     idle_timeout: Duration,
+    max_signal_message: usize,
+    ownership_grace: Duration,
+    connection_attempt_burst: u32,
+    connection_attempt_refill: Duration,
 }
 
 impl Default for RelayConfig {
@@ -59,6 +76,10 @@ impl Default for RelayConfig {
             handshake_timeout: Duration::from_secs(DEFAULT_HANDSHAKE_TIMEOUT_SECS),
             pair_timeout: Duration::from_secs(DEFAULT_PAIR_TIMEOUT_SECS),
             idle_timeout: Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS),
+            max_signal_message: DEFAULT_MAX_SIGNAL_MESSAGE,
+            ownership_grace: Duration::from_secs(DEFAULT_OWNERSHIP_GRACE_SECS),
+            connection_attempt_burst: DEFAULT_CONNECTION_ATTEMPT_BURST,
+            connection_attempt_refill: Duration::from_secs(DEFAULT_CONNECTION_ATTEMPT_REFILL_SECS),
         }
     }
 }
@@ -74,6 +95,10 @@ impl RelayConfig {
             handshake_timeout: Duration::from_secs(env_u64("RELAY_HANDSHAKE_TIMEOUT_SECS", DEFAULT_HANDSHAKE_TIMEOUT_SECS)),
             pair_timeout: Duration::from_secs(env_u64("RELAY_PAIR_TIMEOUT_SECS", DEFAULT_PAIR_TIMEOUT_SECS)),
             idle_timeout: Duration::from_secs(env_u64("RELAY_IDLE_TIMEOUT_SECS", DEFAULT_IDLE_TIMEOUT_SECS)),
+            max_signal_message: env_usize("RELAY_MAX_SIGNAL_MESSAGE_BYTES", DEFAULT_MAX_SIGNAL_MESSAGE),
+            ownership_grace: Duration::from_secs(env_u64("RELAY_OWNERSHIP_GRACE_SECS", DEFAULT_OWNERSHIP_GRACE_SECS)),
+            connection_attempt_burst: env_u64("RELAY_CONNECTION_ATTEMPT_BURST", DEFAULT_CONNECTION_ATTEMPT_BURST as u64) as u32,
+            connection_attempt_refill: Duration::from_secs(env_u64("RELAY_CONNECTION_ATTEMPT_REFILL_SECS", DEFAULT_CONNECTION_ATTEMPT_REFILL_SECS)),
         }
     }
 }
@@ -89,20 +114,34 @@ struct ConnectionLimits {
     per_ip: usize,
     active: AtomicUsize,
     ips: Mutex<HashMap<IpAddr, usize>>,
+    attempts: Mutex<HashMap<IpAddr, (u32, Instant)>>,
+    attempt_capacity: u32,
+    attempt_refill: Duration,
 }
 
 impl ConnectionLimits {
-    fn from_env() -> Self {
+    fn from_env(config: &RelayConfig) -> Self {
         Self {
             max: env_usize("RELAY_MAX_CONNECTIONS", DEFAULT_MAX_CONNECTIONS),
             per_ip: env_usize("RELAY_MAX_CONNECTIONS_PER_IP", DEFAULT_MAX_CONNECTIONS_PER_IP),
             active: AtomicUsize::new(0),
             ips: Mutex::new(HashMap::new()),
+            attempts: Mutex::new(HashMap::new()),
+            attempt_capacity: config.connection_attempt_burst,
+            attempt_refill: config.connection_attempt_refill,
         }
     }
 
     fn try_acquire(self: &Arc<Self>, ip: IpAddr) -> Option<ConnectionGuard> {
         let mut ips = self.ips.lock().expect("connection limits lock poisoned");
+        let mut attempts = self.attempts.lock().expect("connection attempt limits lock poisoned");
+        let now = Instant::now();
+        let attempt = attempts.entry(ip).or_insert((self.attempt_capacity, now));
+        let refill = now.duration_since(attempt.1).as_secs_f64() * self.attempt_capacity as f64 / self.attempt_refill.as_secs_f64();
+        attempt.0 = ((attempt.0 as f64 + refill).min(self.attempt_capacity as f64)) as u32;
+        attempt.1 = now;
+        if attempt.0 == 0 { return None; }
+        attempt.0 -= 1;
         let current = ips.get(&ip).copied().unwrap_or(0);
         if self.active.load(Ordering::Relaxed) >= self.max || current >= self.per_ip { return None; }
         self.active.fetch_add(1, Ordering::Relaxed);
@@ -144,11 +183,13 @@ impl TokenBucket {
 
 pub fn app() -> Router {
     let (tx, rx) = watch::channel(false);
-    app_with_state(RelayState { registry: Registry::default(), limits: Arc::new(ConnectionLimits::from_env()), config: RelayConfig::from_env(), shutdown: rx, _shutdown_keepalive: Some(tx) })
+    let config = RelayConfig::from_env();
+    app_with_state(RelayState { registry: Registry::with_ownership_grace(config.ownership_grace), limits: Arc::new(ConnectionLimits::from_env(&config)), config, shutdown: rx, _shutdown_keepalive: Some(tx) })
 }
 
 pub fn app_with_shutdown(shutdown: watch::Receiver<bool>) -> Router {
-    app_with_state(RelayState { registry: Registry::default(), limits: Arc::new(ConnectionLimits::from_env()), config: RelayConfig::from_env(), shutdown, _shutdown_keepalive: None })
+    let config = RelayConfig::from_env();
+    app_with_state(RelayState { registry: Registry::with_ownership_grace(config.ownership_grace), limits: Arc::new(ConnectionLimits::from_env(&config)), config, shutdown, _shutdown_keepalive: None })
 }
 
 fn app_with_state(state: RelayState) -> Router {
@@ -163,7 +204,8 @@ async fn health_handler(State(state): State<RelayState>) -> Response {
 async fn ws_handler(ws: WebSocketUpgrade, ConnectInfo(addr): ConnectInfo<SocketAddr>, State(state): State<RelayState>) -> Response {
     let guard = state.limits.try_acquire(addr.ip());
     if guard.is_none() { log_event("connection_rejected", addr, "capacity"); }
-    ws.on_upgrade(move |socket| handle(socket, state, addr, guard))
+    ws.max_message_size(state.config.max_signal_message).max_frame_size(state.config.max_signal_message)
+        .on_upgrade(move |socket| handle(socket, state, addr, guard))
 }
 
 async fn handle(socket: WebSocket, state: RelayState, addr: SocketAddr, guard: Option<ConnectionGuard>) {
@@ -175,9 +217,14 @@ async fn handle(socket: WebSocket, state: RelayState, addr: SocketAddr, guard: O
     log_event("connection_open", addr, "accepted");
     let (mut sink, mut stream) = socket.split();
     let (my_tx, mut my_rx) = mpsc::channel::<Vec<u8>>(256);
+    let (close_tx, mut close_rx) = oneshot::channel::<CloseFrame<'static>>();
     let writer = tokio::spawn(async move {
-        while let Some(bytes) = my_rx.recv().await {
-            if sink.send(Message::Binary(bytes)).await.is_err() { break; }
+        loop {
+            tokio::select! {
+                Some(bytes) = my_rx.recv() => { if sink.send(Message::Binary(bytes)).await.is_err() { break; } }
+                Ok(close) = &mut close_rx => { let _ = sink.send(Message::Close(Some(close))).await; break; }
+                else => break,
+            }
         }
     });
 
@@ -193,15 +240,15 @@ async fn handle(socket: WebSocket, state: RelayState, addr: SocketAddr, guard: O
     let mut bytes = TokenBucket::new(state.config.byte_burst, state.config.bytes_per_sec);
     if !bytes.allow(first.len()) { writer.abort(); log_event("connection_rejected", addr, "byte_rate"); return; }
 
-    let bridge = session::classify(&first, my_tx.clone(), &state.registry);
+    let bridge = session::classify(&first, my_tx.clone(), &state.registry, addr.ip(), state.config.ownership_grace);
     let (peer_tx, registered_peer) = match bridge {
-        Some(Bridge::ViewerPaired { host_tx, requester_id, target_id }) => {
+        Ok(Bridge::ViewerPaired { host_tx, requester_id, target_id }) => {
             let _ = host_tx.send(session::paired_frame("host", &requester_id)).await;
             let _ = my_tx.send(session::paired_frame("viewer", &target_id)).await;
             log_event("pairing_success", addr, "viewer");
             (host_tx, None)
         }
-        Some(Bridge::HostRegistered { peer_id, notify_rx }) => {
+        Ok(Bridge::HostRegistered { peer_id, notify_rx }) => {
             let peer = tokio::select! {
                 _ = shutdown.changed() => { state.registry.unregister(&peer_id, &my_tx); writer.abort(); log_event("connection_close", addr, "shutdown"); return; }
                 result = tokio::time::timeout(state.config.pair_timeout, notify_rx) => result.ok().and_then(Result::ok),
@@ -211,7 +258,16 @@ async fn handle(socket: WebSocket, state: RelayState, addr: SocketAddr, guard: O
             log_event("pairing_success", addr, "host");
             (peer, Some(peer_id))
         }
-        None => { writer.abort(); log_event("pairing_failure", addr, "invalid_control"); return; }
+        Err(error) => {
+            let reason = match error {
+                session::ClassifyError::ConnectRateLimited => "connect_rate",
+                session::ClassifyError::InvalidRegistration => "invalid_register",
+                session::ClassifyError::InvalidConnect => "invalid_connect",
+                session::ClassifyError::InvalidControl => "invalid_control",
+            };
+            let _ = close_tx.send(CloseFrame { code: 1008, reason: Cow::Owned(reason.to_owned()) });
+            log_event("pairing_failure", addr, reason); return;
+        }
     };
     forward_rest(&mut stream, peer_tx, &mut bytes, &mut signaling, &state, &mut shutdown, addr).await;
     if let Some(peer_id) = registered_peer { state.registry.unregister(&peer_id, &my_tx); }
@@ -262,7 +318,7 @@ mod tests {
 
     #[test]
     fn connection_limits_enforce_global_and_per_ip_caps() {
-        let limits = Arc::new(ConnectionLimits { max: 2, per_ip: 1, active: AtomicUsize::new(0), ips: Mutex::new(HashMap::new()) });
+        let limits = Arc::new(ConnectionLimits { max: 2, per_ip: 1, active: AtomicUsize::new(0), ips: Mutex::new(HashMap::new()), attempts: Mutex::new(HashMap::new()), attempt_capacity: 20, attempt_refill: Duration::from_secs(10) });
         let first = limits.try_acquire(IpAddr::V4(Ipv4Addr::LOCALHOST)).unwrap();
         assert!(limits.try_acquire(IpAddr::V4(Ipv4Addr::LOCALHOST)).is_none());
         let second = limits.try_acquire(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2))).unwrap();
@@ -270,6 +326,17 @@ mod tests {
         assert!(limits.try_acquire(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 3))).is_none());
         drop(first); drop(second);
         assert_eq!(limits.active(), 0);
+    }
+
+    #[test]
+    fn connection_attempt_limiter_survives_reconnect() {
+        let limits = Arc::new(ConnectionLimits {
+            max: 2, per_ip: 2, active: AtomicUsize::new(0), ips: Mutex::new(HashMap::new()),
+            attempts: Mutex::new(HashMap::new()), attempt_capacity: 1, attempt_refill: Duration::from_secs(60),
+        });
+        let first = limits.try_acquire(IpAddr::V4(Ipv4Addr::LOCALHOST)).unwrap();
+        drop(first);
+        assert!(limits.try_acquire(IpAddr::V4(Ipv4Addr::LOCALHOST)).is_none());
     }
 
     #[test]

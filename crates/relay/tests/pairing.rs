@@ -15,7 +15,7 @@ async fn host_frame_reaches_viewer_unchanged() {
 
     host.send(Message::Binary(frame::wrap(
         Tag::Control,
-        &Control::Register { peer_id: "abc".into(), token: "00".repeat(32), ver: 1 }.to_bytes(),
+        &Control::Register { peer_id: "123456789".into(), token: "00".repeat(32), ver: 1 }.to_bytes(),
     ))).await.unwrap();
 
     // Avoid the connect racing ahead of the register (no wait-queue yet).
@@ -23,7 +23,7 @@ async fn host_frame_reaches_viewer_unchanged() {
 
     viewer.send(Message::Binary(frame::wrap(
         Tag::Control,
-        &Control::Connect { target: "abc".into(), peer_id: "viewer-1".into(), ver: 1 }.to_bytes(),
+        &Control::Connect { target: "123456789".into(), peer_id: "987654321".into(), ver: 1 }.to_bytes(),
     ))).await.unwrap();
 
     // drain the `paired` control message on the viewer side
