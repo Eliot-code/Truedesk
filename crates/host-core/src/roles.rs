@@ -22,6 +22,9 @@ use tokio_tungstenite::WebSocketStream;
 
 const KEX_MSG: u8 = 0x01;
 const KEX_CONFIRM: u8 = 0x02;
+/// A paired peer must complete both SPAKE2 exchanges promptly; this bounds
+/// resources held by connections that never authenticate.
+const KEX_DEADLINE: Duration = Duration::from_secs(10);
 
 /// ICE role invariant: the host controls nomination and the viewer accepts it.
 /// These values MUST differ for ICE to nominate a connection.
@@ -261,8 +264,9 @@ where
     let data_rx = reliable.take_data_rx().ok_or(SessionError("data receiver unavailable"))?;
     let (state, my_msg) = protocol::pake::start(password.as_bytes(), true);
     sender.send_frame(Tag::Kex, &kex_body(KEX_MSG, &my_msg)).await?;
+    let kex_deadline = tokio::time::Instant::now() + KEX_DEADLINE;
     let shared = loop {
-        match recv_control(&mut control_rx).await {
+        match tokio::time::timeout_at(kex_deadline, recv_control(&mut control_rx)).await.ok().flatten() {
             Some(body) => if let Some((KEX_MSG, msg)) = parse_kex(&body) {
                 break protocol::pake::finish(state, msg).ok_or(SessionError("invalid SPAKE2 message"))?;
             },
@@ -272,7 +276,7 @@ where
     let my_confirm = protocol::pake::confirm_tag(&shared, true);
     sender.send_frame(Tag::Kex, &kex_body(KEX_CONFIRM, &my_confirm)).await?;
     loop {
-        match recv_control(&mut control_rx).await {
+        match tokio::time::timeout_at(kex_deadline, recv_control(&mut control_rx)).await.ok().flatten() {
             Some(body) => if let Some((KEX_CONFIRM, tag)) = parse_kex(&body) {
                 if !protocol::pake::verify_peer(&shared, false, tag) { return Err(Box::new(SessionError("key confirmation failed"))); }
                 break;
@@ -296,6 +300,7 @@ where
         || (!should_auto_accept_with_2fa(unattended_enabled, true, twofa_enabled, code_valid) && !approve().await) {
         return Err(Box::new(SessionError("session rejected")));
     }
+    reliable.enable_application_traffic();
     let (send_key, recv_key) = derive_keys(&shared, true);
     let mut sealer = Sealer::new(send_key);
     let mut opener = Opener::new(recv_key);
@@ -494,9 +499,10 @@ where
     let data_rx = reliable.take_data_rx().ok_or_else(|| "data receiver unavailable".to_owned())?;
     let (state, my_msg) = protocol::pake::start(password.as_bytes(), false);
     sender.send_frame(Tag::Kex, &kex_body(KEX_MSG, &my_msg)).await.map_err(|error| error.to_string())?;
+    let kex_deadline = tokio::time::Instant::now() + KEX_DEADLINE;
 
     let shared = loop {
-        match recv_control(&mut control_rx).await {
+        match tokio::time::timeout_at(kex_deadline, recv_control(&mut control_rx)).await.ok().flatten() {
             Some(body) => if let Some((KEX_MSG, msg)) = parse_kex(&body) {
                 break protocol::pake::finish(state, msg).ok_or_else(|| "invalid SPAKE2 message".to_owned())?;
             },
@@ -507,7 +513,7 @@ where
     let my_confirm = protocol::pake::confirm_tag(&shared, false);
     sender.send_frame(Tag::Kex, &kex_body(KEX_CONFIRM, &my_confirm)).await.map_err(|error| error.to_string())?;
     loop {
-        match recv_control(&mut control_rx).await {
+        match tokio::time::timeout_at(kex_deadline, recv_control(&mut control_rx)).await.ok().flatten() {
             Some(body) => if let Some((KEX_CONFIRM, tag)) = parse_kex(&body) {
                 if !protocol::pake::verify_peer(&shared, true, tag) { return Err("key confirmation failed".to_owned()); }
                 break;
@@ -515,6 +521,7 @@ where
             None => return Err("connection closed during KEX confirmation".to_owned()),
         }
     }
+    reliable.enable_application_traffic();
 
     let (send_key, recv_key) = derive_keys(&shared, false);
     let sealer = Sealer::new(send_key);
