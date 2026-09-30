@@ -15,7 +15,8 @@ use protocol::{
     kex::derive_keys,
     Tag,
 };
-use std::{error::Error, fmt::Display, future::Future, time::Duration};
+use sha2::{Digest, Sha256};
+use std::{collections::HashMap, error::Error, fmt::Display, future::Future, sync::{Mutex, OnceLock}, time::Duration};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::WebSocketStream;
@@ -52,7 +53,52 @@ pub fn totp_is_valid(secret: &str, code: &str, unix_time: u64) -> bool {
     let Some(decoded) = decode_base32(secret) else { return false; };
     [unix_time.saturating_sub(30), unix_time, unix_time.saturating_add(30)]
         .into_iter()
-        .any(|time| totp_lite::totp_custom::<totp_lite::Sha1>(30, 6, &decoded, time) == code)
+        .fold(false, |matched, time| {
+            matched | constant_time_code_eq(
+                &totp_lite::totp_custom::<totp_lite::Sha1>(30, 6, &decoded, time),
+                code,
+            )
+        })
+}
+
+fn constant_time_code_eq(candidate: &str, supplied: &str) -> bool {
+    if candidate.len() != 6 || supplied.len() != 6 { return false; }
+    let mut difference = 0u8;
+    for (left, right) in candidate.as_bytes().iter().zip(supplied.as_bytes()) {
+        difference |= left ^ right;
+    }
+    difference == 0
+}
+
+static ACCEPTED_TOTP_STEPS: OnceLock<Mutex<HashMap<[u8; 32], u64>>> = OnceLock::new();
+
+/// Validate a TOTP and atomically consume its matching step for this host's
+/// secret. The process-wide map is keyed by a SHA-256 digest of the secret,
+/// so reconnects to the same host share replay state; it is not durable across
+/// process restarts and does not coordinate separate host processes.
+fn totp_is_valid_once(secret: &str, code: &str, unix_time: u64) -> bool {
+    if code.len() != 6 || !code.bytes().all(|byte| byte.is_ascii_digit()) { return false; }
+    let Some(decoded) = decode_base32(secret) else { return false; };
+    let current_step = unix_time / 30;
+    let candidates = [
+        current_step.saturating_sub(1),
+        current_step,
+        current_step.saturating_add(1),
+    ];
+    let mut matched_step = None;
+    for step in candidates {
+        let candidate = totp_lite::totp_custom::<totp_lite::Sha1>(30, 6, &decoded, step * 30);
+        if constant_time_code_eq(&candidate, code) && matched_step.is_none() {
+            matched_step = Some(step);
+        }
+    }
+    let Some(step) = matched_step else { return false; };
+    let key: [u8; 32] = Sha256::digest(secret.as_bytes()).into();
+    let cache = ACCEPTED_TOTP_STEPS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut accepted = cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if accepted.get(&key).is_some_and(|last| step <= *last) { return false; }
+    accepted.insert(key, step);
+    true
 }
 
 fn decode_base32(value: &str) -> Option<Vec<u8>> {
@@ -244,8 +290,8 @@ where
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run_host_session_with_data_and_accept_and_2fa<S, C, E, F, I, A, Fut>(
-    ws: WebSocketStream<S>, password: &str, ice_session: &str, mut capturer: C,
-    encoder_factory: F, mut injector: I, unattended_enabled: bool,
+    ws: WebSocketStream<S>, password: &str, ice_session: &str, capturer: C,
+    encoder_factory: F, injector: I, unattended_enabled: bool,
     twofa_enabled: bool, totp_secret: Option<&str>, approve: A,
     data_ready: Option<oneshot::Sender<DataHandle>>,
 ) -> SessionResult<()>
@@ -257,6 +303,29 @@ where
     I: InputInjector + 'static,
     A: FnOnce() -> Fut,
     Fut: Future<Output = bool>,
+{
+    run_host_session_with_data_and_accept_and_2fa_with_factory(
+        ws, password, ice_session, || Some(capturer), encoder_factory, injector,
+        unattended_enabled, twofa_enabled, totp_secret, approve, data_ready,
+    ).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_host_session_with_data_and_accept_and_2fa_with_factory<S, C, E, F, I, A, Fut, CF>(
+    ws: WebSocketStream<S>, password: &str, ice_session: &str, capture_factory: CF,
+    encoder_factory: F, mut injector: I, unattended_enabled: bool,
+    twofa_enabled: bool, totp_secret: Option<&str>, approve: A,
+    data_ready: Option<oneshot::Sender<DataHandle>>,
+)-> SessionResult<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    C: ScreenCapturer + Send + 'static,
+    E: Encoder + Send + 'static,
+    F: Fn(u16, u16) -> E,
+    I: InputInjector + 'static,
+    A: FnOnce() -> Fut,
+    Fut: Future<Output = bool>,
+    CF: FnOnce() -> Option<C>,
 {
     let mut reliable = ReliableChannel::spawn(ws);
     let sender = reliable.sender();
@@ -294,12 +363,13 @@ where
             _ => None,
         });
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |duration| duration.as_secs());
-        code.as_deref().zip(totp_secret).is_some_and(|(code, secret)| totp_is_valid(secret, code, now))
+        code.as_deref().zip(totp_secret).is_some_and(|(code, secret)| totp_is_valid_once(secret, code, now))
     } else { true };
     if (unattended_enabled && twofa_enabled && !code_valid)
         || (!should_auto_accept_with_2fa(unattended_enabled, true, twofa_enabled, code_valid) && !approve().await) {
         return Err(Box::new(SessionError("session rejected")));
     }
+    let mut capturer = capture_factory().ok_or(SessionError(capture_unavailable_message()))?;
     reliable.enable_application_traffic();
     let (send_key, recv_key) = derive_keys(&shared, true);
     let mut sealer = Sealer::new(send_key);
@@ -649,7 +719,6 @@ pub async fn run_default_host_session<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let capturer = ScapCapturer::new().ok_or(SessionError(capture_unavailable_message()))?;
     let injector: Box<dyn InputInjector> = match EnigoInjector::new() {
         Some(injector) => Box::new(injector),
         None => {
@@ -657,13 +726,10 @@ where
             Box::new(NoopInjector::default())
         }
     };
-    run_host_session(
-        ws,
-        password,
-        ice_session,
-        capturer,
+    run_host_session_with_data_and_accept_and_2fa_with_factory(
+        ws, password, ice_session, ScapCapturer::new,
         |w, h| H264Encoder::new(w, h, 15, 1_000_000),
-        injector,
+        injector, false, false, None, || async { true }, None,
     )
     .await
 }
@@ -711,7 +777,6 @@ where
     A: FnOnce() -> Fut,
     Fut: Future<Output = bool>,
 {
-    let capturer = ScapCapturer::new().ok_or(SessionError(capture_unavailable_message()))?;
     let injector: Box<dyn InputInjector> = match EnigoInjector::new() {
         Some(injector) => Box::new(injector),
         None => {
@@ -719,11 +784,11 @@ where
             Box::new(NoopInjector::default())
         }
     };
-    run_host_session_with_data_and_accept_and_2fa(
+    run_host_session_with_data_and_accept_and_2fa_with_factory(
         ws,
         password,
         ice_session,
-        capturer,
+        ScapCapturer::new,
         |w, h| H264Encoder::new(w, h, 15, 1_000_000),
         injector,
         unattended_enabled,
@@ -781,6 +846,18 @@ mod tests {
         assert!(totp_is_valid(secret, &next, now));
         assert!(!totp_is_valid(secret, "000000", now));
         assert!(!totp_is_valid(secret, &expired, now));
+    }
+
+    #[test]
+    fn totp_replay_guard_consumes_a_step_but_accepts_a_fresh_step() {
+        let secret = "GEZDGNBVGY3TQOJQ";
+        let key = decode_base32(secret).unwrap();
+        let now = 1_700_000_000;
+        let current = totp_lite::totp_custom::<totp_lite::Sha1>(30, 6, &key, now);
+        let fresh = totp_lite::totp_custom::<totp_lite::Sha1>(30, 6, &key, now + 30);
+        assert!(totp_is_valid_once(secret, &current, now));
+        assert!(!totp_is_valid_once(secret, &current, now));
+        assert!(totp_is_valid_once(secret, &fresh, now + 30));
     }
 
     #[test]

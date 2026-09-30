@@ -201,10 +201,10 @@ impl FileReceiver {
         }
 
         tokio::fs::create_dir_all(downloads_dir).await?;
-        let temp_path = create_temp_path(downloads_dir, &name).await?;
+        let (temp_path, temp_file) = create_temp_path(downloads_dir, &name).await?;
         let result = Self::receive_to_temp(
             source,
-            &temp_path,
+            temp_file,
             id,
             size,
             expected_hash,
@@ -231,7 +231,7 @@ impl FileReceiver {
 
     async fn receive_to_temp<S>(
         source: &mut S,
-        temp_path: &Path,
+        mut file: tokio::fs::File,
         id: u64,
         size: u64,
         expected_hash: [u8; 32],
@@ -240,7 +240,6 @@ impl FileReceiver {
     where
         S: FileSource + Send,
     {
-        let mut file = tokio::fs::File::create(temp_path).await?;
         let mut hasher = Sha256::new();
         let mut expected_offset = 0u64;
         progress(0, size);
@@ -289,7 +288,7 @@ impl FileReceiver {
     }
 }
 
-async fn create_temp_path(dir: &Path, name: &str) -> Result<PathBuf, FileError> {
+async fn create_temp_path(dir: &Path, name: &str) -> Result<(PathBuf, tokio::fs::File), FileError> {
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
     for _ in 0..100 {
         let suffix = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
@@ -301,8 +300,7 @@ async fn create_temp_path(dir: &Path, name: &str) -> Result<PathBuf, FileError> 
             .await
         {
             Ok(file) => {
-                drop(file);
-                return Ok(path);
+                return Ok((path, file));
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error.into()),
@@ -391,6 +389,21 @@ mod tests {
         let second = unique_final_path(&dir, "report.pdf").await.unwrap();
         assert_eq!(first.file_name().unwrap(), "report.pdf");
         assert_eq!(second.file_name().unwrap(), "report (1).pdf");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn final_path_reservation_does_not_follow_symlinks() {
+        use std::os::unix::fs::symlink;
+        let dir = temp_dir("symlink-final");
+        let target = dir.join("outside.txt");
+        fs::write(&target, b"keep me").unwrap();
+        symlink(&target, dir.join("report.pdf")).unwrap();
+
+        let reserved = unique_final_path(&dir, "report.pdf").await.unwrap();
+        assert_eq!(reserved.file_name().unwrap(), "report (1).pdf");
+        assert_eq!(fs::read(&target).unwrap(), b"keep me");
         fs::remove_dir_all(dir).unwrap();
     }
 

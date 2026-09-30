@@ -9,7 +9,7 @@ use futures_util::StreamExt;
 use host_core::{clipboard::{ArboardBackend, ClipboardSync}, filexfer::{ConsentDecision, FileReceiver, FileSink, FileSource, FileSender}, roles::DataHandle, transport::reliable::ReliableSender};
 use protocol::{control::{Control, MonitorInfo}, crypto::{Opener, Sealer}, datamsg::DataMsg, filexfer::FileMsg, frame, Tag};
 use serde::Serialize;
-use std::{collections::HashMap, fs, path::{Path, PathBuf}, sync::{atomic::{AtomicBool, Ordering}, mpsc as std_mpsc, Arc, Mutex}, time::Duration};
+use std::{collections::HashMap, fs, fs::OpenOptions, io, path::{Path, PathBuf}, sync::{atomic::{AtomicBool, Ordering}, mpsc as std_mpsc, Arc, Mutex}, time::Duration};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{mpsc, oneshot};
 
@@ -191,8 +191,54 @@ pub(crate) fn downloads_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("Downloads"))
 }
 
+/// Maximum size accepted for a recording returned by the viewer UI.
+const MAX_RECORDING_SIZE: usize = 2 * 1024 * 1024 * 1024;
+
+#[allow(dead_code)]
 fn recording_path(suggested_name: &str) -> PathBuf {
     downloads_dir().join(sanitize_recording_name(suggested_name))
+}
+
+fn validate_recording_size(bytes: &[u8]) -> Result<(), String> {
+    validate_recording_size_len(bytes.len())
+}
+
+fn validate_recording_size_len(size: usize) -> Result<(), String> {
+    if size > MAX_RECORDING_SIZE {
+        return Err(format!(
+            "recording exceeds the {} GiB maximum size",
+            MAX_RECORDING_SIZE / (1024 * 1024 * 1024)
+        ));
+    }
+    Ok(())
+}
+
+fn recording_name_with_suffix(name: &str, suffix: usize) -> String {
+    if suffix == 1 {
+        return name.to_owned();
+    }
+    let stem = name.strip_suffix(".webm").unwrap_or(name);
+    format!("{stem} ({suffix}).webm")
+}
+
+fn next_recording_path(directory: &Path, suggested_name: &str) -> Result<PathBuf, String> {
+    let sanitized_name = sanitize_recording_name(suggested_name);
+    for suffix in 1.. {
+        let path = directory.join(recording_name_with_suffix(&sanitized_name, suffix));
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!("refusing to write through symlink: {}", path.display()));
+            }
+            Ok(_) => continue,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(path),
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    unreachable!("recording filename suffix range is unbounded")
+}
+
+fn can_reserve_viewer_slot(viewer_task_reserved: bool, viewer_stop_reserved: bool) -> bool {
+    !viewer_task_reserved && !viewer_stop_reserved
 }
 
 fn sanitize_recording_name(suggested_name: &str) -> String {
@@ -686,10 +732,35 @@ fn respond_file(
 
 #[tauri::command]
 fn save_recording(bytes: Vec<u8>, suggested_name: String) -> Result<String, String> {
+    validate_recording_size(&bytes)?;
     let directory = downloads_dir();
     fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-    let path = recording_path(&suggested_name);
-    fs::write(&path, bytes).map_err(|error| error.to_string())?;
+    let directory_metadata = fs::symlink_metadata(&directory).map_err(|error| error.to_string())?;
+    if directory_metadata.file_type().is_symlink() || !directory_metadata.is_dir() {
+        return Err("recording Downloads path must be a regular directory".into());
+    }
+    let directory = fs::canonicalize(&directory).map_err(|error| error.to_string())?;
+    let mut path = next_recording_path(&directory, &suggested_name)?;
+    let mut file = loop {
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => break file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                // A competing writer won the name race; choose another name
+                // and retain create-new semantics so no file is clobbered.
+                path = next_recording_path(&directory, &suggested_name)?;
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    };
+    io::Write::write_all(&mut file, &bytes).map_err(|error| error.to_string())?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err("recording target is not a regular file".into());
+    }
+    // The file was opened with `create_new`, which never follows an existing
+    // symlink or overwrites an existing file.
     Ok(path.to_string_lossy().into_owned())
 }
 
@@ -909,16 +980,25 @@ fn connect(
     let target = target_id.clone();
     let task_app = app.clone();
     let viewer_stop = Arc::new(AtomicBool::new(false));
-    if state.0.lock().unwrap().viewer_task.is_some() {
-        return Err("viewer session is already active".into());
+    {
+        let mut runtime_state = state.0.lock().unwrap();
+        if !can_reserve_viewer_slot(
+            runtime_state.viewer_task.is_some(),
+            runtime_state.viewer_stop.is_some(),
+        ) {
+            return Err("viewer session is already active".into());
+        }
+        // Reserve the slot before spawning. `viewer_stop` is the reservation
+        // marker while the JoinHandle is being created and installed.
+        runtime_state.viewer_stop = Some(viewer_stop.clone());
     }
-    state.0.lock().unwrap().viewer_stop = Some(viewer_stop.clone());
-    let task = tauri::async_runtime::spawn(async move {
+    let task_viewer_stop = viewer_stop.clone();
+    let mut task = Some(tauri::async_runtime::spawn(async move {
         let result = async {
             let mut reconnect_attempt = 0;
             let mut session_started = false;
             loop {
-                if viewer_stop.load(Ordering::Relaxed) { break Ok(()); }
+                if task_viewer_stop.load(Ordering::Relaxed) { break Ok(()); }
                 emit(&task_app, "status_changed", StatusEvent { state: "connecting" });
                 // Clone per attempt: each iteration moves these into the session
                 // task, so the originals must survive for the next reconnect.
@@ -943,8 +1023,6 @@ fn connect(
             else {
                 return Err("invalid pairing message".into());
             };
-            emit(&task_app, "status_changed", StatusEvent { state: "online" });
-
             let (frame_tx, mut frame_rx) = mpsc::channel::<Vec<u8>>(64);
             let (input_tx, input_rx) = mpsc::channel::<Vec<u8>>(256);
             let (monitor_tx, mut monitor_rx) = mpsc::channel::<Vec<u8>>(16);
@@ -1009,24 +1087,6 @@ fn connect(
                 }
             });
 
-            emit(
-                &task_app,
-                "status_changed",
-                StatusEvent {
-                    state: "in_session",
-                },
-            );
-            if !session_started {
-                emit(
-                    &task_app,
-                    "session_started",
-                    SessionStarted {
-                        role: "viewer",
-                        remote_id: target.clone(),
-                    },
-                );
-                session_started = true;
-            }
             let (data_ready_tx, data_ready_rx) = oneshot::channel();
             let session_task = tauri::async_runtime::spawn(async move {
                 host_core::roles::run_viewer_session_with_monitors_and_auth_code(
@@ -1045,6 +1105,18 @@ fn connect(
             match data_ready_rx.await {
                 Ok(handle) => {
                     activate_data_channel(&task_app, handle, target.clone());
+                    emit(&task_app, "status_changed", StatusEvent { state: "in_session" });
+                    if !session_started {
+                        emit(
+                            &task_app,
+                            "session_started",
+                            SessionStarted {
+                                role: "viewer",
+                                remote_id: target.clone(),
+                            },
+                        );
+                        session_started = true;
+                    }
                     match session_task.await {
                         Ok(result) => result.map_err(|error| error.to_string()),
                         Err(error) => Err(format!("viewer session task failed: {error}")),
@@ -1115,8 +1187,28 @@ fn connect(
             "status_changed",
             StatusEvent { state: "offline" },
         );
-    });
-    state.0.lock().unwrap().viewer_task = Some(task);
+    }));
+    let installed = {
+        let mut runtime_state = state.0.lock().unwrap();
+        if runtime_state
+            .viewer_stop
+            .as_ref()
+            .is_some_and(|stop| Arc::ptr_eq(stop, &viewer_stop))
+        {
+            runtime_state.viewer_task = task.take();
+            true
+        } else {
+            false
+        }
+    };
+    if !installed {
+        // disconnect() or an early task completion rolled back the
+        // reservation before the handle could be installed.
+        if let Some(task) = task {
+            task.abort();
+        }
+        return Err("viewer session was stopped before it started".into());
+    }
     Ok(())
 }
 #[tauri::command]
@@ -1312,5 +1404,34 @@ mod tests {
         let path = recording_path("../../capture");
         assert_eq!(path.parent(), Some(downloads_dir().as_path()));
         assert_eq!(path.file_name().and_then(|name| name.to_str()), Some("capture.webm"));
+    }
+
+    #[test]
+    fn recording_filename_avoids_existing_file() {
+        let directory = std::env::temp_dir().join(format!(
+            "opendesk-viewer-recording-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("capture.webm"), b"existing").unwrap();
+
+        let path = next_recording_path(&directory, "capture").unwrap();
+
+        assert_eq!(path.file_name().and_then(|name| name.to_str()), Some("capture (2).webm"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recording_size_cap_rejects_oversized_input() {
+        assert!(validate_recording_size_len(MAX_RECORDING_SIZE).is_ok());
+        let error = validate_recording_size_len(MAX_RECORDING_SIZE + 1).unwrap_err();
+        assert!(error.contains("maximum size"));
+    }
+
+    #[test]
+    fn viewer_slot_reservation_fails_when_already_reserved() {
+        assert!(can_reserve_viewer_slot(false, false));
+        assert!(!can_reserve_viewer_slot(true, false));
+        assert!(!can_reserve_viewer_slot(false, true));
     }
 }
