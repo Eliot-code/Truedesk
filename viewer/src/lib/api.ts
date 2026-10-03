@@ -17,9 +17,9 @@ export interface VideoFrame {
   keyframe: boolean;
   width: number;
   height: number;
-  data: number[];
+  data: string; // base64 of the encoded frame bytes (see backend b64())
 }
-export interface AudioFrame { sample_rate: number; channels: number; samples: number[] }
+export interface AudioFrame { sample_rate: number; channels: number; samples: string } // base64 of little-endian i16 PCM
 export interface FileOffer { id: number; name: string; size: number; from: string }
 export interface FileProgress { id: number; transferred: number; total: number; direction: "send" | "receive" | string }
 export interface FileDone { id: number }

@@ -37,7 +37,7 @@ describe("Session viewer transport", () => {
   });
 
   it("feeds video_frame payloads to the decoder", async () => {
-    let frameHandler!: (frame: { seq: number; timestamp_us: number; keyframe: boolean; width: number; height: number; data: number[] }) => void;
+    let frameHandler!: (frame: { seq: number; timestamp_us: number; keyframe: boolean; width: number; height: number; data: string }) => void;
     onVideoFrame.mockImplementation((handler) => {
       frameHandler = handler;
       return Promise.resolve(vi.fn());
@@ -45,7 +45,7 @@ describe("Session viewer transport", () => {
     const { container } = render(<Session remoteId="123" role="viewer" onDisconnect={vi.fn()} />);
 
     await waitFor(() => expect(frameHandler).toBeTypeOf("function"));
-    frameHandler({ seq: 7, timestamp_us: 99, keyframe: true, width: 640, height: 480, data: [0, 1, 2] });
+    frameHandler({ seq: 7, timestamp_us: 99, keyframe: true, width: 640, height: 480, data: btoa(String.fromCharCode(0, 1, 2)) });
 
     expect(decode).toHaveBeenCalledWith(new Uint8Array([0, 1, 2]), true, 99);
     expect((container.querySelector("canvas") as HTMLCanvasElement).width).toBe(640);

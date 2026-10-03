@@ -143,12 +143,21 @@ struct VideoFrame {
     keyframe: bool,
     width: u16,
     height: u16,
-    data: Vec<u8>,
+    // Base64 of the encoded frame bytes. Emitting raw bytes as a JSON array
+    // (`number[]`) over the Tauri IPC costs ~4x the size and heavy parse time
+    // at video framerate; base64 keeps the event JSON but shrinks the hot path.
+    data: String,
+}
+
+/// Base64-encode bytes for the IPC event payload (avoids JSON `number[]`).
+fn b64(bytes: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 #[derive(Serialize, Clone)]
 struct MonitorListEvent { monitors: Vec<MonitorInfo> }
 #[derive(Serialize, Clone)]
-struct AudioFrameEvent { sample_rate: u32, channels: u8, samples: Vec<i16> }
+struct AudioFrameEvent { sample_rate: u32, channels: u8, samples: String }
 #[derive(Serialize, Clone)]
 #[allow(dead_code)]
 pub(crate) struct FileOffer {
@@ -1086,7 +1095,7 @@ fn connect(
                             keyframe: flags & 1 != 0,
                             width,
                             height,
-                            data: plaintext[18..].to_vec(),
+                            data: b64(&plaintext[18..]),
                         },
                     );
                 }
@@ -1109,7 +1118,9 @@ fn connect(
                         let mut samples = vec![0i16; frame_capacity];
                         let Ok(sample_count) = decoder_ref.decode(&frame.payload, &mut samples, false) else { continue };
                         samples.truncate(sample_count * usize::from(*channels));
-                        emit(&audio_app, "audio_frame", AudioFrameEvent { sample_rate: frame.sample_rate, channels: *channels, samples });
+                        let mut pcm = Vec::with_capacity(samples.len() * 2);
+                        for sample in &samples { pcm.extend_from_slice(&sample.to_le_bytes()); }
+                        emit(&audio_app, "audio_frame", AudioFrameEvent { sample_rate: frame.sample_rate, channels: *channels, samples: b64(&pcm) });
                     }
                 }
             }));
