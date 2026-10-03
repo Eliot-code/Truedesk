@@ -2,7 +2,8 @@ export type InputEvent =
   | { kind: "mouseMove"; x: number; y: number }
   | { kind: "mouseButton"; button: number; down: boolean }
   | { kind: "scroll"; dx: number; dy: number }
-  | { kind: "key"; code: number; down: boolean; modifiers: number };
+  | { kind: "key"; code: number; down: boolean; modifiers: number }
+  | { kind: "char"; ch: string; down: boolean; modifiers: number };
 
 /** Encode protocol::input::InputEvent using its big-endian wire layout. */
 export function encodeInputEvent(ev: InputEvent, tsUs: number): Uint8Array {
@@ -18,6 +19,7 @@ export function encodeInputEvent(ev: InputEvent, tsUs: number): Uint8Array {
       length = 17;
       break;
     case "key":
+    case "char":
       length = 15;
       break;
   }
@@ -45,6 +47,13 @@ export function encodeInputEvent(ev: InputEvent, tsUs: number): Uint8Array {
     case "key":
       view.setUint8(0, 4);
       view.setUint32(9, ev.code, false);
+      view.setUint8(13, ev.down ? 1 : 0);
+      view.setUint8(14, ev.modifiers);
+      break;
+    case "char":
+      if ([...ev.ch].length !== 1) throw new Error("character input must be one code point");
+      view.setUint8(0, 5);
+      view.setUint32(9, ev.ch.codePointAt(0)!, false);
       view.setUint8(13, ev.down ? 1 : 0);
       view.setUint8(14, ev.modifiers);
       break;
@@ -76,6 +85,42 @@ function button(button: number): number | null {
   if (button === 2) return 2; // Right
   if (button === 1) return 3; // Middle
   return null;
+}
+
+function namedKeyCode(key: string): number | null {
+  const codes: Record<string, number> = {
+    Backspace: 8,
+    Tab: 9,
+    Enter: 13,
+    CapsLock: 20,
+    Escape: 27,
+    PageUp: 33,
+    PageDown: 34,
+    End: 35,
+    Home: 36,
+    ArrowLeft: 37,
+    ArrowUp: 38,
+    ArrowRight: 39,
+    ArrowDown: 40,
+    Delete: 46,
+  };
+  if (key in codes) return codes[key];
+  const functionKey = /^F([1-9]|1[0-2])$/.exec(key);
+  return functionKey ? 111 + Number(functionKey[1]) : null;
+}
+
+function keyCode(event: KeyboardEvent): number | null {
+  const key = event.key || "";
+  // A single printable code point preserves punctuation, shifted symbols, and
+  // non-ASCII input without relying on a keyboard-layout-specific key table.
+  if ([...key].length === 1 && !/^\p{Cc}|\p{Cf}$/u.test(key)) {
+    return key.codePointAt(0) ?? null;
+  }
+  return namedKeyCode(key) ?? (event.keyCode >>> 0);
+}
+
+function isModifierKey(key: string): boolean {
+  return key === "Shift" || key === "Control" || key === "Alt" || key === "Meta";
 }
 
 /** Capture canvas input and send raw InputEvent bytes in FIFO order. */
@@ -121,12 +166,26 @@ export function attachInput(
 
   const onKeyDown = (event: KeyboardEvent): void => {
     event.preventDefault();
-    enqueue({ kind: "key", code: event.keyCode >>> 0, down: true, modifiers: modifiers(event) });
+    if (isModifierKey(event.key)) return;
+    const code = keyCode(event);
+    if (code !== null) {
+      const key = event.key || "";
+      enqueue(key.length > 0 && [...key].length === 1
+        ? { kind: "char", ch: key, down: true, modifiers: modifiers(event) }
+        : { kind: "key", code, down: true, modifiers: modifiers(event) });
+    }
   };
 
   const onKeyUp = (event: KeyboardEvent): void => {
     event.preventDefault();
-    enqueue({ kind: "key", code: event.keyCode >>> 0, down: false, modifiers: modifiers(event) });
+    if (isModifierKey(event.key)) return;
+    const code = keyCode(event);
+    if (code !== null) {
+      const key = event.key || "";
+      enqueue(key.length > 0 && [...key].length === 1
+        ? { kind: "char", ch: key, down: false, modifiers: modifiers(event) }
+        : { kind: "key", code, down: false, modifiers: modifiers(event) });
+    }
   };
 
   canvas.addEventListener("mousemove", onMouseMove);

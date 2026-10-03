@@ -61,16 +61,21 @@ impl InputInjector for EnigoInjector {
                     let _ = self.enigo.scroll(dy, Axis::Vertical);
                 }
             }
-            InputEvent::Key { code, down, .. } => {
+            InputEvent::Key {
+                code,
+                down,
+                modifiers,
+            } => {
                 let Some(key) = map_key(code) else { return };
-                let _ = self.enigo.key(
-                    key,
-                    if down {
-                        Direction::Press
-                    } else {
-                        Direction::Release
-                    },
-                );
+                inject_key(&mut self.enigo, key, down, modifiers, code);
+            }
+            InputEvent::Char {
+                ch,
+                down,
+                modifiers,
+            } => {
+                let Some(key) = map_char(ch) else { return };
+                inject_key(&mut self.enigo, key, down, modifiers, 0);
             }
         }
     }
@@ -85,8 +90,8 @@ fn map_button(button: u8) -> Option<Button> {
     }
 }
 
-// Key codes are browser/DOM-style virtual key codes. Printable ASCII and the
-// common navigation/modifier keys are supported; unknown codes are ignored.
+// Printable key codes are Unicode scalar values from KeyboardEvent.key. Named
+// keys retain their browser/DOM-style virtual key codes for compatibility.
 fn map_key(code: u32) -> Option<Key> {
     match code {
         8 => Some(Key::Backspace),
@@ -97,6 +102,7 @@ fn map_key(code: u32) -> Option<Key> {
         18 => Some(Key::Alt),
         20 => Some(Key::CapsLock),
         27 => Some(Key::Escape),
+        91 | 93 => Some(Key::Meta),
         32 => Some(Key::Space),
         33 => Some(Key::PageUp),
         34 => Some(Key::PageDown),
@@ -124,6 +130,37 @@ fn map_key(code: u32) -> Option<Key> {
         65..=90 | 48..=57 => char::from_u32(code).map(Key::Unicode),
         _ => None,
     }
+}
+
+fn map_char(ch: char) -> Option<Key> {
+    (!ch.is_control()).then_some(Key::Unicode(ch))
+}
+
+fn inject_key(enigo: &mut Enigo, key: Key, down: bool, modifiers: u8, code: u32) {
+    if down {
+        for modifier in modifier_keys(modifiers, code) {
+            let _ = enigo.key(modifier, Direction::Press);
+        }
+        let _ = enigo.key(key, Direction::Press);
+    } else {
+        let _ = enigo.key(key, Direction::Release);
+        for modifier in modifier_keys(modifiers, code).rev() {
+            let _ = enigo.key(modifier, Direction::Release);
+        }
+    }
+}
+
+fn modifier_keys(modifiers: u8, code: u32) -> impl DoubleEndedIterator<Item = Key> {
+    [
+        (1, 16, Key::Shift),
+        (1 << 1, 17, Key::Control),
+        (1 << 2, 18, Key::Alt),
+        (1 << 3, 91, Key::Meta),
+    ]
+    .into_iter()
+    .filter(move |(_, key_code, _)| *key_code != code)
+    .filter(move |(mask, _, _)| modifiers & mask != 0)
+    .map(|(_, _, key)| key)
 }
 
 #[derive(Default)]
@@ -166,5 +203,24 @@ mod tests {
             1080,
         );
         assert_eq!(inj.count(), 1);
+    }
+
+    #[test]
+    fn map_key_accepts_printable_unicode_and_punctuation() {
+        assert_eq!(map_char('!'), Some(Key::Unicode('!')));
+        assert_eq!(map_char('['), Some(Key::Unicode('[')));
+        assert_eq!(map_char('é'), Some(Key::Unicode('é')));
+        assert_eq!(map_char('\u{7f}'), None);
+        assert_eq!(map_key(27), Some(Key::Escape));
+    }
+
+    #[test]
+    fn modifier_bits_map_to_enigo_keys() {
+        assert_eq!(modifier_keys(0b1111, 'c' as u32).collect::<Vec<_>>(), vec![
+            Key::Shift,
+            Key::Control,
+            Key::Alt,
+            Key::Meta,
+        ]);
     }
 }

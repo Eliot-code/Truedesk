@@ -17,6 +17,11 @@ pub enum InputEvent {
         down: bool,
         modifiers: u8,
     },
+    Char {
+        ch: char,
+        down: bool,
+        modifiers: u8,
+    },
 }
 
 impl InputEvent {
@@ -27,6 +32,7 @@ impl InputEvent {
             Self::MouseButton { .. } => 2,
             Self::Scroll { .. } => 3,
             Self::Key { .. } => 4,
+            Self::Char { .. } => 5,
         });
         bytes.extend_from_slice(&timestamp_us.to_be_bytes());
 
@@ -49,6 +55,15 @@ impl InputEvent {
                 modifiers,
             } => {
                 bytes.extend_from_slice(&code.to_be_bytes());
+                bytes.push(u8::from(*down));
+                bytes.push(*modifiers);
+            }
+            Self::Char {
+                ch,
+                down,
+                modifiers,
+            } => {
+                bytes.extend_from_slice(&(*ch as u32).to_be_bytes());
                 bytes.push(u8::from(*down));
                 bytes.push(*modifiers);
             }
@@ -97,6 +112,23 @@ impl InputEvent {
                     timestamp_us,
                 ))
             }
+            5 if bytes.len() == 15 => {
+                let ch = char::from_u32(u32::from_be_bytes(bytes.get(9..13)?.try_into().ok()?))
+                    .filter(|ch| !ch.is_control())?;
+                let down = match bytes[13] {
+                    0 => false,
+                    1 => true,
+                    _ => return None,
+                };
+                Some((
+                    Self::Char {
+                        ch,
+                        down,
+                        modifiers: bytes[14],
+                    },
+                    timestamp_us,
+                ))
+            }
             _ => None,
         }
     }
@@ -116,12 +148,23 @@ mod tests {
     #[test]
     fn key_roundtrips() {
         let e = InputEvent::Key {
-            code: 65,
+            code: '!' as u32,
             down: true,
-            modifiers: 0b10,
+            modifiers: 0b1010,
         };
         let bytes = e.to_bytes(9);
         assert_eq!(InputEvent::from_bytes(&bytes), Some((e, 9)));
+    }
+
+    #[test]
+    fn printable_char_roundtrips_with_modifiers() {
+        let e = InputEvent::Char {
+            ch: '!',
+            down: true,
+            modifiers: 0b1010,
+        };
+        let bytes = e.to_bytes(10);
+        assert_eq!(InputEvent::from_bytes(&bytes), Some((e, 10)));
     }
 
     #[test]
