@@ -50,6 +50,44 @@ enum ClipboardCommand {
 }
 struct AppState(Mutex<RuntimeState>);
 
+impl AppState {
+    fn lock(&self) -> std::sync::MutexGuard<'_, RuntimeState> {
+        self.0.lock().unwrap_or_else(|error| error.into_inner())
+    }
+}
+
+trait AbortableTask {
+    fn abort(&self);
+}
+
+impl<T> AbortableTask for tauri::async_runtime::JoinHandle<T> {
+    fn abort(&self) {
+        self.abort();
+    }
+}
+
+struct AbortOnDrop<T: AbortableTask>(Option<T>);
+
+impl<T: AbortableTask> AbortOnDrop<T> {
+    fn new(task: T) -> Self {
+        Self(Some(task))
+    }
+}
+
+impl<T: AbortableTask> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+        }
+    }
+}
+
+impl<T> AbortOnDrop<tauri::async_runtime::JoinHandle<T>> {
+    async fn join(&mut self) -> Result<T, tauri::Error> {
+        self.0.as_mut().expect("task already joined").await
+    }
+}
+
 #[derive(Serialize)]
 struct Identity {
     id: String,
@@ -416,13 +454,13 @@ fn emit<T: Serialize + Clone>(app: &AppHandle, event: &str, payload: T) {
 
 fn activate_data_channel(app: &AppHandle, handle: DataHandle, from: String) {
     let DataHandle { sender, receiver, sealer, opener, control_sender, control_sealer } = handle;
-    let enabled = app.state::<AppState>().0.lock().unwrap().clipboard_enabled.clone();
+    let enabled = app.state::<AppState>().lock().clipboard_enabled.clone();
     let sealer = Arc::new(Mutex::new(sealer));
     let clipboard_thread = spawn_clipboard_thread(sender.clone(), sealer.clone(), enabled);
     let clipboard_tx = clipboard_thread.as_ref().map(|(tx, _)| tx.clone());
     let file_receiver = dispatch_data(receiver, Arc::new(Mutex::new(opener)), clipboard_tx);
     let state = app.state::<AppState>();
-    let mut state = state.0.lock().unwrap();
+    let mut state = state.lock();
     state.file_outgoing = Some(sender);
     state.file_sealer = Some(sealer);
     state.control_sender = Some(control_sender);
@@ -439,7 +477,7 @@ fn clear_data_channel(app: &AppHandle) {
     // when it observes Stop; joining while holding the AppState mutex would
     // freeze every other Tauri command behind a network-dependent join.
     let thread = {
-        let mut state = state.0.lock().unwrap();
+        let mut state = state.lock();
         let thread = state.clipboard_thread.take();
         state.file_outgoing = None;
         state.file_sealer = None;
@@ -474,7 +512,7 @@ fn enqueue_input(sender: Option<mpsc::Sender<Vec<u8>>>, bytes: Vec<u8>) -> Resul
 
 #[tauri::command]
 fn get_identity(state: tauri::State<'_, AppState>) -> Identity {
-    let mut state = state.0.lock().unwrap();
+    let mut state = state.lock();
     let id = state.config.ensure_identity();
     Identity {
         id,
@@ -483,14 +521,14 @@ fn get_identity(state: tauri::State<'_, AppState>) -> Identity {
 }
 #[tauri::command]
 fn rotate_password(state: tauri::State<'_, AppState>) -> PasswordResponse {
-    let mut state = state.0.lock().unwrap();
+    let mut state = state.lock();
     let password = fresh_password();
     state.password = Some(password.clone());
     PasswordResponse { password }
 }
 #[tauri::command]
 fn get_config(state: tauri::State<'_, AppState>) -> AppConfig {
-    let state = state.0.lock().unwrap();
+    let state = state.lock();
     AppConfig {
         relay_url: state.config.config.relay_url.clone(),
         relay_urls: state.config.config.relay_urls.clone(),
@@ -499,22 +537,22 @@ fn get_config(state: tauri::State<'_, AppState>) -> AppConfig {
 }
 #[tauri::command]
 fn list_contacts(state: tauri::State<'_, AppState>) -> Vec<Contact> {
-    state.0.lock().unwrap().contacts.list()
+    state.lock().contacts.list()
 }
 #[tauri::command]
 fn list_allowed(state: tauri::State<'_, AppState>) -> Vec<String> {
-    state.0.lock().unwrap().config.config.allow_list.clone()
+    state.lock().config.config.allow_list.clone()
 }
 #[tauri::command]
 fn add_allowed(state: tauri::State<'_, AppState>, peer_id: String) -> Result<(), String> {
     if peer_id.len() != 9 || !peer_id.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err("peer ID must be 9 digits".into());
     }
-    state.0.lock().unwrap().config.add_allow(&peer_id).map_err(|error| error.to_string())
+    state.lock().config.add_allow(&peer_id).map_err(|error| error.to_string())
 }
 #[tauri::command]
 fn remove_allowed(state: tauri::State<'_, AppState>, peer_id: String) -> Result<(), String> {
-    state.0.lock().unwrap().config.remove_allow(&peer_id).map_err(|error| error.to_string())
+    state.lock().config.remove_allow(&peer_id).map_err(|error| error.to_string())
 }
 #[tauri::command]
 fn add_contact(
@@ -522,22 +560,22 @@ fn add_contact(
     alias: String,
     peer_id: String,
 ) -> Result<Contact, String> {
-    state.0.lock().unwrap().contacts.add(alias, peer_id).map_err(|e| e.to_string())
+    state.lock().contacts.add(alias, peer_id).map_err(|e| e.to_string())
 }
 #[tauri::command]
 fn remove_contact(state: tauri::State<'_, AppState>, peer_id: String) -> Result<(), String> {
-    state.0.lock().unwrap().contacts.remove(&peer_id).map_err(|e| e.to_string())
+    state.lock().contacts.remove(&peer_id).map_err(|e| e.to_string())
 }
 #[tauri::command]
 fn touch_contact(state: tauri::State<'_, AppState>, peer_id: String) -> Result<(), String> {
-    state.0.lock().unwrap().contacts.touch(&peer_id).map_err(|e| e.to_string())
+    state.lock().contacts.touch(&peer_id).map_err(|e| e.to_string())
 }
 #[tauri::command]
 fn set_relay(state: tauri::State<'_, AppState>, url: String) -> Result<(), String> {
     if url.trim().is_empty() {
         return Err("relay URL cannot be empty".into());
     }
-    let mut state = state.0.lock().unwrap();
+    let mut state = state.lock();
     state.config.config.relay_url = url;
     state.config.config.relay_urls = vec![state.config.config.relay_url.clone()];
     state.config.save().map_err(|e| e.to_string())
@@ -546,15 +584,15 @@ fn set_relay(state: tauri::State<'_, AppState>, url: String) -> Result<(), Strin
 fn set_relays(state: tauri::State<'_, AppState>, urls: Vec<String>) -> Result<(), String> {
     let urls: Vec<String> = urls.into_iter().map(|url| url.trim().to_owned()).filter(|url| !url.is_empty()).collect();
     if urls.is_empty() { return Err("at least one relay URL is required".into()); }
-    state.0.lock().unwrap().config.set_relays(urls).map_err(|e| e.to_string())
+    state.lock().config.set_relays(urls).map_err(|e| e.to_string())
 }
 #[tauri::command]
 fn list_relays(state: tauri::State<'_, AppState>) -> Vec<String> {
-    state.0.lock().unwrap().config.config.relay_urls.clone()
+    state.lock().config.config.relay_urls.clone()
 }
 #[tauri::command]
 fn get_unattended_status(state: tauri::State<'_, AppState>) -> UnattendedStatus {
-    let state = state.0.lock().unwrap();
+    let state = state.lock();
     UnattendedStatus {
         enabled: state.config.config.unattended_enabled,
         has_password: unattended::has_password(state.config.config.unattended_password_set),
@@ -584,7 +622,7 @@ fn random_base32_secret() -> String {
 
 #[tauri::command]
 fn set_unattended_2fa(state: tauri::State<'_, AppState>, enabled: bool) -> Result<Option<String>, String> {
-    let mut state = state.0.lock().unwrap();
+    let mut state = state.lock();
     if enabled {
         let secret = random_base32_secret();
         unattended::set_totp_secret(&secret).map_err(|error| format!("could not store TOTP secret: {error}"))?;
@@ -604,7 +642,7 @@ fn set_unattended_access(
     enabled: bool,
     password: Option<String>,
 ) -> Result<(), String> {
-    let mut state = state.0.lock().unwrap();
+    let mut state = state.lock();
     let password = password.filter(|value| !value.is_empty());
     if let Some(password) = password {
         unattended::set_password(&password).map_err(|error| format!("could not store unattended access password: {error}"))?;
@@ -637,7 +675,7 @@ fn respond_to_request(
     allow: bool,
     always: bool,
 ) -> Result<(), String> {
-    let mut state = state.0.lock().unwrap();
+    let mut state = state.lock();
     if always && allow && peer_id != "unknown" {
         state
             .config
@@ -659,7 +697,7 @@ async fn send_file(
     path: String,
 ) -> Result<u64, String> {
     let (outgoing, sealer) = {
-        let state = state.0.lock().unwrap();
+        let state = state.lock();
         (
         state.file_outgoing.clone(),
         state.file_sealer.clone(),
@@ -724,7 +762,7 @@ fn respond_file(
     accept: bool,
 ) -> Result<(), String> {
     route_file_consent(
-        &mut state.0.lock().unwrap().pending_file_requests,
+        &mut state.lock().pending_file_requests,
         id,
         accept,
     )
@@ -767,7 +805,7 @@ fn save_recording(bytes: Vec<u8>, suggested_name: String) -> Result<String, Stri
 #[tauri::command]
 fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<(), String> {
     let (relay_url, id, registration_token, password, unattended_enabled, twofa_enabled, totp_secret) = {
-        let mut s = state.0.lock().unwrap();
+        let mut s = state.lock();
         let id = s.config.ensure_identity();
         let registration_token = s.config.ensure_registration_token();
         let unattended_password = if s.config.config.unattended_enabled {
@@ -789,7 +827,7 @@ fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<()
             unattended_enabled, twofa_enabled, totp_secret,
         )
     };
-    if state.0.lock().unwrap().host_thread.is_some() {
+    if state.lock().host_thread.is_some() {
         return Ok(());
     }
     emit(
@@ -820,7 +858,7 @@ fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<()
                 return Err("invalid pairing message".into());
             };
             let allowlisted = host_core::roles::should_auto_accept_allowlisted(
-                app.state::<AppState>().0.lock().unwrap().config.is_allowed(&peer_id),
+                app.state::<AppState>().lock().config.is_allowed(&peer_id),
             );
             let remote_id = peer_id.clone();
             let (stop_tx, stop_rx) = oneshot::channel::<()>();
@@ -863,7 +901,7 @@ fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<()
                         emit(&approve_app, "incoming_request", IncomingRequest {
                             peer_id: peer_id.clone(), fingerprint: "pending".into(),
                         });
-                        approve_app.state::<AppState>().0.lock().unwrap().pending_request = Some(decision_tx);
+                        approve_app.state::<AppState>().lock().pending_request = Some(decision_tx);
                         let allowed = decision_rx.await.unwrap_or(false);
                         if allowed {
                             emit(&approve_app, "status_changed", StatusEvent { state: "in_session" });
@@ -906,11 +944,9 @@ fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<()
 
                 // A naturally ended session should not leave a stale host
                 // handle preventing a later start_hosting call.
-                if let Ok(mut state) = cleanup_app.state::<AppState>().0.lock() {
-                    state.host_thread = None;
-                };
+                cleanup_app.state::<AppState>().lock().host_thread = None;
             });
-            app.state::<AppState>().0.lock().unwrap().host_thread = Some(HostThread { stop_tx, join });
+            app.state::<AppState>().lock().host_thread = Some(HostThread { stop_tx, join });
             Ok::<(), String>(())
         }
         .await;
@@ -928,7 +964,7 @@ fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<()
 #[tauri::command]
 fn stop_hosting(state: tauri::State<'_, AppState>, app: AppHandle) {
     let (host_thread, pending_request) = {
-        let mut s = state.0.lock().unwrap();
+        let mut s = state.lock();
         (s.host_thread.take(), s.pending_request.take())
     };
     drop(pending_request);
@@ -960,7 +996,7 @@ fn connect(
         .map_err(|e| e.to_string())?;
     // A contact is only touched when it already exists; the regular recent-ID
     // history above continues to cover connections made without saving one.
-    let touch_result = state.0.lock().unwrap().contacts.touch(&target_id);
+    let touch_result = state.lock().contacts.touch(&target_id);
     if let Err(error) = touch_result {
         if error.kind() != std::io::ErrorKind::NotFound {
             return Err(error.to_string());
@@ -974,14 +1010,14 @@ fn connect(
         },
     );
     let (relay_urls, viewer_id) = {
-        let mut state = state.0.lock().unwrap();
+        let mut state = state.lock();
         (state.config.config.relay_urls.clone(), state.config.ensure_identity())
     };
     let target = target_id.clone();
     let task_app = app.clone();
     let viewer_stop = Arc::new(AtomicBool::new(false));
     {
-        let mut runtime_state = state.0.lock().unwrap();
+        let mut runtime_state = state.lock();
         if !can_reserve_viewer_slot(
             runtime_state.viewer_task.is_some(),
             runtime_state.viewer_stop.is_some(),
@@ -1027,10 +1063,10 @@ fn connect(
             let (input_tx, input_rx) = mpsc::channel::<Vec<u8>>(256);
             let (monitor_tx, mut monitor_rx) = mpsc::channel::<Vec<u8>>(16);
             let (audio_tx, mut audio_rx) = mpsc::channel::<Vec<u8>>(16);
-            task_app.state::<AppState>().0.lock().unwrap().viewer_input = Some(input_tx);
+            task_app.state::<AppState>().lock().viewer_input = Some(input_tx);
 
             let frame_app = task_app.clone();
-            tauri::async_runtime::spawn(async move {
+            let _frame_task = AbortOnDrop::new(tauri::async_runtime::spawn(async move {
                 while let Some(plaintext) = frame_rx.recv().await {
                     if plaintext.len() < 18 {
                         continue;
@@ -1054,11 +1090,11 @@ fn connect(
                         },
                     );
                 }
-            });
+            }));
 
             let audio_app = task_app.clone();
-            let audio_muted = task_app.state::<AppState>().0.lock().unwrap().audio_muted.clone();
-            tauri::async_runtime::spawn(async move {
+            let audio_muted = task_app.state::<AppState>().lock().audio_muted.clone();
+            let _audio_task = AbortOnDrop::new(tauri::async_runtime::spawn(async move {
                 let mut decoder: Option<(u32, u8, opus::Decoder)> = None;
                 while let Some(body) = audio_rx.recv().await {
                     if audio_muted.load(Ordering::Relaxed) { continue; }
@@ -1076,19 +1112,19 @@ fn connect(
                         emit(&audio_app, "audio_frame", AudioFrameEvent { sample_rate: frame.sample_rate, channels: *channels, samples });
                     }
                 }
-            });
+            }));
 
             let monitor_app = task_app.clone();
-            tauri::async_runtime::spawn(async move {
+            let _monitor_task = AbortOnDrop::new(tauri::async_runtime::spawn(async move {
                 while let Some(body) = monitor_rx.recv().await {
                     if let Some(Control::MonitorList { monitors }) = Control::from_bytes(&body) {
                         emit(&monitor_app, "monitor_list", MonitorListEvent { monitors });
                     }
                 }
-            });
+            }));
 
             let (data_ready_tx, data_ready_rx) = oneshot::channel();
-            let session_task = tauri::async_runtime::spawn(async move {
+            let mut session_task = AbortOnDrop::new(tauri::async_runtime::spawn(async move {
                 host_core::roles::run_viewer_session_with_monitors_and_auth_code(
                     ws,
                     &password,
@@ -1101,7 +1137,7 @@ fn connect(
                     auth_code.clone(),
                 )
                 .await
-            });
+            }));
             match data_ready_rx.await {
                 Ok(handle) => {
                     activate_data_channel(&task_app, handle, target.clone());
@@ -1117,12 +1153,12 @@ fn connect(
                         );
                         session_started = true;
                     }
-                    match session_task.await {
+                    match session_task.join().await {
                         Ok(result) => result.map_err(|error| error.to_string()),
                         Err(error) => Err(format!("viewer session task failed: {error}")),
                     }
                 }
-                Err(_) => match session_task.await {
+                Err(_) => match session_task.join().await {
                     Ok(result) => result.map_err(|error| error.to_string()),
                     Err(error) => Err(format!("viewer session task failed: {error}")),
                 },
@@ -1133,7 +1169,7 @@ fn connect(
                     Ok(()) => break Ok(()),
                     Err(message) => {
                         clear_data_channel(&task_app);
-                        task_app.state::<AppState>().0.lock().unwrap().viewer_input = None;
+                        task_app.state::<AppState>().lock().viewer_input = None;
                         let reason = host_core::reconnect::classify_viewer_error(&message);
                         if !host_core::reconnect::should_reconnect(reason)
                             || reconnect_attempt >= host_core::reconnect::MAX_RECONNECT_ATTEMPTS
@@ -1165,7 +1201,7 @@ fn connect(
             );
         }
         let app_state = task_app.state::<AppState>();
-        let mut state = app_state.0.lock().unwrap();
+        let mut state = app_state.lock();
         state.viewer_input = None;
         state.viewer_task = None;
         state.viewer_stop = None;
@@ -1189,7 +1225,7 @@ fn connect(
         );
     }));
     let installed = {
-        let mut runtime_state = state.0.lock().unwrap();
+        let mut runtime_state = state.lock();
         if runtime_state
             .viewer_stop
             .as_ref()
@@ -1213,14 +1249,14 @@ fn connect(
 }
 #[tauri::command]
 fn send_input(state: tauri::State<'_, AppState>, bytes: Vec<u8>) -> Result<(), String> {
-    let sender = state.0.lock().unwrap().viewer_input.clone();
+    let sender = state.lock().viewer_input.clone();
     enqueue_input(sender, bytes)
 }
 
 #[tauri::command]
 async fn select_monitor(state: tauri::State<'_, AppState>, id: u32) -> Result<(), String> {
     let (sender, sealer) = {
-        let state = state.0.lock().unwrap();
+        let state = state.lock();
         (state.control_sender.clone(), state.control_sealer.clone())
     };
     let sender = sender.ok_or_else(|| "no active viewer session".to_owned())?;
@@ -1232,7 +1268,7 @@ async fn select_monitor(state: tauri::State<'_, AppState>, id: u32) -> Result<()
 
 #[tauri::command]
 async fn send_auth_code(state: tauri::State<'_, AppState>, code: String) -> Result<(), String> {
-    let (sender, sealer) = { let state = state.0.lock().unwrap(); (state.control_sender.clone(), state.control_sealer.clone()) };
+    let (sender, sealer) = { let state = state.lock(); (state.control_sender.clone(), state.control_sealer.clone()) };
     let sender = sender.ok_or_else(|| "no active viewer session".to_owned())?;
     let sealer = sealer.ok_or_else(|| "control channel is not ready".to_owned())?;
     let sealed = sealer.lock().unwrap().seal(&[Tag::Control as u8], &Control::AuthCode { code }.to_bytes());
@@ -1241,18 +1277,18 @@ async fn send_auth_code(state: tauri::State<'_, AppState>, code: String) -> Resu
 
 #[tauri::command]
 fn set_clipboard_sync(state: tauri::State<'_, AppState>, enabled: bool) {
-    state.0.lock().unwrap().clipboard_enabled.store(enabled, Ordering::Relaxed);
+    state.lock().clipboard_enabled.store(enabled, Ordering::Relaxed);
 }
 
 #[tauri::command]
 fn set_audio_muted(state: tauri::State<'_, AppState>, muted: bool) {
-    state.0.lock().unwrap().audio_muted.store(muted, Ordering::Relaxed);
+    state.lock().audio_muted.store(muted, Ordering::Relaxed);
 }
 
 #[tauri::command]
 fn disconnect(state: tauri::State<'_, AppState>, app: AppHandle) {
     let (host_thread, viewer_task) = {
-        let mut s = state.0.lock().unwrap();
+        let mut s = state.lock();
         s.viewer_input = None;
         if let Some(stop) = &s.viewer_stop { stop.store(true, Ordering::Relaxed); }
         s.viewer_stop = None;
@@ -1433,5 +1469,70 @@ mod tests {
         assert!(can_reserve_viewer_slot(false, false));
         assert!(!can_reserve_viewer_slot(true, false));
         assert!(!can_reserve_viewer_slot(false, true));
+    }
+
+    #[test]
+    fn poisoned_app_state_lock_remains_usable() {
+        let directory = std::env::temp_dir().join(format!(
+            "opendesk-viewer-lock-test-{}",
+            std::process::id()
+        ));
+        let app_state = AppState(Mutex::new(RuntimeState {
+            config: ConfigStore::load(&directory).unwrap(),
+            contacts: ContactStore::load(&directory).unwrap(),
+            password: None,
+            host_thread: None,
+            viewer_task: None,
+            viewer_stop: None,
+            viewer_input: None,
+            pending_request: None,
+            pending_file_requests: HashMap::new(),
+            file_outgoing: None,
+            file_sealer: None,
+            control_sender: None,
+            control_sealer: None,
+            clipboard_enabled: Arc::new(AtomicBool::new(true)),
+            audio_muted: Arc::new(AtomicBool::new(false)),
+            clipboard_thread: None,
+        }));
+
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = app_state.lock();
+            panic!("poison the test mutex");
+        }));
+
+        let guard = app_state.lock();
+        assert!(guard.viewer_task.is_none());
+        drop(guard);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn abort_on_drop_aborts_child_task() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (started_tx, started_rx) = oneshot::channel();
+            let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let task_ticks = ticks.clone();
+            let task = tauri::async_runtime::spawn(async move {
+                started_tx.send(()).unwrap();
+                loop {
+                    task_ticks.fetch_add(1, Ordering::Relaxed);
+                    tokio::task::yield_now().await;
+                }
+            });
+            let guard = AbortOnDrop::new(task);
+            started_rx.await.unwrap();
+            tokio::task::yield_now().await;
+            let ticks_at_drop = ticks.load(Ordering::Relaxed);
+            drop(guard);
+            for _ in 0..3 {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(ticks.load(Ordering::Relaxed), ticks_at_drop);
+        });
     }
 }
