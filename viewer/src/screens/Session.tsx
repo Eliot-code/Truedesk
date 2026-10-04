@@ -143,7 +143,7 @@ export default function Session({ remoteId, role, onDisconnect }: SessionProps) 
     if (role !== "viewer" || !canvasRef.current) return;
 
     const canvas = canvasRef.current;
-    const decode = makeDecoder(canvas);
+    const { decode, close: closeDecoder } = makeDecoder(canvas);
     let active = true;
     let unlisten: (() => void) | undefined;
 
@@ -163,6 +163,7 @@ export default function Session({ remoteId, role, onDisconnect }: SessionProps) 
     return () => {
       active = false;
       detachInput();
+      closeDecoder();
       if (unlisten) unlisten();
       else void listener.then((stop) => stop());
     };
