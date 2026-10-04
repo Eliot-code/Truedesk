@@ -21,8 +21,16 @@ describe("Home", () => {
   it("renders the identity returned by the backend", async () => { render(<Home status="online" onConnect={vi.fn()} incomingRequest={null} onDismissRequest={vi.fn()} />); expect(await screen.findByText("123456789")).toBeTruthy(); });
   it("connects with the entered target ID and password", async () => {
     const onConnect = vi.fn().mockResolvedValue(undefined);
+    const prompt = vi.spyOn(window, "prompt").mockReturnValue(null);
     render(<Home status="online" onConnect={onConnect} incomingRequest={null} onDismissRequest={vi.fn()} />);
     fireEvent.change(screen.getByPlaceholderText("000 000 000"), { target: { value: "987654321" } }); fireEvent.change(screen.getByPlaceholderText("Password"), { target: { value: "remote-secret" } }); fireEvent.click(screen.getByRole("button", { name: "Connect" }));
     await waitFor(() => expect(onConnect).toHaveBeenCalledWith("987654321", "remote-secret"));
+    expect(prompt).not.toHaveBeenCalled();
+  });
+  it("passes an entered 2FA code when connecting", async () => {
+    const onConnect = vi.fn().mockResolvedValue(undefined);
+    render(<Home status="online" onConnect={onConnect} incomingRequest={null} onDismissRequest={vi.fn()} />);
+    fireEvent.change(screen.getByPlaceholderText("000 000 000"), { target: { value: "987654321" } }); fireEvent.change(screen.getByPlaceholderText("Password"), { target: { value: "remote-secret" } }); fireEvent.change(screen.getByLabelText("2FA code (optional)"), { target: { value: "123456" } }); fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(onConnect).toHaveBeenCalledWith("987654321", "remote-secret", "123456"));
   });
 });

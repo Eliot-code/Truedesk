@@ -17,8 +17,8 @@ interface ToolbarProps {
   onRecordingToggle?: () => void;
 }
 
-function IconButton({ label, children, onClick, disabled = false }: { label: string; children: ReactNode; onClick?: () => void; disabled?: boolean }) {
-  return <button className="session-toolbar__icon" type="button" aria-label={label} onClick={onClick} disabled={disabled}>{children}</button>;
+function IconButton({ label, children, onClick, disabled = false, title }: { label: string; children: ReactNode; onClick?: () => void; disabled?: boolean; title?: string }) {
+  return <button className="session-toolbar__icon" type="button" aria-label={label} onClick={onClick} disabled={disabled} title={title}>{children}</button>;
 }
 
 function formatDuration(seconds: number): string {
@@ -26,9 +26,8 @@ function formatDuration(seconds: number): string {
   return `${minutes}:${(seconds % 60).toString().padStart(2, "0")}`;
 }
 
-export default function Toolbar({ remoteId, latency = "18 ms", clipboardSync = true, onClipboardSyncChange = () => {}, onDisconnect, monitors = [], selectedMonitor, onMonitorChange = () => {}, audioMuted = false, onAudioMutedChange = () => {}, recordingActive = false, recordingElapsed = 0, recordingDisabled = false, onRecordingToggle = () => {} }: ToolbarProps) {
+export default function Toolbar({ remoteId, latency, clipboardSync = true, onClipboardSyncChange = () => {}, onDisconnect, monitors = [], selectedMonitor, onMonitorChange = () => {}, audioMuted = false, onAudioMutedChange = () => {}, recordingActive = false, recordingElapsed = 0, recordingDisabled = false, onRecordingToggle = () => {} }: ToolbarProps) {
   const [elapsed, setElapsed] = useState(0);
-  const [keyboard, setKeyboard] = useState(false);
 
   useEffect(() => {
     const startedAt = Date.now();
@@ -47,14 +46,14 @@ export default function Toolbar({ remoteId, latency = "18 ms", clipboardSync = t
         <div className="session-toolbar__connection">
           <span className="session-toolbar__connected-dot" aria-hidden="true" />
           <span className="session-toolbar__remote mono">{remoteId}</span>
-          <span className="session-toolbar__latency mono">{latency}</span>
+          {latency && <span className="session-toolbar__latency mono">{latency}</span>}
         </div>
         <div className="session-toolbar__controls">
           <IconButton label="Fullscreen" onClick={toggleFullscreen}>⛶</IconButton>
-          <IconButton label="Fit / Scale">↗</IconButton>
+          <IconButton label="Fit / Scale" disabled title="Not available yet">↗</IconButton>
           <label className="session-toolbar__select-chip">
             <span className="sr-only">Quality</span>
-            <select aria-label="Quality" defaultValue="auto"><option value="auto">Auto</option><option value="high">High</option><option value="balanced">Balanced</option></select>
+            <select aria-label="Quality" defaultValue="auto" disabled title="Not available yet"><option value="auto">Auto</option><option value="high">High</option><option value="balanced">Balanced</option></select>
           </label>
           {monitors.length > 0 && <label className="session-toolbar__select-chip">
             <span className="sr-only">Monitor</span>
@@ -69,14 +68,14 @@ export default function Toolbar({ remoteId, latency = "18 ms", clipboardSync = t
             {recordingActive ? "■" : "●"}
           </IconButton>
           {recordingDisabled && <span className="sr-only">Recording is only available while viewing a session</span>}
-          <IconButton label="Keyboard" onClick={() => setKeyboard((value) => !value)}>{keyboard ? "⌨" : "⌑"}</IconButton>
+          <IconButton label="Keyboard" disabled title="Not available yet">⌑</IconButton>
         </div>
         <div className="session-toolbar__actions">
           <span className="session-toolbar__timer mono" aria-label="Session timer">{formatDuration(elapsed)}</span>
           <button className="session-toolbar__disconnect" type="button" onClick={onDisconnect}>Disconnect</button>
         </div>
       </div>
-      <div className="session-security-chip mono">Encrypted · 60 fps</div>
+      <div className="session-security-chip mono">Encrypted</div>
     </>
   );
 }
