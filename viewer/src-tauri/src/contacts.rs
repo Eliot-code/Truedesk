@@ -24,7 +24,17 @@ impl ContactStore {
         fs::create_dir_all(dir)?;
         let path = dir.join("contacts.json");
         let contacts = match fs::read_to_string(&path) {
-            Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
+            Ok(contents) => match serde_json::from_str(&contents) {
+                Ok(contacts) => contacts,
+                Err(error) => {
+                    let backup = crate::config::backup_corrupt_file(&path)?;
+                    eprintln!(
+                        "Warning: could not parse contacts file ({error}); backed it up to {}",
+                        backup.display()
+                    );
+                    Vec::new()
+                }
+            },
             Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(error) => return Err(error),
         };
@@ -131,6 +141,28 @@ mod tests {
         store.add("Office".into(), "123456789".into()).unwrap();
         let loaded = ContactStore::load(&path).unwrap();
         assert_eq!(loaded.list(), store.list());
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn corrupt_contacts_are_backed_up_and_replaced_with_empty_list() {
+        let suffix = NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("opendesk-contacts-corrupt-{}-{suffix}", std::process::id()));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        let original = b"[{\"id\": ";
+        fs::write(path.join("contacts.json"), original).unwrap();
+
+        let store = ContactStore::load(&path).unwrap();
+
+        assert!(store.list().is_empty());
+        let backups: Vec<_> = fs::read_dir(&path)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|file| file.file_name().unwrap().to_string_lossy().starts_with("contacts.json.corrupt-"))
+            .collect();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(fs::read(&backups[0]).unwrap(), original);
         let _ = fs::remove_dir_all(path);
     }
 }

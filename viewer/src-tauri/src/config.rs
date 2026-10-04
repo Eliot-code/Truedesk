@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs, io,
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use crate::unattended;
@@ -64,7 +65,17 @@ impl ConfigStore {
         fs::create_dir_all(dir)?;
         let path = dir.join("config.json");
         let mut config = match fs::read_to_string(&path) {
-            Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
+            Ok(contents) => match serde_json::from_str(&contents) {
+                Ok(config) => config,
+                Err(error) => {
+                    let backup = backup_corrupt_file(&path)?;
+                    eprintln!(
+                        "Warning: could not parse config file ({error}); backed it up to {}",
+                        backup.display()
+                    );
+                    Config::default()
+                }
+            },
             Err(error) if error.kind() == io::ErrorKind::NotFound => Config::default(),
             Err(error) => return Err(error),
         };
@@ -87,6 +98,7 @@ impl ConfigStore {
     }
 
     pub fn save(&self) -> io::Result<()> {
+        warn_for_insecure_relays(&self.config);
         let bytes = serde_json::to_vec_pretty(&self.config).map_err(io::Error::other)?;
         fs::write(&self.path, bytes)
     }
@@ -135,6 +147,48 @@ impl ConfigStore {
     }
 }
 
+pub fn is_insecure_remote_relay(url: &str) -> bool {
+    let Some(authority) = url.strip_prefix("ws://").and_then(|rest| rest.split(['/', '?', '#']).next()) else {
+        return false;
+    };
+    let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    let host = if let Some(host) = host.strip_prefix('[') {
+        host.split(']').next().unwrap_or(host)
+    } else {
+        host.rsplit_once(':').map_or(host, |(host, _)| host)
+    };
+    if host.eq_ignore_ascii_case("localhost") || host == "::1" {
+        return false;
+    }
+    match host.parse::<std::net::Ipv4Addr>() {
+        Ok(address) => !address.octets().starts_with(&[127]),
+        Err(_) => true,
+    }
+}
+
+fn warn_for_insecure_relays(config: &Config) {
+    for relay in std::iter::once(&config.relay_url).chain(config.relay_urls.iter()) {
+        if is_insecure_remote_relay(relay) {
+            eprintln!("Warning: insecure remote relay configured: {relay}");
+        }
+    }
+}
+
+pub(crate) fn backup_corrupt_file(path: &Path) -> io::Result<PathBuf> {
+    let file_name = path.file_name().and_then(|name| name.to_str()).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "corrupt file has no valid file name")
+    })?;
+    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let mut backup = path.with_file_name(format!("{file_name}.corrupt-{timestamp}.bak"));
+    let mut suffix = 1;
+    while backup.exists() {
+        backup = path.with_file_name(format!("{file_name}.corrupt-{timestamp}-{suffix}.bak"));
+        suffix += 1;
+    }
+    fs::rename(path, &backup)?;
+    Ok(backup)
+}
+
 pub fn generate_id() -> String {
     use rand::Rng;
     rand::thread_rng()
@@ -163,6 +217,17 @@ fn add_recent(values: &mut Vec<String>, value: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_TEST_DIR: AtomicUsize = AtomicUsize::new(0);
+
+    fn test_dir() -> PathBuf {
+        let suffix = NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("opendesk-config-{}-{suffix}", std::process::id()));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
 
     #[test]
     fn generated_id_is_nine_digits() {
@@ -237,5 +302,46 @@ mod tests {
         let mut config: Config = serde_json::from_str(r#"{"id":"123456789","relay_url":"wss://legacy","allow_list":[],"recent_ids":[]}"#).unwrap();
         if config.relay_urls.is_empty() { config.relay_urls.push(config.relay_url.clone()); }
         assert_eq!(config.relay_urls, vec!["wss://legacy"]);
+    }
+
+    #[test]
+    fn corrupt_config_is_backed_up_and_replaced_with_default() {
+        let dir = test_dir();
+        let original = b"{\"id\": ";
+        fs::write(dir.join("config.json"), original).unwrap();
+
+        let store = ConfigStore::load(&dir).unwrap();
+
+        assert_eq!(store.config.relay_url, DEFAULT_RELAY_URL);
+        let backups: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.file_name().unwrap().to_string_lossy().starts_with("config.json.corrupt-"))
+            .collect();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(fs::read(&backups[0]).unwrap(), original);
+        assert_ne!(fs::read(dir.join("config.json")).unwrap(), original);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn missing_config_returns_default_without_backup() {
+        let dir = test_dir();
+
+        let store = ConfigStore::load(&dir).unwrap();
+
+        assert_eq!(store.config.relay_url, DEFAULT_RELAY_URL);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn insecure_remote_relay_detection_allows_local_relays() {
+        assert!(!is_insecure_remote_relay("ws://127.0.0.1:8080/ws"));
+        assert!(!is_insecure_remote_relay("ws://localhost:8080/ws"));
+        assert!(!is_insecure_remote_relay("ws://[::1]:8080/ws"));
+        assert!(!is_insecure_remote_relay("wss://example.com/ws"));
+        assert!(is_insecure_remote_relay("ws://example.com/ws"));
+        assert!(is_insecure_remote_relay("ws://10.0.0.5:8080/ws"));
     }
 }
