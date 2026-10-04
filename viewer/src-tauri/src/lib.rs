@@ -18,6 +18,10 @@ struct RuntimeState {
     contacts: ContactStore,
     password: Option<String>,
     host_thread: Option<HostThread>,
+    /// Set while a `start_hosting` registration task is connecting/waiting for
+    /// a pairing, before its `HostThread` exists. Together with `host_thread`
+    /// this makes the hosting slot reservation atomic under one lock.
+    host_starting: Option<HostReservation>,
     viewer_task: Option<tauri::async_runtime::JoinHandle<()>>,
     viewer_stop: Option<Arc<AtomicBool>>,
     viewer_input: Option<mpsc::Sender<Vec<u8>>>,
@@ -39,6 +43,17 @@ struct RuntimeState {
 struct HostThread {
     stop_tx: oneshot::Sender<()>,
     join: std::thread::JoinHandle<()>,
+    /// Identifies which `start_hosting` call owns this thread so a finishing
+    /// thread only clears its own handle, never a newer one.
+    token: Arc<()>,
+}
+
+/// Marker for an in-flight `start_hosting` call. `token` is compared with
+/// `Arc::ptr_eq` (mirroring the viewer slot's `viewer_stop` marker) so a stale
+/// registration task cannot install or release a newer reservation.
+struct HostReservation {
+    token: Arc<()>,
+    task: Option<tauri::async_runtime::JoinHandle<()>>,
 }
 struct ClipboardThread {
     command_tx: std_mpsc::Sender<ClipboardCommand>,
@@ -52,8 +67,14 @@ struct AppState(Mutex<RuntimeState>);
 
 impl AppState {
     fn lock(&self) -> std::sync::MutexGuard<'_, RuntimeState> {
-        self.0.lock().unwrap_or_else(|error| error.into_inner())
+        lock_unpoisoned(&self.0)
     }
+}
+
+/// Poison-tolerant lock: a panic while another holder had the mutex must not
+/// cascade into every later command or background task.
+fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|error| error.into_inner())
 }
 
 trait AbortableTask {
@@ -195,13 +216,13 @@ struct ReliableFileSink {
 impl FileSink for ReliableFileSink {
     async fn send(&mut self, message: FileMsg) {
         if let FileMsg::Offer { id, .. } = &message {
-            *self.transfer_id.lock().unwrap() = Some(*id);
+            *lock_unpoisoned(&self.transfer_id) = Some(*id);
             if let Some(sender) = self.offer_id.take() {
                 let _ = sender.send(Ok(*id));
             }
         }
         let plaintext = DataMsg::FileTransfer(message).to_bytes();
-        let sealed = self.sealer.lock().unwrap().seal(&[Tag::Data as u8], &plaintext);
+        let sealed = lock_unpoisoned(&self.sealer).seal(&[Tag::Data as u8], &plaintext);
         let _ = self.outgoing.send_frame(Tag::Data, &sealed).await;
     }
 }
@@ -288,6 +309,32 @@ fn can_reserve_viewer_slot(viewer_task_reserved: bool, viewer_stop_reserved: boo
     !viewer_task_reserved && !viewer_stop_reserved
 }
 
+/// The hosting slot is free only when no host thread is running and no
+/// `start_hosting` registration is in flight.
+fn can_reserve_host_slot(host_thread_running: bool, host_starting: bool) -> bool {
+    !host_thread_running && !host_starting
+}
+
+/// Whether `token` still owns the in-flight hosting reservation.
+fn owns_host_reservation(reservation: Option<&HostReservation>, token: &Arc<()>) -> bool {
+    reservation.is_some_and(|reservation| Arc::ptr_eq(&reservation.token, token))
+}
+
+/// Admit `decision_tx` as the pending pairing request. Only one request may
+/// wait for a user decision: if a live one is already pending, the newcomer is
+/// handed back so the caller can reject it (the first keeps its UI prompt). A
+/// stale sender whose requester already went away does not block new requests.
+fn admit_pending_request(
+    slot: &mut Option<oneshot::Sender<bool>>,
+    decision_tx: oneshot::Sender<bool>,
+) -> Result<(), oneshot::Sender<bool>> {
+    if slot.as_ref().is_some_and(|existing| !existing.is_closed()) {
+        return Err(decision_tx);
+    }
+    *slot = Some(decision_tx);
+    Ok(())
+}
+
 fn sanitize_recording_name(suggested_name: &str) -> String {
     let name = Path::new(suggested_name)
         .file_name()
@@ -346,13 +393,11 @@ pub(crate) fn spawn_file_receiver(
                 let FileMsg::Offer { id, name, size, .. } = offer else {
                     return ConsentDecision::Reject;
                 };
-                *offer_id.lock().unwrap() = Some(id);
+                *lock_unpoisoned(&offer_id) = Some(id);
                 let (decision_tx, decision_rx) = oneshot::channel();
                 pending_app
                     .state::<AppState>()
-                    .0
                     .lock()
-                    .unwrap()
                     .pending_file_requests
                     .insert(id, decision_tx);
                 emit(
@@ -374,7 +419,7 @@ pub(crate) fn spawn_file_receiver(
             {
                 let progress_app = app.clone();
                 move |transferred, total| {
-                    if let Some(id) = *progress_id.lock().unwrap() {
+                    if let Some(id) = *lock_unpoisoned(&progress_id) {
                         emit(
                             &progress_app,
                             "file_progress",
@@ -395,11 +440,11 @@ pub(crate) fn spawn_file_receiver(
                 &app,
                 "file_error",
                 FileError {
-                    id: (*transfer_id.lock().unwrap()).unwrap_or(0),
+                    id: (*lock_unpoisoned(&transfer_id)).unwrap_or(0),
                     message: error.to_string(),
                 },
             );
-        } else if let Some(id) = *transfer_id.lock().unwrap() {
+        } else if let Some(id) = *lock_unpoisoned(&transfer_id) {
             emit(&app, "file_done", FileDone { id });
         }
     });
@@ -425,7 +470,7 @@ fn spawn_clipboard_thread(
                 Err(std_mpsc::RecvTimeoutError::Timeout) => {
                     if !enabled.load(Ordering::Relaxed) { continue; }
                     let Some(message) = sync.poll_data() else { continue };
-                    let sealed = sealer.lock().unwrap().seal(&[Tag::Data as u8], &message.to_bytes());
+                    let sealed = lock_unpoisoned(&sealer).seal(&[Tag::Data as u8], &message.to_bytes());
                     if runtime.block_on(outgoing.send_frame(Tag::Data, &sealed)).is_err() { break; }
                 }
             }
@@ -443,7 +488,7 @@ fn dispatch_data(
     tauri::async_runtime::spawn(async move {
         let mut incoming = incoming;
         while let Some(message) = incoming.recv().await {
-            let Some(plaintext) = opener.lock().unwrap().open(&[Tag::Data as u8], &message) else { continue };
+            let Some(plaintext) = lock_unpoisoned(&opener).open(&[Tag::Data as u8], &message) else { continue };
             match DataMsg::from_bytes(&plaintext) {
                 Some(DataMsg::FileTransfer(message)) => { if file_tx.send(message).await.is_err() { break; } }
                 Some(DataMsg::Clipboard(message)) => {
@@ -727,7 +772,7 @@ async fn send_file(
             transfer_id: transfer_id.clone(),
         };
         let result = FileSender::send(Path::new(&path), &mut sink, move |transferred, total| {
-            if let Some(id) = *progress_id.lock().unwrap() {
+            if let Some(id) = *lock_unpoisoned(&progress_id) {
                 emit(
                     &progress_app,
                     "file_progress",
@@ -743,7 +788,7 @@ async fn send_file(
         .await;
         if let Err(error) = result {
             sink.fail_before_offer(&error.to_string());
-            let id = *transfer_id.lock().unwrap();
+            let id = *lock_unpoisoned(&transfer_id);
             emit(
                 &task_app,
                 "file_error",
@@ -752,7 +797,7 @@ async fn send_file(
                     message: error.to_string(),
                 },
             );
-        } else if let Some(id) = *transfer_id.lock().unwrap() {
+        } else if let Some(id) = *lock_unpoisoned(&transfer_id) {
             emit(&task_app, "file_done", FileDone { id });
         }
     });
@@ -813,8 +858,15 @@ fn save_recording(bytes: Vec<u8>, suggested_name: String) -> Result<String, Stri
 
 #[tauri::command]
 fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<(), String> {
+    let reservation_token = Arc::new(());
     let (relay_url, id, registration_token, password, unattended_enabled, twofa_enabled, totp_secret) = {
         let mut s = state.lock();
+        // Check and reserve the hosting slot under this single lock so two
+        // rapid calls (e.g. a StrictMode double mount) cannot both spawn.
+        if !can_reserve_host_slot(s.host_thread.is_some(), s.host_starting.is_some()) {
+            return Ok(());
+        }
+        s.host_starting = Some(HostReservation { token: reservation_token.clone(), task: None });
         let id = s.config.ensure_identity();
         let registration_token = s.config.ensure_registration_token();
         let unattended_password = if s.config.config.unattended_enabled {
@@ -836,9 +888,6 @@ fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<()
             unattended_enabled, twofa_enabled, totp_secret,
         )
     };
-    if state.lock().host_thread.is_some() {
-        return Ok(());
-    }
     emit(
         &app,
         "status_changed",
@@ -846,6 +895,7 @@ fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<()
             state: "connecting",
         },
     );
+    let task_token = reservation_token.clone();
     let task = tauri::async_runtime::spawn(async move {
         let result = async {
             let (_, mut ws) = host_core::relay_client::connect_best(&[relay_url]).await?;
@@ -873,6 +923,17 @@ fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<()
             let (stop_tx, stop_rx) = oneshot::channel::<()>();
             let host_app = app.clone();
             let approve_app = app.clone();
+            let thread_token = task_token.clone();
+            // Hold the state lock across spawning and installing the thread:
+            // the thread's own cleanup needs this lock, so it cannot clear the
+            // slot before its handle is installed.
+            let app_state = app.state::<AppState>();
+            let mut runtime_state = app_state.lock();
+            if !owns_host_reservation(runtime_state.host_starting.as_ref(), &task_token) {
+                // stop_hosting() released the reservation while we were
+                // pairing; drop the socket instead of starting a session.
+                return Ok(());
+            }
             let join = std::thread::spawn(move || {
                 let runtime = match tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -887,11 +948,13 @@ fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<()
                             SessionEnded { reason: "runtime initialization failed".into() },
                         );
                         emit(&host_app, "status_changed", StatusEvent { state: "offline" });
+                        clear_own_host_thread(&host_app, &thread_token);
                         return;
                     }
                 };
 
                 let cleanup_app = host_app.clone();
+                let cleanup_token = thread_token.clone();
                 runtime.block_on(async move {
                     let (data_ready_tx, data_ready_rx) = oneshot::channel();
                     let mut stop_rx = stop_rx;
@@ -907,10 +970,21 @@ fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<()
                             return true;
                         }
                         let (decision_tx, decision_rx) = oneshot::channel();
+                        // Install before emitting so the UI can never answer a
+                        // prompt whose sender is not yet in place.
+                        let admitted = admit_pending_request(
+                            &mut approve_app.state::<AppState>().lock().pending_request,
+                            decision_tx,
+                        );
+                        if let Err(rejected_tx) = admitted {
+                            // Another request is already awaiting a decision:
+                            // reject this one and leave the existing prompt.
+                            let _ = rejected_tx.send(false);
+                            return false;
+                        }
                         emit(&approve_app, "incoming_request", IncomingRequest {
                             peer_id: peer_id.clone(), fingerprint: "pending".into(),
                         });
-                        approve_app.state::<AppState>().lock().pending_request = Some(decision_tx);
                         let allowed = decision_rx.await.unwrap_or(false);
                         if allowed {
                             emit(&approve_app, "status_changed", StatusEvent { state: "in_session" });
@@ -953,30 +1027,63 @@ fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<()
 
                 // A naturally ended session should not leave a stale host
                 // handle preventing a later start_hosting call.
-                cleanup_app.state::<AppState>().lock().host_thread = None;
+                clear_own_host_thread(&cleanup_app, &cleanup_token);
             });
-            app.state::<AppState>().lock().host_thread = Some(HostThread { stop_tx, join });
+            runtime_state.host_starting = None;
+            runtime_state.host_thread = Some(HostThread { stop_tx, join, token: task_token.clone() });
             Ok::<(), String>(())
         }
         .await;
         if let Err(message) = result {
+            {
+                let mut runtime_state = app.state::<AppState>().inner().lock();
+                if owns_host_reservation(runtime_state.host_starting.as_ref(), &task_token) {
+                    runtime_state.host_starting = None;
+                }
+            }
             emit(&app, "error", ErrorEvent { message });
             emit(&app, "status_changed", StatusEvent { state: "offline" });
         }
     });
-    // The registration task is intentionally short-lived after it hands the
-    // paired socket to HostThread. Detach it (the host session is stopped via
-    // the oneshot channel owned by HostThread).
-    drop(task);
+    // Keep the registration handle with the reservation so stop_hosting() can
+    // abort a registration still waiting for a pairing. If the reservation is
+    // already gone (registration failed or handed off to HostThread, or was
+    // stopped), the short-lived task is simply detached.
+    let mut runtime_state = state.lock();
+    if let Some(reservation) = runtime_state
+        .host_starting
+        .as_mut()
+        .filter(|reservation| Arc::ptr_eq(&reservation.token, &reservation_token))
+    {
+        reservation.task = Some(task);
+    }
     Ok(())
+}
+
+/// Clear `host_thread` only if it still belongs to the thread identified by
+/// `token`, so a finishing old session never clears a newer one.
+fn clear_own_host_thread(app: &AppHandle, token: &Arc<()>) {
+    let mut runtime_state = app.state::<AppState>().inner().lock();
+    if runtime_state
+        .host_thread
+        .as_ref()
+        .is_some_and(|host_thread| Arc::ptr_eq(&host_thread.token, token))
+    {
+        runtime_state.host_thread = None;
+    }
 }
 #[tauri::command]
 fn stop_hosting(state: tauri::State<'_, AppState>, app: AppHandle) {
-    let (host_thread, pending_request) = {
+    let (host_thread, pending_request, host_starting) = {
         let mut s = state.lock();
-        (s.host_thread.take(), s.pending_request.take())
+        (s.host_thread.take(), s.pending_request.take(), s.host_starting.take())
     };
     drop(pending_request);
+    // Releasing the reservation also makes an in-flight registration task
+    // bail out at hand-off if the abort lands after its last await point.
+    if let Some(task) = host_starting.and_then(|reservation| reservation.task) {
+        task.abort();
+    }
     if let Some(host_thread) = host_thread {
         let _ = host_thread.stop_tx.send(());
         let _ = host_thread.join.join();
@@ -997,9 +1104,7 @@ fn connect(
         return Err("target ID must be 9 digits".into());
     }
     state
-        .0
         .lock()
-        .unwrap()
         .config
         .add_recent(&target_id)
         .map_err(|e| e.to_string())?;
@@ -1273,7 +1378,7 @@ async fn select_monitor(state: tauri::State<'_, AppState>, id: u32) -> Result<()
     let sender = sender.ok_or_else(|| "no active viewer session".to_owned())?;
     let sealer = sealer.ok_or_else(|| "control channel is not ready".to_owned())?;
     let body = Control::SelectMonitor { id }.to_bytes();
-    let sealed = sealer.lock().unwrap().seal(&[Tag::Control as u8], &body);
+    let sealed = lock_unpoisoned(&sealer).seal(&[Tag::Control as u8], &body);
     sender.send_frame(Tag::Control, &sealed).await.map_err(|error| error.to_string())
 }
 
@@ -1282,7 +1387,7 @@ async fn send_auth_code(state: tauri::State<'_, AppState>, code: String) -> Resu
     let (sender, sealer) = { let state = state.lock(); (state.control_sender.clone(), state.control_sealer.clone()) };
     let sender = sender.ok_or_else(|| "no active viewer session".to_owned())?;
     let sealer = sealer.ok_or_else(|| "control channel is not ready".to_owned())?;
-    let sealed = sealer.lock().unwrap().seal(&[Tag::Control as u8], &Control::AuthCode { code }.to_bytes());
+    let sealed = lock_unpoisoned(&sealer).seal(&[Tag::Control as u8], &Control::AuthCode { code }.to_bytes());
     sender.send_frame(Tag::Control, &sealed).await.map_err(|error| error.to_string())
 }
 
@@ -1298,15 +1403,20 @@ fn set_audio_muted(state: tauri::State<'_, AppState>, muted: bool) {
 
 #[tauri::command]
 fn disconnect(state: tauri::State<'_, AppState>, app: AppHandle) {
-    let (host_thread, viewer_task) = {
+    let (host_thread, viewer_task, host_starting) = {
         let mut s = state.lock();
         s.viewer_input = None;
         if let Some(stop) = &s.viewer_stop { stop.store(true, Ordering::Relaxed); }
         s.viewer_stop = None;
-        (s.host_thread.take(), s.viewer_task.take())
+        (s.host_thread.take(), s.viewer_task.take(), s.host_starting.take())
     };
     if let Some(viewer_task) = viewer_task {
         viewer_task.abort();
+    }
+    // Cancel an in-flight registration too, or the reservation would block
+    // every later start_hosting call while the task waits on the relay.
+    if let Some(task) = host_starting.and_then(|reservation| reservation.task) {
+        task.abort();
     }
     if let Some(host_thread) = host_thread {
         let _ = host_thread.stop_tx.send(());
@@ -1339,6 +1449,7 @@ pub fn run() {
                 contacts,
                 password: None,
                 host_thread: None,
+                host_starting: None,
                 viewer_task: None,
                 viewer_stop: None,
                 viewer_input: None,
@@ -1483,6 +1594,64 @@ mod tests {
     }
 
     #[test]
+    fn host_slot_reservation_fails_while_starting_or_running() {
+        assert!(can_reserve_host_slot(false, false));
+        assert!(!can_reserve_host_slot(true, false));
+        assert!(!can_reserve_host_slot(false, true));
+        assert!(!can_reserve_host_slot(true, true));
+    }
+
+    #[test]
+    fn host_reservation_is_owned_only_by_its_token() {
+        let token = Arc::new(());
+        let other = Arc::new(());
+        let reservation = HostReservation { token: token.clone(), task: None };
+        assert!(owns_host_reservation(Some(&reservation), &token));
+        assert!(!owns_host_reservation(Some(&reservation), &other));
+        assert!(!owns_host_reservation(None, &token));
+    }
+
+    #[test]
+    fn second_pending_request_is_rejected_and_first_kept() {
+        let mut slot = None;
+        let (first_tx, first_rx) = oneshot::channel();
+        assert!(admit_pending_request(&mut slot, first_tx).is_ok());
+
+        let (second_tx, mut second_rx) = oneshot::channel();
+        let rejected = admit_pending_request(&mut slot, second_tx).unwrap_err();
+        rejected.send(false).unwrap();
+        assert_eq!(second_rx.try_recv(), Ok(false));
+
+        // The first requester still receives the user's decision.
+        slot.take().unwrap().send(true).unwrap();
+        assert_eq!(first_rx.blocking_recv(), Ok(true));
+    }
+
+    #[test]
+    fn stale_pending_request_does_not_block_new_one() {
+        let mut slot = None;
+        let (stale_tx, stale_rx) = oneshot::channel::<bool>();
+        assert!(admit_pending_request(&mut slot, stale_tx).is_ok());
+        drop(stale_rx);
+
+        let (fresh_tx, fresh_rx) = oneshot::channel();
+        assert!(admit_pending_request(&mut slot, fresh_tx).is_ok());
+        slot.take().unwrap().send(true).unwrap();
+        assert_eq!(fresh_rx.blocking_recv(), Ok(true));
+    }
+
+    #[test]
+    fn poisoned_inner_mutex_remains_usable() {
+        let mutex = Mutex::new(Some(7_u64));
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = mutex.lock().unwrap();
+            panic!("poison the test mutex");
+        }));
+        assert!(mutex.is_poisoned());
+        assert_eq!(*lock_unpoisoned(&mutex), Some(7));
+    }
+
+    #[test]
     fn poisoned_app_state_lock_remains_usable() {
         let directory = std::env::temp_dir().join(format!(
             "opendesk-viewer-lock-test-{}",
@@ -1493,6 +1662,7 @@ mod tests {
             contacts: ContactStore::load(&directory).unwrap(),
             password: None,
             host_thread: None,
+            host_starting: None,
             viewer_task: None,
             viewer_stop: None,
             viewer_input: None,
