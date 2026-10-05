@@ -1,5 +1,9 @@
 //! Small helpers for the relay's existing register/connect control frames.
 
+// These return tungstenite's own error type unchanged so callers can classify
+// it (see reconnect.rs); boxing it would only add an allocation per failure.
+#![allow(clippy::result_large_err)]
+
 use futures_util::SinkExt;
 use protocol::{control::Control, frame, Tag};
 use tokio::net::TcpStream;

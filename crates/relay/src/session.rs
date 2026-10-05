@@ -19,8 +19,8 @@ pub fn valid_peer_id(value: &str) -> bool {
 pub fn decode_token(value: &str) -> Option<[u8; 32]> {
     if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()) { return None; }
     let mut token = [0u8; 32];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
-        token[index] = (hex_value(pair[0])? << 4) | hex_value(pair[1])?;
+    for (index, [high, low]) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
+        token[index] = (hex_value(*high)? << 4) | hex_value(*low)?;
     }
     Some(token)
 }
