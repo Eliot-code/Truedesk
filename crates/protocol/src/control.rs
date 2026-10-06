@@ -101,4 +101,12 @@ mod tests {
         let c = Control::AuthCode { code: "123456".into() };
         assert_eq!(Control::from_bytes(&c.to_bytes()), Some(c));
     }
+
+    #[test]
+    fn bye_roundtrips_and_uses_t_discriminator() {
+        let c = Control::Bye { session: "s1".into() };
+        let bytes = c.to_bytes();
+        assert!(String::from_utf8(bytes.clone()).unwrap().contains("\"t\":\"bye\""));
+        assert_eq!(Control::from_bytes(&bytes), Some(c));
+    }
 }

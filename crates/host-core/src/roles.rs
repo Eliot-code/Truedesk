@@ -16,7 +16,7 @@ use protocol::{
     Tag,
 };
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, error::Error, fmt::Display, future::Future, sync::{Mutex, OnceLock}, time::Duration};
+use std::{collections::HashMap, error::Error, fmt::Display, future::Future, sync::{atomic::{AtomicU32, Ordering}, Arc, Mutex, OnceLock}, time::Duration};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::WebSocketStream;
@@ -186,8 +186,10 @@ fn split_session_control(mut rx: mpsc::Receiver<Vec<u8>>, session: String) -> (m
     tokio::spawn(async move {
         while let Some(body) = rx.recv().await {
             let is_ice = matches!(Control::from_bytes(&body), Some(Control::Ice { session: body_session, .. }) if body_session == session);
-            let result = if is_ice { ice_tx.send(body).await } else { session_tx.send(body).await };
-            if result.is_err() { break; }
+            // Late ICE candidates after signaling is dropped are discarded;
+            // only a closed session receiver ends the demux (which the host
+            // loop observes as the peer being gone).
+            if is_ice { let _ = ice_tx.send(body).await; } else if session_tx.send(body).await.is_err() { break; }
         }
     });
     (ice_rx, session_rx)
@@ -242,7 +244,7 @@ where
     C: ScreenCapturer + Send + 'static,
     E: Encoder + Send + 'static,
     F: Fn(u16, u16) -> E,
-    I: InputInjector + 'static,
+    I: InputInjector + Send + 'static,
 {
     run_host_session_with_data(ws, password, ice_session, capturer, encoder_factory, injector, None).await
 }
@@ -256,7 +258,7 @@ where
     C: ScreenCapturer + Send + 'static,
     E: Encoder + Send + 'static,
     F: Fn(u16, u16) -> E,
-    I: InputInjector + 'static,
+    I: InputInjector + Send + 'static,
 {
     run_host_session_with_data_and_accept(
         ws, password, ice_session, capturer, encoder_factory, injector, false,
@@ -278,7 +280,7 @@ where
     C: ScreenCapturer + Send + 'static,
     E: Encoder + Send + 'static,
     F: Fn(u16, u16) -> E,
-    I: InputInjector + 'static,
+    I: InputInjector + Send + 'static,
     A: FnOnce() -> Fut,
     Fut: Future<Output = bool>,
 {
@@ -300,20 +302,21 @@ where
     C: ScreenCapturer + Send + 'static,
     E: Encoder + Send + 'static,
     F: Fn(u16, u16) -> E,
-    I: InputInjector + 'static,
+    I: InputInjector + Send + 'static,
     A: FnOnce() -> Fut,
     Fut: Future<Output = bool>,
 {
     run_host_session_with_data_and_accept_and_2fa_with_factory(
-        ws, password, ice_session, || Some(capturer), encoder_factory, injector,
+        ws, password, ice_session, || Some(capturer), encoder_factory,
+        move || Box::new(injector) as Box<dyn InputInjector>,
         unattended_enabled, twofa_enabled, totp_secret, approve, data_ready,
     ).await
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_host_session_with_data_and_accept_and_2fa_with_factory<S, C, E, F, I, A, Fut, CF>(
+async fn run_host_session_with_data_and_accept_and_2fa_with_factory<S, C, E, F, IF, A, Fut, CF>(
     ws: WebSocketStream<S>, password: &str, ice_session: &str, capture_factory: CF,
-    encoder_factory: F, mut injector: I, unattended_enabled: bool,
+    encoder_factory: F, injector_factory: IF, unattended_enabled: bool,
     twofa_enabled: bool, totp_secret: Option<&str>, approve: A,
     data_ready: Option<oneshot::Sender<DataHandle>>,
 )-> SessionResult<()>
@@ -322,7 +325,7 @@ where
     C: ScreenCapturer + Send + 'static,
     E: Encoder + Send + 'static,
     F: Fn(u16, u16) -> E,
-    I: InputInjector + 'static,
+    IF: FnOnce() -> Box<dyn InputInjector> + Send + 'static,
     A: FnOnce() -> Fut,
     Fut: Future<Output = bool>,
     CF: FnOnce() -> Option<C>,
@@ -373,7 +376,7 @@ where
     reliable.enable_application_traffic();
     let (send_key, recv_key) = derive_keys(&shared, true);
     let mut sealer = Sealer::new(send_key);
-    let mut opener = Opener::new(recv_key);
+    let opener = Opener::new(recv_key);
     // The Data channel uses a SEPARATE key (distinct HKDF label) from media, so
     // the two streams' independent nonce counters never collide under a shared
     // key. Sharing the media key here would be catastrophic AEAD nonce reuse.
@@ -408,7 +411,7 @@ where
             control_sealer,
         });
     }
-    let (mut transport_tx, mut transport_rx) = transport.into_split();
+    let (mut transport_tx, transport_rx) = transport.into_split();
     let mut audio_rx = audio::spawn_capture();
 
     let first_frame = loop {
@@ -422,24 +425,14 @@ where
     ))?;
     let mut width = first_frame.width;
     let mut height = first_frame.height;
-    let (input_tx, mut input_rx) = tokio::sync::mpsc::channel(64);
-    tokio::spawn(async move {
-        loop {
-            let received = transport_rx.recv().await;
-            let Some((Tag::Input, body)) = received else {
-                break;
-            };
-            let Some(plaintext) = opener.open(&[Tag::Input as u8], &body) else {
-                continue;
-            };
-            let Some((event, _timestamp_us)) = InputEvent::from_bytes(&plaintext) else {
-                continue;
-            };
-            if input_tx.send(event).await.is_err() {
-                break;
-            }
-        }
-    });
+    // Input injection makes blocking OS calls, so it runs on its own thread
+    // and never stalls capture/encode/send or audio. The injector is built on
+    // that thread because platform injectors (Enigo) can be thread-affine.
+    let dims = Arc::new(AtomicU32::new(pack_dims(width, height)));
+    let inject_tx = spawn_injection_thread(injector_factory, Arc::clone(&dims))?;
+    // Aborting the forwarder on exit drops the last injection sender, which
+    // ends the injection thread together with the session.
+    let mut input_forwarder = AbortOnDrop(tokio::spawn(forward_input(transport_rx, opener, inject_tx)));
     let fps: u32 = 15;
     let mut encoder = encoder_factory(width, height);
     let mut pending_first_frame = Some(first_frame);
@@ -452,22 +445,35 @@ where
                 let sealed = sealer.seal(&[Tag::Audio as u8], &audio_frame.to_bytes());
                 let _ = transport_tx.send(Tag::Audio, &sealed).await;
             },
-            Some(body) = session_control_rx.recv() => {
-                if let Some(plaintext) = control_opener.open(&[Tag::Control as u8], &body) {
-                    if let Some(Control::SelectMonitor { id }) = Control::from_bytes(&plaintext) {
-                        if capturer.select_monitor(id) {
-                            if let Some(frame) = capturer.next_frame().and_then(even_frame) {
-                                width = frame.width;
-                                height = frame.height;
-                                encoder = encoder_factory(width, height);
-                                pending_first_frame = Some(frame);
-                                seq = 0;
-                            }
+            body = session_control_rx.recv() => {
+                // The reliable (WebSocket) channel closed: the peer is gone.
+                let Some(body) = body else { return Ok(()) };
+                let Some(plaintext) = control_opener.open(&[Tag::Control as u8], &body) else { continue };
+                match Control::from_bytes(&plaintext) {
+                    // Authenticated by the per-session control key, so the
+                    // session field is informational only.
+                    Some(Control::Bye { .. }) => return Ok(()),
+                    Some(Control::SelectMonitor { id }) => {
+                        let frame = if capturer.select_monitor(id) { capturer.next_frame().and_then(even_frame) } else { None };
+                        if let Some(frame) = frame {
+                            width = frame.width;
+                            height = frame.height;
+                            dims.store(pack_dims(width, height), Ordering::Release);
+                            encoder = encoder_factory(width, height);
+                            pending_first_frame = Some(frame);
+                            seq = 0;
                         }
                     }
+                    _ => {}
                 }
             },
-            Some(event) = input_rx.recv() => injector.inject(&event, u32::from(width), u32::from(height)),
+            ended = &mut input_forwarder.0 => {
+                return match ended {
+                    Ok(InputForwardEnd::PeerGone) => Ok(()),
+                    Ok(InputForwardEnd::InjectorGone) => Err(Box::new(SessionError("input injection thread stopped"))),
+                    Err(_) => Err(Box::new(SessionError("input forwarding task failed"))),
+                };
+            },
             _ = tokio::time::sleep_until(next_frame) => {
                 next_frame += Duration::from_millis(1_000 / u64::from(fps));
                 let frame = pending_first_frame.take().or_else(|| capturer.next_frame().and_then(even_frame));
@@ -480,6 +486,95 @@ where
                 let sealed = sealer.seal(&[Tag::Video as u8], &plaintext);
                 transport_tx.send(Tag::Video, &sealed).await?;
                 seq += 1;
+            }
+        }
+    }
+}
+
+/// Bounded queue between the input forwarder and the injection thread.
+const INJECT_QUEUE: usize = 64;
+
+fn pack_dims(width: u16, height: u16) -> u32 { (u32::from(width) << 16) | u32::from(height) }
+
+fn unpack_dims(packed: u32) -> (u32, u32) { (packed >> 16, packed & 0xFFFF) }
+
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) { self.0.abort(); }
+}
+
+/// Start the dedicated input-injection thread. It builds the injector itself
+/// (keeping thread-affine backends on one OS thread), reads the current
+/// capture dimensions at injection time so a monitor switch applies to the
+/// next event, and exits once every sender is dropped.
+fn spawn_injection_thread<IF>(injector_factory: IF, dims: Arc<AtomicU32>) -> SessionResult<mpsc::Sender<InputEvent>>
+where
+    IF: FnOnce() -> Box<dyn InputInjector> + Send + 'static,
+{
+    let (tx, mut rx) = mpsc::channel::<InputEvent>(INJECT_QUEUE);
+    std::thread::Builder::new()
+        .name("opendesk-input-inject".into())
+        .spawn(move || {
+            let mut injector = injector_factory();
+            while let Some(event) = rx.blocking_recv() {
+                let (width, height) = unpack_dims(dims.load(Ordering::Acquire));
+                injector.inject(&event, width, height);
+            }
+        })?;
+    Ok(tx)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum InputForwardEnd {
+    /// The media transport closed: the viewer is gone.
+    PeerGone,
+    /// The injection thread stopped (its receiver was dropped).
+    InjectorGone,
+}
+
+/// Open viewer input and queue it for the injection thread.
+///
+/// Drop policy when the injection queue is full: mouse moves are coalesced to
+/// the single most recent pending position (absolute coordinates, so older
+/// ones are redundant) and never block. Buttons, keys, chars and scrolls are
+/// never dropped: the forwarder awaits queue capacity, which back-pressures
+/// only this input path, never the media loop. A pending move is flushed
+/// before any non-move event so clicks land at the latest pointer position.
+async fn forward_input(
+    mut transport_rx: Box<dyn TransportReceiver>,
+    mut opener: Opener,
+    inject_tx: mpsc::Sender<InputEvent>,
+) -> InputForwardEnd {
+    let mut pending_move: Option<InputEvent> = None;
+    loop {
+        tokio::select! {
+            biased;
+            permit = inject_tx.reserve(), if pending_move.is_some() => {
+                let Ok(permit) = permit else { return InputForwardEnd::InjectorGone };
+                if let Some(event) = pending_move.take() { permit.send(event); }
+            }
+            received = transport_rx.recv() => {
+                let Some((tag, body)) = received else { return InputForwardEnd::PeerGone };
+                if tag != Tag::Input { continue; }
+                let Some(plaintext) = opener.open(&[Tag::Input as u8], &body) else { continue };
+                let Some((event, _timestamp_us)) = InputEvent::from_bytes(&plaintext) else { continue };
+                if matches!(event, InputEvent::MouseMove { .. }) {
+                    if pending_move.is_some() {
+                        pending_move = Some(event);
+                        continue;
+                    }
+                    match inject_tx.try_send(event) {
+                        Ok(()) => {}
+                        Err(mpsc::error::TrySendError::Full(event)) => pending_move = Some(event),
+                        Err(mpsc::error::TrySendError::Closed(_)) => return InputForwardEnd::InjectorGone,
+                    }
+                } else {
+                    if let Some(pending) = pending_move.take() {
+                        if inject_tx.send(pending).await.is_err() { return InputForwardEnd::InjectorGone; }
+                    }
+                    if inject_tx.send(event).await.is_err() { return InputForwardEnd::InjectorGone; }
+                }
             }
         }
     }
@@ -710,6 +805,18 @@ fn report_input_unavailable() {
     eprintln!("Input injection unavailable: the platform input backend could not be initialized.");
 }
 
+/// Build the production injector. Called on the injection thread, so the
+/// thread-affine Enigo handle is created and used on one OS thread.
+fn default_injector() -> Box<dyn InputInjector> {
+    match EnigoInjector::new() {
+        Some(injector) => Box::new(injector),
+        None => {
+            report_input_unavailable();
+            Box::new(NoopInjector::default())
+        }
+    }
+}
+
 /// Run a host session with the production capture, H.264 encoder, and Enigo injector.
 pub async fn run_default_host_session<S>(
     ws: WebSocketStream<S>,
@@ -719,17 +826,10 @@ pub async fn run_default_host_session<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let injector: Box<dyn InputInjector> = match EnigoInjector::new() {
-        Some(injector) => Box::new(injector),
-        None => {
-            report_input_unavailable();
-            Box::new(NoopInjector::default())
-        }
-    };
     run_host_session_with_data_and_accept_and_2fa_with_factory(
         ws, password, ice_session, ScapCapturer::new,
         |w, h| H264Encoder::new(w, h, 15, 1_000_000),
-        injector, false, false, None, || async { true }, None,
+        default_injector, false, false, None, || async { true }, None,
     )
     .await
 }
@@ -777,20 +877,13 @@ where
     A: FnOnce() -> Fut,
     Fut: Future<Output = bool>,
 {
-    let injector: Box<dyn InputInjector> = match EnigoInjector::new() {
-        Some(injector) => Box::new(injector),
-        None => {
-            report_input_unavailable();
-            Box::new(NoopInjector::default())
-        }
-    };
     run_host_session_with_data_and_accept_and_2fa_with_factory(
         ws,
         password,
         ice_session,
         ScapCapturer::new,
         |w, h| H264Encoder::new(w, h, 15, 1_000_000),
-        injector,
+        default_injector,
         unattended_enabled,
         twofa_enabled,
         totp_secret,
@@ -907,5 +1000,75 @@ mod tests {
 
         drop(input_tx);
         assert!(timeout(Duration::from_secs(1), viewer).await.unwrap().unwrap().is_ok());
+    }
+
+    struct ChannelReceiver(mpsc::Receiver<(Tag, Vec<u8>)>);
+
+    #[async_trait::async_trait]
+    impl TransportReceiver for ChannelReceiver {
+        async fn recv(&mut self) -> Option<(Tag, Vec<u8>)> { self.0.recv().await }
+    }
+
+    #[tokio::test]
+    async fn forward_input_coalesces_moves_but_keeps_keys_in_order() {
+        let shared = [5u8; 32];
+        let (viewer_send, _) = derive_keys(&shared, false);
+        let (_, host_recv) = derive_keys(&shared, true);
+        let mut viewer_sealer = Sealer::new(viewer_send);
+        let (wire_tx, wire_rx) = mpsc::channel(16);
+        // Capacity 1 and no consumer yet: the queue is full after one event.
+        let (inject_tx, mut inject_rx) = mpsc::channel(1);
+        let forwarder = tokio::spawn(forward_input(Box::new(ChannelReceiver(wire_rx)), Opener::new(host_recv), inject_tx));
+
+        let key = |code| InputEvent::Key { code, down: true, modifiers: 0 };
+        let mv = |x| InputEvent::MouseMove { x, y: x };
+        for event in [key(65), mv(1), mv(2), mv(3), key(66)] {
+            let sealed = viewer_sealer.seal(&[Tag::Input as u8], &event.to_bytes(0));
+            wire_tx.send((Tag::Input, sealed)).await.unwrap();
+        }
+        let mut received = Vec::new();
+        for _ in 0..3 {
+            received.push(timeout(Duration::from_secs(1), inject_rx.recv()).await.unwrap().unwrap());
+        }
+        // Stale moves collapse to the latest one, flushed before the next key.
+        assert_eq!(received, vec![key(65), mv(3), key(66)]);
+
+        drop(wire_tx);
+        assert_eq!(timeout(Duration::from_secs(1), forwarder).await.unwrap().unwrap(), InputForwardEnd::PeerGone);
+    }
+
+    #[tokio::test]
+    async fn forward_input_reports_a_stopped_injection_thread() {
+        let (wire_tx, wire_rx) = mpsc::channel(4);
+        let (inject_tx, inject_rx) = mpsc::channel(1);
+        drop(inject_rx);
+        let shared = [6u8; 32];
+        let (viewer_send, _) = derive_keys(&shared, false);
+        let (_, host_recv) = derive_keys(&shared, true);
+        let forwarder = tokio::spawn(forward_input(Box::new(ChannelReceiver(wire_rx)), Opener::new(host_recv), inject_tx));
+        let event = InputEvent::Key { code: 65, down: true, modifiers: 0 };
+        let sealed = Sealer::new(viewer_send).seal(&[Tag::Input as u8], &event.to_bytes(0));
+        wire_tx.send((Tag::Input, sealed)).await.unwrap();
+        assert_eq!(timeout(Duration::from_secs(1), forwarder).await.unwrap().unwrap(), InputForwardEnd::InjectorGone);
+    }
+
+    #[test]
+    fn injection_thread_uses_latest_dims_and_exits_when_senders_drop() {
+        struct Probe(std::sync::mpsc::Sender<(u32, u32)>);
+        impl InputInjector for Probe {
+            fn inject(&mut self, _ev: &InputEvent, w: u32, h: u32) { let _ = self.0.send((w, h)); }
+        }
+        let (seen_tx, seen_rx) = std::sync::mpsc::channel();
+        let dims = Arc::new(AtomicU32::new(pack_dims(640, 480)));
+        let tx = spawn_injection_thread(move || Box::new(Probe(seen_tx)) as Box<dyn InputInjector>, Arc::clone(&dims)).unwrap();
+        let event = InputEvent::MouseButton { button: 1, down: true };
+        tx.blocking_send(event).unwrap();
+        assert_eq!(seen_rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap(), (640, 480));
+        dims.store(pack_dims(1920, 1080), Ordering::Release);
+        tx.blocking_send(event).unwrap();
+        assert_eq!(seen_rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap(), (1920, 1080));
+        drop(tx);
+        // The injector (and its probe sender) drops when the thread exits.
+        assert_eq!(seen_rx.recv_timeout(std::time::Duration::from_secs(1)), Err(std::sync::mpsc::RecvTimeoutError::Disconnected));
     }
 }

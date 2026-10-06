@@ -1411,7 +1411,22 @@ fn disconnect(state: tauri::State<'_, AppState>, app: AppHandle) {
         (s.host_thread.take(), s.viewer_task.take(), s.host_starting.take())
     };
     if let Some(viewer_task) = viewer_task {
-        viewer_task.abort();
+        // Best-effort Control::Bye so the host ends its session cleanly, then
+        // abort. Done off the command thread so disconnect never stalls the UI;
+        // bounded to ~200 ms so a wedged writer can't keep the task alive.
+        let (sender, sealer) = { let s = state.lock(); (s.control_sender.clone(), s.control_sealer.clone()) };
+        tauri::async_runtime::spawn(async move {
+            if let (Some(sender), Some(sealer)) = (sender, sealer) {
+                let bye = Control::Bye { session: String::new() }.to_bytes();
+                let sealed = sealer.lock().unwrap_or_else(|error| error.into_inner()).seal(&[Tag::Control as u8], &bye);
+                let sent = tokio::time::timeout(Duration::from_millis(150), sender.send_frame(Tag::Control, &sealed)).await;
+                if matches!(sent, Ok(Ok(_))) {
+                    // Let the WebSocket writer flush before the abort tears it down.
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }
+            viewer_task.abort();
+        });
     }
     // Cancel an in-flight registration too, or the reservation would block
     // every later start_hosting call while the task waits on the relay.

@@ -287,7 +287,7 @@ async fn forward_rest(stream: &mut futures_util::stream::SplitStream<WebSocket>,
             if frame.first() == Some(&(protocol::Tag::Control as u8)) && !signaling.allow(1) { log_event("connection_rejected", addr, "signaling_rate"); break; }
             let queued = tokio::select! {
                 _ = shutdown.changed() => false,
-                result = tokio::time::timeout(state.config.idle_timeout, peer_tx.send(frame)) => result.is_ok(),
+                result = tokio::time::timeout(state.config.idle_timeout, peer_tx.send(frame)) => matches!(result, Ok(Ok(()))),
             };
             if !queued { break; }
         }

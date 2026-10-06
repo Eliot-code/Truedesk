@@ -348,3 +348,165 @@ async fn relay_host_viewer_session_seals_media_and_input() {
     run_positive_session().await;
     run_wrong_password_session().await;
 }
+
+/// Sleeps on every event to model a slow, blocking OS injection call.
+struct SlowInjector {
+    delay: Duration,
+    injected: Arc<AtomicUsize>,
+}
+
+impl InputInjector for SlowInjector {
+    fn inject(&mut self, _event: &InputEvent, _screen_w: u32, _screen_h: u32) {
+        std::thread::sleep(self.delay);
+        self.injected.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Flags when dropped, i.e. when the injection thread has exited.
+struct DropFlagInjector(Arc<std::sync::atomic::AtomicBool>);
+
+impl InputInjector for DropFlagInjector {
+    fn inject(&mut self, _event: &InputEvent, _screen_w: u32, _screen_h: u32) {}
+}
+
+impl Drop for DropFlagInjector {
+    fn drop(&mut self) { self.0.store(true, Ordering::SeqCst); }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn slow_injection_does_not_stall_video_frames() {
+    let addr = relay::spawn_test_server().await;
+    let injected = Arc::new(AtomicUsize::new(0));
+    let host_injector = SlowInjector { delay: Duration::from_millis(1_000), injected: Arc::clone(&injected) };
+
+    let host_ws = connect_to_peer(&addr, false).await;
+    let host = tokio::spawn(async move {
+        run_host_session(
+            host_ws,
+            PASSWORD,
+            "e2e-slow-inject",
+            FakeCapturer::new(64, 64),
+            |width, height| H264Encoder::new(width, height, 15, 1_000_000),
+            host_injector,
+        )
+        .await
+    });
+
+    let viewer_ws = connect_to_peer(&addr, true).await;
+    let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel(4);
+    let (input_tx, input_rx) = tokio::sync::mpsc::channel(16);
+    let viewer = tokio::spawn(run_viewer_session(viewer_ws, PASSWORD, "e2e-slow-inject", frame_tx, input_rx));
+
+    timeout(Duration::from_secs(15), frame_rx.recv())
+        .await
+        .expect("timed out waiting for the first video frame")
+        .expect("viewer frame sink closed");
+
+    // Five events at 1 s each would stall an inline injector for ~5 s.
+    for code in 65..70 {
+        let input = InputEvent::Key { code, down: true, modifiers: 0 }.to_bytes(0);
+        input_tx.send(input).await.expect("send viewer input");
+    }
+    let mut frames = 0usize;
+    let window = tokio::time::Instant::now() + Duration::from_millis(1_500);
+    while let Ok(Some(_)) = tokio::time::timeout_at(window, frame_rx.recv()).await {
+        frames += 1;
+    }
+    // ~22 frames at 15 fps; an inline 1 s injector would yield about 2.
+    assert!(frames >= 8, "video stalled behind input injection: only {frames} frames in 1.5 s");
+    wait_for_count(&injected).await;
+
+    viewer.abort();
+    host.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn host_session_ends_cleanly_on_viewer_bye() {
+    let addr = relay::spawn_test_server().await;
+    let injector_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let host_injector = DropFlagInjector(Arc::clone(&injector_dropped));
+
+    let host_ws = connect_to_peer(&addr, false).await;
+    let host = tokio::spawn(async move {
+        run_host_session_with_data(
+            host_ws,
+            PASSWORD,
+            "e2e-bye",
+            FakeCapturer::new(64, 64),
+            |width, height| H264Encoder::new(width, height, 15, 1_000_000),
+            host_injector,
+            None,
+        )
+        .await
+    });
+
+    let viewer_ws = connect_to_peer(&addr, true).await;
+    let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel(4);
+    let (_input_tx, input_rx) = tokio::sync::mpsc::channel(4);
+    let (viewer_ready_tx, viewer_ready_rx) = tokio::sync::oneshot::channel();
+    let viewer = tokio::spawn(run_viewer_session_with_data(
+        viewer_ws,
+        PASSWORD,
+        "e2e-bye",
+        frame_tx,
+        input_rx,
+        Some(viewer_ready_tx),
+    ));
+    let DataHandle { control_sender, mut control_sealer, .. } = timeout(Duration::from_secs(15), viewer_ready_rx)
+        .await
+        .expect("timed out waiting for viewer Data handle")
+        .expect("viewer session closed before Data handle");
+    timeout(Duration::from_secs(15), frame_rx.recv())
+        .await
+        .expect("timed out waiting for the first video frame")
+        .expect("viewer frame sink closed");
+
+    let bye = protocol::control::Control::Bye { session: "e2e-bye".into() }.to_bytes();
+    let sealed = control_sealer.seal(&[Tag::Control as u8], &bye);
+    control_sender.send_frame(Tag::Control, &sealed).await.expect("send Bye");
+
+    let result = timeout(Duration::from_secs(5), host)
+        .await
+        .expect("host session did not end after Bye")
+        .expect("host task panicked");
+    assert!(result.is_ok(), "Bye must end the host session cleanly: {result:?}");
+    timeout(Duration::from_secs(2), async {
+        while !injector_dropped.load(Ordering::SeqCst) {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("injection thread did not exit with the session");
+
+    viewer.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn host_session_ends_when_viewer_disappears() {
+    let addr = relay::spawn_test_server().await;
+    let host_ws = connect_to_peer(&addr, false).await;
+    let host = tokio::spawn(async move {
+        run_host_session(
+            host_ws,
+            PASSWORD,
+            "e2e-peer-gone",
+            FakeCapturer::new(64, 64),
+            |width, height| H264Encoder::new(width, height, 15, 1_000_000),
+            NoopInjector::default(),
+        )
+        .await
+    });
+
+    let viewer_ws = connect_to_peer(&addr, true).await;
+    let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel(4);
+    let (_input_tx, input_rx) = tokio::sync::mpsc::channel(4);
+    let viewer = tokio::spawn(run_viewer_session(viewer_ws, PASSWORD, "e2e-peer-gone", frame_tx, input_rx));
+    timeout(Duration::from_secs(15), frame_rx.recv())
+        .await
+        .expect("timed out waiting for the first video frame")
+        .expect("viewer frame sink closed");
+
+    viewer.abort();
+    let ended = timeout(Duration::from_secs(10), host).await;
+    assert!(ended.is_ok(), "host session kept running after the viewer disconnected");
+}
