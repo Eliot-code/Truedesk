@@ -9,7 +9,7 @@ use futures_util::StreamExt;
 use host_core::{clipboard::{ArboardBackend, ClipboardSync}, filexfer::{ConsentDecision, FileReceiver, FileSink, FileSource, FileSender}, roles::DataHandle, transport::reliable::ReliableSender};
 use protocol::{control::{Control, MonitorInfo}, crypto::{Opener, Sealer}, datamsg::DataMsg, filexfer::FileMsg, frame, Tag};
 use serde::Serialize;
-use std::{collections::HashMap, fs, fs::OpenOptions, io, path::{Path, PathBuf}, sync::{atomic::{AtomicBool, Ordering}, mpsc as std_mpsc, Arc, Mutex}, time::Duration};
+use std::{collections::HashMap, fs, fs::OpenOptions, io, path::{Path, PathBuf}, sync::{atomic::{AtomicBool, Ordering}, mpsc as std_mpsc, Arc, Mutex}, time::{Duration, Instant}};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{mpsc, oneshot};
 
@@ -39,7 +39,9 @@ struct RuntimeState {
 /// The host session owns Enigo, which is not `Send`. Keep the session and its
 /// current-thread Tokio runtime together on a dedicated OS thread. The stop
 /// signal is separate so Tauri commands can shut it down without aborting a
-/// task that may be running non-`Send` code.
+/// task that may be running non-`Send` code. The thread is the hosting loop
+/// (see `spawn_host_thread`): it re-registers after each session until the
+/// stop signal fires or its sender is dropped.
 struct HostThread {
     stop_tx: oneshot::Sender<()>,
     join: std::thread::JoinHandle<()>,
@@ -856,10 +858,239 @@ fn save_recording(bytes: Vec<u8>, suggested_name: String) -> Result<String, Stri
     Ok(path.to_string_lossy().into_owned())
 }
 
+/// Per-session host credentials and policy. Read fresh for every pairing so a
+/// rotated password or a changed unattended/2FA setting applies to the next
+/// session of a long-lived hosting loop instead of the value from when
+/// hosting started.
+struct HostSessionParams {
+    password: String,
+    unattended_enabled: bool,
+    twofa_enabled: bool,
+    totp_secret: Option<String>,
+}
+
+fn host_session_params(s: &mut RuntimeState) -> HostSessionParams {
+    let unattended_password = if s.config.config.unattended_enabled {
+        unattended::get_password().ok()
+    } else {
+        None
+    };
+    // A keychain failure deliberately disables unattended approval for
+    // this session and uses the normal manual-accept PAKE path.
+    let unattended_enabled = unattended_password.is_some();
+    let twofa_enabled = unattended_enabled && s.config.config.unattended_twofa_enabled;
+    let totp_secret = if twofa_enabled { unattended::get_totp_secret().ok() } else { None };
+    let password = unattended_password.unwrap_or_else(|| current_password(s));
+    HostSessionParams { password, unattended_enabled, twofa_enabled, totp_secret }
+}
+
+/// The relay identity a hosting loop registers under. It is stable for the
+/// loop's lifetime: re-registering with the same token is accepted by the
+/// relay's ownership lease, so a host can come back after every session.
+#[derive(Clone)]
+struct HostRegistration {
+    id: String,
+    token: String,
+}
+
+/// Connect to the relay, register, and wait for a viewer to pair, retrying
+/// with capped exponential backoff until a pairing arrives. Returns `None`
+/// once `still_hosting` reports that this loop no longer owns the hosting
+/// slot. Callers may also cancel by dropping the future (task abort or a
+/// `select!` on the host thread's stop signal).
+///
+/// Status: "online" when a registration is parked on the relay; "connecting"
+/// (plus one error event per failure streak) while registration is failing.
+/// A healthy registration that the relay expires (its pairing timeout) is
+/// renewed silently so the UI stays "online".
+async fn register_host_until_paired(
+    app: &AppHandle,
+    registration: &HostRegistration,
+    still_hosting: impl Fn() -> bool,
+) -> Option<(host_core::relay_client::RelayWebSocket, host_core::relay_client::Pairing)> {
+    let mut backoff = host_core::reconnect::HostRegistrationBackoff::new();
+    let mut online = false;
+    loop {
+        let delay = backoff.delay();
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        if !still_hosting() {
+            return None;
+        }
+        // Re-read per attempt so a relay change applies to the next registration.
+        let relay_url = app.state::<AppState>().lock().config.config.relay_url.clone();
+        let failure = match host_core::relay_client::register_host(&[relay_url], &registration.id, &registration.token).await {
+            Err(error) => {
+                backoff.record_failure();
+                error
+            }
+            Ok(mut ws) => {
+                if !online {
+                    emit(app, "status_changed", StatusEvent { state: "online" });
+                    online = true;
+                }
+                let parked_at = Instant::now();
+                match host_core::relay_client::await_pairing(&mut ws).await {
+                    Ok(pairing) => return Some((ws, pairing)),
+                    Err(error) => {
+                        backoff.record_parked_then_closed(parked_at.elapsed());
+                        error
+                    }
+                }
+            }
+        };
+        if backoff.consecutive_failures() == 0 {
+            // A long-parked registration expired normally; renew it quietly.
+            continue;
+        }
+        if online || backoff.consecutive_failures() == 1 {
+            emit(app, "error", ErrorEvent { message: format!("{failure}; retrying host registration") });
+            emit(app, "status_changed", StatusEvent { state: "connecting" });
+        }
+        online = false;
+    }
+}
+
+/// Run one paired host session. Returns `true` when the stop signal ended it
+/// (stop_hosting/disconnect), `false` when the session ended on its own.
+async fn run_paired_host_session(
+    app: &AppHandle,
+    ws: host_core::relay_client::RelayWebSocket,
+    pairing: host_core::relay_client::Pairing,
+    params: HostSessionParams,
+    stop_rx: &mut oneshot::Receiver<()>,
+) -> bool {
+    let host_core::relay_client::Pairing { session: ice_session, peer_id } = pairing;
+    let HostSessionParams { password, unattended_enabled, twofa_enabled, totp_secret } = params;
+    let allowlisted = host_core::roles::should_auto_accept_allowlisted(
+        app.state::<AppState>().lock().config.is_allowed(&peer_id),
+    );
+    let remote_id = peer_id.clone();
+    let approve_app = app.clone();
+    let (data_ready_tx, data_ready_rx) = oneshot::channel();
+    let approve = move || async move {
+        if allowlisted {
+            emit(&approve_app, "status_changed", StatusEvent { state: "in_session" });
+            emit(&approve_app, "session_started", SessionStarted { role: "host", remote_id: peer_id.clone() });
+            return true;
+        }
+        if unattended_enabled {
+            emit(&approve_app, "status_changed", StatusEvent { state: "in_session" });
+            emit(&approve_app, "session_started", SessionStarted { role: "host", remote_id: peer_id.clone() });
+            return true;
+        }
+        let (decision_tx, decision_rx) = oneshot::channel();
+        // Install before emitting so the UI can never answer a
+        // prompt whose sender is not yet in place.
+        let admitted = admit_pending_request(
+            &mut approve_app.state::<AppState>().lock().pending_request,
+            decision_tx,
+        );
+        if let Err(rejected_tx) = admitted {
+            // Another request is already awaiting a decision:
+            // reject this one and leave the existing prompt.
+            let _ = rejected_tx.send(false);
+            return false;
+        }
+        emit(&approve_app, "incoming_request", IncomingRequest {
+            peer_id: peer_id.clone(), fingerprint: "pending".into(),
+        });
+        let allowed = decision_rx.await.unwrap_or(false);
+        if allowed {
+            emit(&approve_app, "status_changed", StatusEvent { state: "in_session" });
+            emit(&approve_app, "session_started", SessionStarted { role: "host", remote_id: peer_id.clone() });
+        }
+        allowed
+    };
+    let mut session = Box::pin(host_core::roles::run_default_host_session_with_data_and_accept_and_2fa(
+        ws, &password, &ice_session, unattended_enabled, twofa_enabled, totp_secret.as_deref(), approve, data_ready_tx,
+    ));
+    let result = tokio::select! {
+        handle = data_ready_rx => {
+            match handle {
+                Ok(handle) => {
+                    activate_data_channel(app, handle, remote_id.clone());
+                    tokio::select! {
+                        result = &mut session => Some(result),
+                        _ = &mut *stop_rx => None,
+                    }
+                }
+                Err(_) => Some(Err("session ended before the data channel was ready".into())),
+            }
+        }
+        result = &mut session => Some(result),
+        _ = &mut *stop_rx => None,
+    };
+    if let Some(Err(error)) = &result {
+        emit(app, "error", ErrorEvent { message: error.to_string() });
+    }
+    emit(
+        app,
+        "session_ended",
+        SessionEnded {
+            reason: if result.is_some() { "host session ended".into() } else { "disconnected".into() },
+        },
+    );
+    clear_data_channel(app);
+    result.is_none()
+}
+
+/// The host session owns Enigo (not `Send`), so each session runs on this
+/// dedicated thread's current-thread runtime. The thread is the hosting loop:
+/// after a session ends on its own it re-registers with the relay under the
+/// same ID/token and waits for the next pairing, so a dropped viewer can
+/// reconnect. Only the stop signal (stop_hosting/disconnect) or losing
+/// ownership of `host_thread` ends the loop.
+fn spawn_host_thread(
+    app: AppHandle,
+    registration: HostRegistration,
+    first: (host_core::relay_client::RelayWebSocket, host_core::relay_client::Pairing),
+    mut stop_rx: oneshot::Receiver<()>,
+    token: Arc<()>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                emit(&app, "error", ErrorEvent { message: error.to_string() });
+                emit(&app, "session_ended", SessionEnded { reason: "runtime initialization failed".into() });
+                emit(&app, "status_changed", StatusEvent { state: "offline" });
+                clear_own_host_thread(&app, &token);
+                return;
+            }
+        };
+        runtime.block_on(async {
+            let mut next = first;
+            loop {
+                let params = host_session_params(&mut app.state::<AppState>().lock());
+                let (ws, pairing) = next;
+                if run_paired_host_session(&app, ws, pairing, params, &mut stop_rx).await {
+                    break;
+                }
+                // Ended on its own (viewer left, network drop, rejection):
+                // go straight back to waiting rather than going offline.
+                emit(&app, "status_changed", StatusEvent { state: "connecting" });
+                let still_hosting = || owns_host_thread(&app, &token);
+                tokio::select! {
+                    paired = register_host_until_paired(&app, &registration, still_hosting) => match paired {
+                        Some(paired) => next = paired,
+                        None => break,
+                    },
+                    _ = &mut stop_rx => break,
+                }
+            }
+        });
+        emit(&app, "status_changed", StatusEvent { state: "offline" });
+        // Leave no stale handle preventing a later start_hosting call.
+        clear_own_host_thread(&app, &token);
+    })
+}
+
 #[tauri::command]
 fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<(), String> {
     let reservation_token = Arc::new(());
-    let (relay_url, id, registration_token, password, unattended_enabled, twofa_enabled, totp_secret) = {
+    let registration = {
         let mut s = state.lock();
         // Check and reserve the hosting slot under this single lock so two
         // rapid calls (e.g. a StrictMode double mount) cannot both spawn.
@@ -867,197 +1098,60 @@ fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<()
             return Ok(());
         }
         s.host_starting = Some(HostReservation { token: reservation_token.clone(), task: None });
-        let id = s.config.ensure_identity();
-        let registration_token = s.config.ensure_registration_token();
-        let unattended_password = if s.config.config.unattended_enabled {
-            unattended::get_password().ok()
-        } else {
-            None
-        };
-        // A keychain failure deliberately disables unattended approval for
-        // this session and uses the normal manual-accept PAKE path.
-        let unattended_enabled = unattended_password.is_some();
-        let twofa_enabled = unattended_enabled && s.config.config.unattended_twofa_enabled;
-        let totp_secret = if twofa_enabled { unattended::get_totp_secret().ok() } else { None };
-        let password = unattended_password.unwrap_or_else(|| current_password(&mut s));
-        (
-            s.config.config.relay_url.clone(),
-            id,
-            registration_token,
-            password,
-            unattended_enabled, twofa_enabled, totp_secret,
-        )
+        HostRegistration { id: s.config.ensure_identity(), token: s.config.ensure_registration_token() }
     };
-    emit(
-        &app,
-        "status_changed",
-        StatusEvent {
-            state: "connecting",
-        },
-    );
+    emit(&app, "status_changed", StatusEvent { state: "connecting" });
     let task_token = reservation_token.clone();
     let task = tauri::async_runtime::spawn(async move {
-        let result = async {
-            let (_, mut ws) = host_core::relay_client::connect_best(&[relay_url]).await?;
-            host_core::relay_client::register(&mut ws, &id, &registration_token)
-                .await
-                .map_err(|e| e.to_string())?;
-            emit(&app, "status_changed", StatusEvent { state: "online" });
-            let Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(message))) =
-                ws.next().await
-            else {
-                return Err::<(), String>("relay closed while hosting".into());
-            };
-            let Some((Tag::Control, body)) = frame::unwrap(&message) else {
-                return Err("invalid pairing message".into());
-            };
-            let Some(protocol::control::Control::Paired { session, peer_id, .. }) =
-                protocol::control::Control::from_bytes(body)
-            else {
-                return Err("invalid pairing message".into());
-            };
-            let allowlisted = host_core::roles::should_auto_accept_allowlisted(
-                app.state::<AppState>().lock().config.is_allowed(&peer_id),
-            );
-            let remote_id = peer_id.clone();
-            let (stop_tx, stop_rx) = oneshot::channel::<()>();
-            let host_app = app.clone();
-            let approve_app = app.clone();
-            let thread_token = task_token.clone();
-            // Hold the state lock across spawning and installing the thread:
-            // the thread's own cleanup needs this lock, so it cannot clear the
-            // slot before its handle is installed.
-            let app_state = app.state::<AppState>();
-            let mut runtime_state = app_state.lock();
-            if !owns_host_reservation(runtime_state.host_starting.as_ref(), &task_token) {
-                // stop_hosting() released the reservation while we were
-                // pairing; drop the socket instead of starting a session.
-                return Ok(());
-            }
-            let join = std::thread::spawn(move || {
-                let runtime = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(runtime) => runtime,
-                    Err(error) => {
-                        emit(&host_app, "error", ErrorEvent { message: error.to_string() });
-                        emit(
-                            &host_app,
-                            "session_ended",
-                            SessionEnded { reason: "runtime initialization failed".into() },
-                        );
-                        emit(&host_app, "status_changed", StatusEvent { state: "offline" });
-                        clear_own_host_thread(&host_app, &thread_token);
-                        return;
-                    }
-                };
-
-                let cleanup_app = host_app.clone();
-                let cleanup_token = thread_token.clone();
-                runtime.block_on(async move {
-                    let (data_ready_tx, data_ready_rx) = oneshot::channel();
-                    let mut stop_rx = stop_rx;
-                    let approve = move || async move {
-                        if allowlisted {
-                            emit(&approve_app, "status_changed", StatusEvent { state: "in_session" });
-                            emit(&approve_app, "session_started", SessionStarted { role: "host", remote_id: peer_id.clone() });
-                            return true;
-                        }
-                        if unattended_enabled {
-                            emit(&approve_app, "status_changed", StatusEvent { state: "in_session" });
-                            emit(&approve_app, "session_started", SessionStarted { role: "host", remote_id: peer_id.clone() });
-                            return true;
-                        }
-                        let (decision_tx, decision_rx) = oneshot::channel();
-                        // Install before emitting so the UI can never answer a
-                        // prompt whose sender is not yet in place.
-                        let admitted = admit_pending_request(
-                            &mut approve_app.state::<AppState>().lock().pending_request,
-                            decision_tx,
-                        );
-                        if let Err(rejected_tx) = admitted {
-                            // Another request is already awaiting a decision:
-                            // reject this one and leave the existing prompt.
-                            let _ = rejected_tx.send(false);
-                            return false;
-                        }
-                        emit(&approve_app, "incoming_request", IncomingRequest {
-                            peer_id: peer_id.clone(), fingerprint: "pending".into(),
-                        });
-                        let allowed = decision_rx.await.unwrap_or(false);
-                        if allowed {
-                            emit(&approve_app, "status_changed", StatusEvent { state: "in_session" });
-                            emit(&approve_app, "session_started", SessionStarted { role: "host", remote_id: peer_id.clone() });
-                        }
-                        allowed
-                    };
-                    let mut session = Box::pin(host_core::roles::run_default_host_session_with_data_and_accept_and_2fa(
-                        ws, &password, &session, unattended_enabled, twofa_enabled, totp_secret.as_deref(), approve, data_ready_tx,
-                    ));
-                    let result = tokio::select! {
-                        handle = data_ready_rx => {
-                            match handle {
-                                Ok(handle) => {
-                                    activate_data_channel(&host_app, handle, remote_id.clone());
-                                    tokio::select! {
-                                        result = &mut session => Some(result),
-                                        _ = &mut stop_rx => None,
-                                    }
-                                }
-                                Err(_) => Some(Err("session ended before the data channel was ready".into())),
-                            }
-                        }
-                        result = &mut session => Some(result),
-                        _ = &mut stop_rx => None,
-                    };
-                    if let Some(Err(error)) = &result {
-                        emit(&host_app, "error", ErrorEvent { message: error.to_string() });
-                    }
-                    emit(
-                        &host_app,
-                        "session_ended",
-                        SessionEnded {
-                            reason: if result.is_some() { "host session ended".into() } else { "disconnected".into() },
-                        },
-                    );
-                    clear_data_channel(&host_app);
-                    emit(&host_app, "status_changed", StatusEvent { state: "offline" });
-                });
-
-                // A naturally ended session should not leave a stale host
-                // handle preventing a later start_hosting call.
-                clear_own_host_thread(&cleanup_app, &cleanup_token);
-            });
-            runtime_state.host_starting = None;
-            runtime_state.host_thread = Some(HostThread { stop_tx, join, token: task_token.clone() });
-            Ok::<(), String>(())
+        let still_reserved = || owns_current_host_reservation(&app, &task_token);
+        let Some(first) = register_host_until_paired(&app, &registration, still_reserved).await else {
+            return;
+        };
+        // Hold the state lock across spawning and installing the thread:
+        // the thread's own cleanup needs this lock, so it cannot clear the
+        // slot before its handle is installed.
+        let app_state = app.state::<AppState>();
+        let mut runtime_state = app_state.lock();
+        if !owns_host_reservation(runtime_state.host_starting.as_ref(), &task_token) {
+            // stop_hosting() released the reservation while we were
+            // pairing; drop the socket instead of starting a session.
+            return;
         }
-        .await;
-        if let Err(message) = result {
-            {
-                let mut runtime_state = app.state::<AppState>().inner().lock();
-                if owns_host_reservation(runtime_state.host_starting.as_ref(), &task_token) {
-                    runtime_state.host_starting = None;
-                }
-            }
-            emit(&app, "error", ErrorEvent { message });
-            emit(&app, "status_changed", StatusEvent { state: "offline" });
-        }
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
+        let join = spawn_host_thread(app.clone(), registration, first, stop_rx, task_token.clone());
+        runtime_state.host_starting = None;
+        runtime_state.host_thread = Some(HostThread { stop_tx, join, token: task_token.clone() });
     });
     // Keep the registration handle with the reservation so stop_hosting() can
-    // abort a registration still waiting for a pairing. If the reservation is
-    // already gone (registration failed or handed off to HostThread, or was
-    // stopped), the short-lived task is simply detached.
+    // abort a registration still retrying or waiting for a pairing. If the
+    // reservation is already gone it was either handed off to the HostThread
+    // (the task is finishing) or released by stop_hosting/disconnect before
+    // the handle existed; abort so a retrying registration cannot outlive it.
     let mut runtime_state = state.lock();
-    if let Some(reservation) = runtime_state
+    match runtime_state
         .host_starting
         .as_mut()
         .filter(|reservation| Arc::ptr_eq(&reservation.token, &reservation_token))
     {
-        reservation.task = Some(task);
+        Some(reservation) => reservation.task = Some(task),
+        None => task.abort(),
     }
     Ok(())
+}
+
+fn owns_current_host_reservation(app: &AppHandle, token: &Arc<()>) -> bool {
+    let app_state = app.state::<AppState>();
+    let runtime_state = app_state.lock();
+    owns_host_reservation(runtime_state.host_starting.as_ref(), token)
+}
+
+fn owns_host_thread(app: &AppHandle, token: &Arc<()>) -> bool {
+    let app_state = app.state::<AppState>();
+    let runtime_state = app_state.lock();
+    runtime_state
+        .host_thread
+        .as_ref()
+        .is_some_and(|host_thread| Arc::ptr_eq(&host_thread.token, token))
 }
 
 /// Clear `host_thread` only if it still belongs to the thread identified by
@@ -1145,11 +1239,18 @@ fn connect(
     let task_viewer_stop = viewer_stop.clone();
     let mut task = Some(tauri::async_runtime::spawn(async move {
         let result = async {
+            // Retry state for the current outage: attempts so far and when the
+            // outage began. Reset once an attempt actually streams media, so
+            // every drop of a working session gets a full reconnect window.
             let mut reconnect_attempt = 0;
+            let mut outage_started: Option<Instant> = None;
             let mut session_started = false;
             loop {
                 if task_viewer_stop.load(Ordering::Relaxed) { break Ok(()); }
                 emit(&task_app, "status_changed", StatusEvent { state: "connecting" });
+                // Set once this attempt streams video; only used to restart the
+                // reconnect window, never to infer an auth failure.
+                let media_received = Arc::new(AtomicBool::new(false));
                 // Clone per attempt: each iteration moves these into the session
                 // task, so the originals must survive for the next reconnect.
                 let password = password.clone();
@@ -1180,11 +1281,13 @@ fn connect(
             task_app.state::<AppState>().lock().viewer_input = Some(input_tx);
 
             let frame_app = task_app.clone();
+            let frame_media_received = media_received.clone();
             let _frame_task = AbortOnDrop::new(tauri::async_runtime::spawn(async move {
                 while let Some(plaintext) = frame_rx.recv().await {
                     if plaintext.len() < 18 {
                         continue;
                     }
+                    frame_media_received.store(true, Ordering::Relaxed);
                     let seq = u64::from_be_bytes(plaintext[0..8].try_into().unwrap());
                     let timestamp_us = u32::from_be_bytes(plaintext[8..12].try_into().unwrap());
                     let _codec = plaintext[12];
@@ -1286,28 +1389,39 @@ fn connect(
                     Err(message) => {
                         clear_data_channel(&task_app);
                         task_app.state::<AppState>().lock().viewer_input = None;
+                        let media_received = media_received.load(Ordering::Relaxed);
                         let reason = host_core::reconnect::classify_viewer_error(&message);
-                        if !host_core::reconnect::should_reconnect(reason)
-                            || reconnect_attempt >= host_core::reconnect::MAX_RECONNECT_ATTEMPTS
-                        {
+                        if reason == host_core::reconnect::DisconnectReason::AuthFailure {
+                            // Only explicit signals land here (failed PAKE or the
+                            // host's Control::Error rejection). Never retry: the
+                            // password/2FA code will not get better (a TOTP code
+                            // is single-use), and a host user already declined.
+                            break Err(host_core::reconnect::auth_failure_message(&message, session_started));
+                        }
+                        if !host_core::reconnect::should_reconnect(reason) {
                             break Err(message);
                         }
+                        if media_received {
+                            reconnect_attempt = 0;
+                            outage_started = None;
+                        }
+                        let elapsed = outage_started.get_or_insert_with(Instant::now).elapsed();
+                        let Some(delay) = host_core::reconnect::viewer_retry_delay(reconnect_attempt, elapsed) else {
+                            break Err(format!(
+                                "{message}; gave up reconnecting after {}s",
+                                host_core::reconnect::VIEWER_RECONNECT_WINDOW.as_secs()
+                            ));
+                        };
                         reconnect_attempt += 1;
-                        emit(&task_app, "error", ErrorEvent { message: format!("viewer session dropped; reconnecting ({reconnect_attempt}/{})", host_core::reconnect::MAX_RECONNECT_ATTEMPTS) });
-                        tokio::time::sleep(host_core::reconnect::backoff_delay(reconnect_attempt - 1)).await;
+                        emit(&task_app, "error", ErrorEvent { message: format!("viewer session dropped ({message}); reconnecting (attempt {reconnect_attempt})") });
+                        tokio::time::sleep(delay).await;
                     }
                 }
             }
         }.await;
 
         if let Err(message) = &result {
-            let message = if host_core::reconnect::classify_viewer_error(message)
-                == host_core::reconnect::DisconnectReason::AuthFailure
-            {
-                format!("{message}; authentication failed—if two-factor authentication is enabled, enter a fresh code and reconnect manually")
-            } else {
-                message.clone()
-            };
+            let message = message.clone();
             emit(
                 &task_app,
                 "error",

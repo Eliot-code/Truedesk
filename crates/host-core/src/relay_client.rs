@@ -4,7 +4,7 @@
 // it (see reconnect.rs); boxing it would only add an allocation per failure.
 #![allow(clippy::result_large_err)]
 
-use futures_util::SinkExt;
+use futures_util::{SinkExt, StreamExt};
 use protocol::{control::Control, frame, Tag};
 use tokio::net::TcpStream;
 use tokio::time::{timeout, Duration};
@@ -62,6 +62,42 @@ pub async fn register(
         .to_bytes(),
     )))
     .await
+}
+
+/// A host registration that a viewer has paired with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pairing {
+    pub session: String,
+    pub peer_id: String,
+}
+
+/// Connect to the first reachable relay and register `peer_id` with `token`.
+/// The relay does not acknowledge registration; a rejection surfaces as the
+/// socket closing in [`await_pairing`].
+pub async fn register_host(urls: &[String], peer_id: &str, token: &str) -> Result<RelayWebSocket, String> {
+    let (_, mut ws) = connect_best(urls).await?;
+    register(&mut ws, peer_id, token).await.map_err(|error| error.to_string())?;
+    Ok(ws)
+}
+
+/// Wait on a registered host socket until the relay pairs a viewer with it.
+/// Errors when the relay closes the registration (rejected, pairing timeout,
+/// relay restart) or sends something other than a `paired` frame.
+pub async fn await_pairing(ws: &mut RelayWebSocket) -> Result<Pairing, String> {
+    loop {
+        let message = match ws.next().await {
+            Some(Ok(Message::Binary(message))) => message,
+            Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+            _ => return Err("relay closed while hosting".into()),
+        };
+        let Some((Tag::Control, body)) = frame::unwrap(&message) else {
+            return Err("invalid pairing message".into());
+        };
+        let Some(Control::Paired { session, peer_id, .. }) = Control::from_bytes(body) else {
+            return Err("invalid pairing message".into());
+        };
+        return Ok(Pairing { session, peer_id });
+    }
 }
 
 /// Ask the relay to connect this WebSocket to a registered peer.

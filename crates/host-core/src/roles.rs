@@ -7,7 +7,7 @@ use crate::{
     inject::{EnigoInjector, InputInjector, NoopInjector},
     transport::{self, RelayIceSignaling, RelayTransport, ReliableChannel, Transport, TransportReceiver, TransportSender},
 };
-use crate::reconnect::{classify_viewer_error, DisconnectReason};
+use crate::reconnect::{classify_viewer_error, reject_code, rejection_error, DisconnectReason};
 use protocol::{
     control::Control,
     crypto::{Opener, Sealer},
@@ -179,6 +179,19 @@ impl DataHandle {
 }
 
 async fn recv_control(rx: &mut mpsc::Receiver<Vec<u8>>) -> Option<Vec<u8>> { rx.recv().await }
+
+/// Best-effort sealed `Control::Error` telling the viewer why the host
+/// rejected it after the key exchange. Bounded (~200ms total) so a stalled
+/// writer can never hold up the host; the short sleep lets the WebSocket
+/// writer flush before the session (and its writer task) is dropped.
+async fn send_rejection(sender: &transport::reliable::ReliableSender, sealer: &mut Sealer, code: &str) {
+    let body = Control::Error { code: code.to_owned() }.to_bytes();
+    let sealed = sealer.seal(&[Tag::Control as u8], &body);
+    let sent = tokio::time::timeout(Duration::from_millis(150), sender.send_frame(Tag::Control, &sealed)).await;
+    if matches!(sent, Ok(Ok(()))) {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
 
 fn split_session_control(mut rx: mpsc::Receiver<Vec<u8>>, session: String) -> (mpsc::Receiver<Vec<u8>>, mpsc::Receiver<Vec<u8>>) {
     let (ice_tx, ice_rx) = mpsc::channel(64);
@@ -359,17 +372,28 @@ where
     let (control_send_key, control_recv_key) = protocol::kex::derive_control_keys(&shared, true);
     let mut control_sealer = Sealer::new(control_send_key);
     let mut control_opener = Opener::new(control_recv_key);
+    let mut code_received = false;
     let code_valid = if unattended_enabled && twofa_enabled {
         let body = tokio::time::timeout(Duration::from_secs(30), recv_control(&mut control_rx)).await.ok().flatten();
         let code = body.and_then(|body| control_opener.open(&[Tag::Control as u8], &body)).and_then(|body| match Control::from_bytes(&body) {
             Some(Control::AuthCode { code }) => Some(code),
             _ => None,
         });
+        code_received = code.is_some();
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |duration| duration.as_secs());
         code.as_deref().zip(totp_secret).is_some_and(|(code, secret)| totp_is_valid_once(secret, code, now))
     } else { true };
-    if (unattended_enabled && twofa_enabled && !code_valid)
-        || (!should_auto_accept_with_2fa(unattended_enabled, true, twofa_enabled, code_valid) && !approve().await) {
+    let rejection = if unattended_enabled && twofa_enabled && !code_valid {
+        Some(if code_received { reject_code::TWOFA_INVALID } else { reject_code::TWOFA_REQUIRED })
+    } else if !should_auto_accept_with_2fa(unattended_enabled, true, twofa_enabled, code_valid) && !approve().await {
+        Some(reject_code::DENIED)
+    } else {
+        None
+    };
+    if let Some(code) = rejection {
+        // Tell the viewer explicitly why, so it stops retrying instead of
+        // reading the close as a transient drop.
+        send_rejection(&sender, &mut control_sealer, code).await;
         return Err(Box::new(SessionError("session rejected")));
     }
     let mut capturer = capture_factory().ok_or(SessionError(capture_unavailable_message()))?;
@@ -697,23 +721,42 @@ where
     let data_opener = Opener::new(data_recv_key);
     let (control_send_key, control_recv_key) = protocol::kex::derive_control_keys(&shared, false);
     let mut control_sealer = Sealer::new(control_send_key);
-    let control_opener = Opener::new(control_recv_key);
+    let mut control_opener = Opener::new(control_recv_key);
     if let Some(code) = auth_code {
         let body = Control::AuthCode { code }.to_bytes();
         sender.send_frame(Tag::Control, &control_sealer.seal(&[Tag::Control as u8], &body)).await.map_err(|error| error.to_string())?;
     }
-    let (ice_rx, session_control_rx) = split_session_control(control_rx, ice_session.to_owned());
+    let (ice_rx, mut session_control_rx) = split_session_control(control_rx, ice_session.to_owned());
+    // Open session control frames in one place (one opener, in order) and
+    // split an explicit host rejection (`Control::Error`) out of the stream so
+    // every phase below can react to it promptly.
+    let (control_plain_tx, control_plain_rx) = mpsc::channel::<Vec<u8>>(64);
+    let (rejected_tx, mut rejected_rx) = mpsc::channel::<String>(1);
+    let _control_demux = AbortOnDrop(tokio::spawn(async move {
+        while let Some(body) = session_control_rx.recv().await {
+            let Some(plaintext) = control_opener.open(&[Tag::Control as u8], &body) else { continue };
+            if let Some(Control::Error { code }) = Control::from_bytes(&plaintext) {
+                let _ = rejected_tx.send(code).await;
+                break;
+            }
+            if control_plain_tx.send(plaintext).await.is_err() { break; }
+        }
+    }));
 
     let signaling: RelayIceSignaling<S> = RelayIceSignaling::new(sender.clone(), ice_rx, ice_session);
     let relay: RelayTransport<S> = RelayTransport::new(sender.clone(), reliable.take_media_rx().ok_or_else(|| "media receiver unavailable".to_owned())?);
-    let transport = transport::establish(
+    let establish = transport::establish(
         VIEWER_ICE_CONTROLLING,
         signaling,
         relay,
         transport::default_agent_config(),
         Duration::from_secs(3),
-    )
-    .await;
+    );
+    let transport = tokio::select! {
+        biased;
+        Some(code) = rejected_rx.recv() => return Err(rejection_error(&code)),
+        transport = establish => transport,
+    };
     if let Some(ready) = data_ready {
         let _ = ready.send(DataHandle {
             sender: reliable.sender(),
@@ -726,7 +769,7 @@ where
     }
     let (transport_tx, transport_rx) = transport.into_split();
 
-    run_viewer_media_loop_with_control(transport_tx, transport_rx, frame_sink, input_rx, sealer, opener, session_control_rx, control_opener, monitor_sink, audio_sink).await
+    run_viewer_media_loop_with_control(transport_tx, transport_rx, frame_sink, input_rx, sealer, opener, control_plain_rx, rejected_rx, monitor_sink, audio_sink).await
 }
 
 #[allow(dead_code)]
@@ -739,7 +782,8 @@ async fn run_viewer_media_loop(
     opener: Opener,
 ) -> Result<(), String> {
     let (_tx, rx) = mpsc::channel(1);
-    run_viewer_media_loop_with_control(transport_tx, transport_rx, frame_sink, input_rx, sealer, opener, rx, Opener::new([0; 32]), None, None).await
+    let (_rejected_tx, rejected_rx) = mpsc::channel(1);
+    run_viewer_media_loop_with_control(transport_tx, transport_rx, frame_sink, input_rx, sealer, opener, rx, rejected_rx, None, None).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -751,21 +795,29 @@ async fn run_viewer_media_loop_with_control(
     mut sealer: Sealer,
     mut opener: Opener,
     mut control_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
-    mut control_opener: Opener,
+    mut rejected_rx: tokio::sync::mpsc::Receiver<String>,
     monitor_sink: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
     audio_sink: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
 ) -> Result<(), String> {
     loop {
         tokio::select! {
-            Some(body) = control_rx.recv() => {
-                if let Some(plaintext) = control_opener.open(&[Tag::Control as u8], &body) {
-                    if let Some(Control::MonitorList { .. }) = Control::from_bytes(&plaintext) {
-                        if let Some(sink) = &monitor_sink { let _ = sink.send(plaintext).await; }
-                    }
+            biased;
+            Some(code) = rejected_rx.recv() => return Err(rejection_error(&code)),
+            Some(plaintext) = control_rx.recv() => {
+                if let Some(Control::MonitorList { .. }) = Control::from_bytes(&plaintext) {
+                    if let Some(sink) = &monitor_sink { let _ = sink.send(plaintext).await; }
                 }
             },
             received = transport_rx.recv() => {
-                let Some((tag, sealed)) = received else { return Err("connection closed during session".into()) };
+                let Some((tag, sealed)) = received else {
+                    // The host's rejection and its close can race through
+                    // separate channels; prefer the explicit reason if it is
+                    // already on its way.
+                    if let Ok(Some(code)) = tokio::time::timeout(Duration::from_millis(300), rejected_rx.recv()).await {
+                        return Err(rejection_error(&code));
+                    }
+                    return Err("connection closed during session".into())
+                };
                 let Some(plaintext) = opener.open(&[tag as u8], &sealed) else { continue };
                 match tag {
                     Tag::Video => if frame_sink.send(plaintext).await.is_err() { return Err("viewer frame channel closed".into()) },

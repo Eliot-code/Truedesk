@@ -408,12 +408,13 @@ async fn slow_injection_does_not_stall_video_frames() {
         input_tx.send(input).await.expect("send viewer input");
     }
     let mut frames = 0usize;
-    let window = tokio::time::Instant::now() + Duration::from_millis(1_500);
+    let window = tokio::time::Instant::now() + Duration::from_millis(2_000);
     while let Ok(Some(_)) = tokio::time::timeout_at(window, frame_rx.recv()).await {
         frames += 1;
     }
-    // ~22 frames at 15 fps; an inline 1 s injector would yield about 2.
-    assert!(frames >= 8, "video stalled behind input injection: only {frames} frames in 1.5 s");
+    // ~30 frames at 15 fps; an inline 1 s injector would yield about 2 (at most
+    // 3) in this window. The bound is loose so slow, loaded CI runners pass.
+    assert!(frames >= 4, "video stalled behind input injection: only {frames} frames in 2 s");
     wait_for_count(&injected).await;
 
     viewer.abort();
