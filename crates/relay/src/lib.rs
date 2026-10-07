@@ -7,7 +7,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
-use registry::{Outbound, Registry};
+use registry::{CloseOutbound, Outbound, Registry};
 use session::Bridge;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -17,7 +17,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
-use tokio::sync::oneshot;
 use tokio::sync::watch;
 
 const DEFAULT_MAX_CONNECTIONS: usize = 10_000;
@@ -217,12 +216,18 @@ async fn handle(socket: WebSocket, state: RelayState, addr: SocketAddr, guard: O
     log_event("connection_open", addr, "accepted");
     let (mut sink, mut stream) = socket.split();
     let (my_tx, mut my_rx) = mpsc::channel::<Vec<u8>>(256);
-    let (close_tx, mut close_rx) = oneshot::channel::<CloseFrame<'static>>();
+    let (close_tx, close_rx) = watch::channel::<Option<CloseFrame<'static>>>(None);
+    let mut writer_close_rx = close_rx.clone();
     let writer = tokio::spawn(async move {
         loop {
             tokio::select! {
                 Some(bytes) = my_rx.recv() => { if sink.send(Message::Binary(bytes)).await.is_err() { break; } }
-                Ok(close) = &mut close_rx => { let _ = sink.send(Message::Close(Some(close))).await; break; }
+                result = writer_close_rx.changed() => {
+                    if result.is_err() { break; }
+                    let close = writer_close_rx.borrow().clone();
+                    if let Some(close) = close { let _ = tokio::time::timeout(Duration::from_secs(1), sink.send(Message::Close(Some(close)))).await; }
+                    break;
+                }
                 else => break,
             }
         }
@@ -240,23 +245,23 @@ async fn handle(socket: WebSocket, state: RelayState, addr: SocketAddr, guard: O
     let mut bytes = TokenBucket::new(state.config.byte_burst, state.config.bytes_per_sec);
     if !bytes.allow(first.len()) { writer.abort(); log_event("connection_rejected", addr, "byte_rate"); return; }
 
-    let bridge = session::classify(&first, my_tx.clone(), &state.registry, addr.ip(), state.config.ownership_grace);
-    let (peer_tx, registered_peer) = match bridge {
-        Ok(Bridge::ViewerPaired { host_tx, requester_id, target_id }) => {
+    let bridge = session::classify(&first, my_tx.clone(), close_tx.clone(), &state.registry, addr.ip(), state.config.ownership_grace);
+    let (peer_tx, peer_close_tx, registered_peer) = match bridge {
+        Ok(Bridge::ViewerPaired { host_tx, host_close_tx, requester_id, target_id }) => {
             let _ = host_tx.send(session::paired_frame("host", &requester_id)).await;
             let _ = my_tx.send(session::paired_frame("viewer", &target_id)).await;
             log_event("pairing_success", addr, "viewer");
-            (host_tx, None)
+            (host_tx, host_close_tx, None)
         }
         Ok(Bridge::HostRegistered { peer_id, notify_rx }) => {
             let peer = tokio::select! {
                 _ = shutdown.changed() => { state.registry.unregister(&peer_id, &my_tx); writer.abort(); log_event("connection_close", addr, "shutdown"); return; }
                 result = tokio::time::timeout(state.config.pair_timeout, notify_rx) => result.ok().and_then(Result::ok),
             };
-            let Some((peer, requester_id)) = peer else { state.registry.unregister(&peer_id, &my_tx); writer.abort(); log_event("pairing_failure", addr, "pair_timeout"); return; };
+            let Some((peer, peer_close_tx, requester_id)) = peer else { state.registry.unregister(&peer_id, &my_tx); writer.abort(); log_event("pairing_failure", addr, "pair_timeout"); return; };
             let _ = my_tx.send(session::paired_frame("host", &requester_id)).await;
             log_event("pairing_success", addr, "host");
-            (peer, Some(peer_id))
+            (peer, peer_close_tx, Some(peer_id))
         }
         Err(error) => {
             let reason = match error {
@@ -265,19 +270,22 @@ async fn handle(socket: WebSocket, state: RelayState, addr: SocketAddr, guard: O
                 session::ClassifyError::InvalidConnect => "invalid_connect",
                 session::ClassifyError::InvalidControl => "invalid_control",
             };
-            let _ = close_tx.send(CloseFrame { code: 1008, reason: Cow::Owned(reason.to_owned()) });
+            let _ = close_tx.send(Some(CloseFrame { code: 1008, reason: Cow::Owned(reason.to_owned()) }));
             log_event("pairing_failure", addr, reason); return;
         }
     };
-    forward_rest(&mut stream, peer_tx, &mut bytes, &mut signaling, &state, &mut shutdown, addr).await;
+    forward_rest(&mut stream, peer_tx, close_rx, &mut bytes, &mut signaling, &state, &mut shutdown, addr).await;
+    close_peer(&peer_close_tx);
     if let Some(peer_id) = registered_peer { state.registry.unregister(&peer_id, &my_tx); }
     writer.abort();
     log_event("connection_close", addr, "eof_or_timeout");
 }
 
-async fn forward_rest(stream: &mut futures_util::stream::SplitStream<WebSocket>, peer_tx: Outbound, bytes: &mut TokenBucket, signaling: &mut TokenBucket, state: &RelayState, shutdown: &mut watch::Receiver<bool>, addr: SocketAddr) {
+#[allow(clippy::too_many_arguments)]
+async fn forward_rest(stream: &mut futures_util::stream::SplitStream<WebSocket>, peer_tx: Outbound, mut close_rx: watch::Receiver<Option<CloseFrame<'static>>>, bytes: &mut TokenBucket, signaling: &mut TokenBucket, state: &RelayState, shutdown: &mut watch::Receiver<bool>, addr: SocketAddr) {
     loop {
         let next = tokio::select! {
+            _ = close_rx.changed() => break,
             _ = shutdown.changed() => break,
             result = tokio::time::timeout(state.config.idle_timeout, stream.next()) => match result { Ok(value) => value, Err(_) => { log_event("connection_close", addr, "idle_timeout"); break; } },
         };
@@ -292,6 +300,10 @@ async fn forward_rest(stream: &mut futures_util::stream::SplitStream<WebSocket>,
             if !queued { break; }
         }
     }
+}
+
+fn close_peer(peer_close_tx: &CloseOutbound) {
+    let _ = peer_close_tx.send(Some(CloseFrame { code: 1000, reason: Cow::Borrowed("peer disconnected") }));
 }
 
 fn log_event(event: &str, addr: SocketAddr, reason: &str) { eprintln!("[relay] event={event} remote={addr} reason={reason}"); }

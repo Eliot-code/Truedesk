@@ -1,16 +1,18 @@
+use axum::extract::ws::CloseFrame;
 use dashmap::{mapref::entry::Entry, DashMap};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
+use tokio::sync::{mpsc::Sender, watch};
 
 pub type Outbound = Sender<Vec<u8>>;
+pub type CloseOutbound = watch::Sender<Option<CloseFrame<'static>>>;
 
 /// Delivered to a parked host once a viewer takes its registration: the
 /// viewer's own sender, so the host can start forwarding its traffic there.
-pub type PeerNotify = oneshot::Sender<(Outbound, String)>;
+pub type PeerNotify = oneshot::Sender<(Outbound, CloseOutbound, String)>;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Registration {
@@ -28,7 +30,7 @@ pub struct Registry {
 struct RegistrationState {
     token: [u8; 32],
     owner_until: Instant,
-    parked: Option<(Outbound, PeerNotify)>,
+    parked: Option<(Outbound, CloseOutbound, PeerNotify)>,
     active: Option<Outbound>,
 }
 
@@ -51,27 +53,27 @@ impl Registry {
         Self { hosts: Arc::new(DashMap::new()), connect_limits: Arc::new(ConnectLimits::default()), ownership_grace: grace }
     }
 
-    pub fn register(&self, peer_id: String, token: [u8; 32], tx: Outbound, notify: PeerNotify, grace: Duration) -> Registration {
+    pub fn register(&self, peer_id: String, token: [u8; 32], tx: Outbound, close_tx: CloseOutbound, notify: PeerNotify, grace: Duration) -> Registration {
         let now = Instant::now();
         match self.hosts.entry(peer_id) {
             Entry::Occupied(mut existing) => {
                 if existing.get().owner_until > now && !constant_time_eq(&existing.get().token, &token) {
                     Registration::Rejected
                 } else {
-                    existing.insert(RegistrationState { token, owner_until: now + grace, parked: Some((tx, notify)), active: None });
+                    existing.insert(RegistrationState { token, owner_until: now + grace, parked: Some((tx, close_tx, notify)), active: None });
                     Registration::Accepted
                 }
             }
             Entry::Vacant(slot) => {
-                slot.insert(RegistrationState { token, owner_until: now + grace, parked: Some((tx, notify)), active: None });
+                slot.insert(RegistrationState { token, owner_until: now + grace, parked: Some((tx, close_tx, notify)), active: None });
                 Registration::Accepted
             }
         }
     }
-    pub fn take(&self, peer_id: &str) -> Option<(Outbound, PeerNotify)> {
+    pub fn take(&self, peer_id: &str) -> Option<(Outbound, CloseOutbound, PeerNotify)> {
         self.hosts.get_mut(peer_id).and_then(|mut entry| {
             let parked = entry.parked.take();
-            if let Some((tx, _)) = parked.as_ref() {
+            if let Some((tx, _, _)) = parked.as_ref() {
                 entry.active = Some(tx.clone());
                 entry.owner_until = Instant::now() + self.ownership_grace;
             }
@@ -81,7 +83,7 @@ impl Registry {
 
     pub fn unregister(&self, peer_id: &str, tx: &Outbound) {
         if let Entry::Occupied(mut entry) = self.hosts.entry(peer_id.to_owned()) {
-            let parked_matches = entry.get().parked.as_ref().is_some_and(|(current, _)| current.same_channel(tx));
+            let parked_matches = entry.get().parked.as_ref().is_some_and(|(current, _, _)| current.same_channel(tx));
             let active_matches = entry.get().active.as_ref().is_some_and(|current| current.same_channel(tx));
             if parked_matches || active_matches {
                 entry.get_mut().parked = None;
@@ -119,12 +121,13 @@ pub(crate) fn constant_time_eq(left: &[u8; 32], right: &[u8; 32]) -> bool {
 mod tests {
     use super::{Outbound, Registration, Registry};
     use std::time::Duration;
-    use tokio::sync::{mpsc, oneshot};
+    use tokio::sync::{mpsc, oneshot, watch};
 
     fn registration(registry: &Registry, id: &str, token: &str) -> (Registration, Outbound) {
         let (tx, _rx) = mpsc::channel(1);
+        let (close_tx, _close_rx) = watch::channel(None);
         let (notify, _wait) = oneshot::channel();
-        let result = registry.register(id.into(), token_from_byte(token), tx.clone(), notify, Duration::from_secs(60));
+        let result = registry.register(id.into(), token_from_byte(token), tx.clone(), close_tx, notify, Duration::from_secs(60));
         (result, tx)
     }
 
@@ -149,7 +152,7 @@ mod tests {
         let registry = Registry::default();
         let (_, original_tx) = registration(&registry, "123456789", "owner");
         assert_eq!(registration(&registry, "123456789", "attacker").0, Registration::Rejected);
-        let (stored_tx, _) = registry.take("123456789").unwrap();
+        let (stored_tx, _, _) = registry.take("123456789").unwrap();
         assert!(original_tx.same_channel(&stored_tx));
     }
 
@@ -165,12 +168,14 @@ mod tests {
     fn ownership_can_be_reclaimed_after_lease_expiry() {
         let registry = Registry::default();
         let (tx, _rx) = mpsc::channel(1);
+        let (close_tx, _close_rx) = watch::channel(None);
         let (notify, _wait) = oneshot::channel();
-        assert_eq!(registry.register("123456789".into(), [1; 32], tx, notify, Duration::from_millis(1)), Registration::Accepted);
+        assert_eq!(registry.register("123456789".into(), [1; 32], tx, close_tx, notify, Duration::from_millis(1)), Registration::Accepted);
         std::thread::sleep(Duration::from_millis(3));
         let (new_tx, _rx) = mpsc::channel(1);
+        let (new_close_tx, _new_close_rx) = watch::channel(None);
         let (new_notify, _wait) = oneshot::channel();
-        assert_eq!(registry.register("123456789".into(), [2; 32], new_tx, new_notify, Duration::from_secs(1)), Registration::Accepted);
+        assert_eq!(registry.register("123456789".into(), [2; 32], new_tx, new_close_tx, new_notify, Duration::from_secs(1)), Registration::Accepted);
     }
 
     #[test]
@@ -185,7 +190,7 @@ mod tests {
         let (_, old_tx) = registration(&registry, "123456789", "same");
         let (_, new_tx) = registration(&registry, "123456789", "same");
         registry.unregister("123456789", &old_tx);
-        let (stored_tx, _) = registry.take("123456789").unwrap();
+        let (stored_tx, _, _) = registry.take("123456789").unwrap();
         assert!(new_tx.same_channel(&stored_tx));
     }
 }

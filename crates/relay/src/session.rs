@@ -1,4 +1,4 @@
-use crate::registry::{Outbound, Registry};
+use crate::registry::{CloseOutbound, Outbound, Registry};
 use protocol::{control::Control, frame, Tag};
 use tokio::sync::oneshot;
 
@@ -40,15 +40,15 @@ fn hex_value(byte: u8) -> Option<u8> {
 pub enum Bridge {
     /// This connection is a host that just parked its sender. Resolves to
     /// the viewer's sender once a matching `connect` takes it.
-    HostRegistered { peer_id: String, notify_rx: oneshot::Receiver<(Outbound, String)> },
+    HostRegistered { peer_id: String, notify_rx: oneshot::Receiver<(Outbound, CloseOutbound, String)> },
     /// This connection is a viewer bridged to the given host sender.
-    ViewerPaired { host_tx: Outbound, requester_id: String, target_id: String },
+    ViewerPaired { host_tx: Outbound, host_close_tx: CloseOutbound, requester_id: String, target_id: String },
 }
 
 /// Reads the classification of the first frame. Returns `None` when the
 /// frame is not a valid Control frame, or a `connect` targets an unknown
 /// peer_id — either way the connection should be dropped.
-pub fn classify(msg: &[u8], me: Outbound, reg: &Registry, source: std::net::IpAddr, ownership_grace: std::time::Duration) -> Result<Bridge, ClassifyError> {
+pub fn classify(msg: &[u8], me: Outbound, me_close_tx: CloseOutbound, reg: &Registry, source: std::net::IpAddr, ownership_grace: std::time::Duration) -> Result<Bridge, ClassifyError> {
     let (tag, body) = frame::unwrap(msg).ok_or(ClassifyError::InvalidControl)?;
     if tag != Tag::Control { return Err(ClassifyError::InvalidControl); }
     match Control::from_bytes(body).ok_or(ClassifyError::InvalidControl)? {
@@ -56,7 +56,7 @@ pub fn classify(msg: &[u8], me: Outbound, reg: &Registry, source: std::net::IpAd
             let token = decode_token(&token).ok_or(ClassifyError::InvalidRegistration)?;
             if !valid_peer_id(&peer_id) || ver != SUPPORTED_VERSION { return Err(ClassifyError::InvalidRegistration); }
             let (notify_tx, notify_rx) = oneshot::channel();
-            if reg.register(peer_id.clone(), token, me, notify_tx, ownership_grace) == crate::registry::Registration::Rejected {
+            if reg.register(peer_id.clone(), token, me, me_close_tx, notify_tx, ownership_grace) == crate::registry::Registration::Rejected {
                 return Err(ClassifyError::InvalidRegistration);
             }
             Ok(Bridge::HostRegistered { peer_id, notify_rx })
@@ -64,9 +64,9 @@ pub fn classify(msg: &[u8], me: Outbound, reg: &Registry, source: std::net::IpAd
         Control::Connect { target, peer_id, ver } => {
             if !valid_peer_id(&target) || !valid_peer_id(&peer_id) || ver != SUPPORTED_VERSION { return Err(ClassifyError::InvalidConnect); }
             if !reg.allow_connect(source, &target) { return Err(ClassifyError::ConnectRateLimited); }
-            let (host_tx, notify) = reg.take(&target).ok_or(ClassifyError::InvalidConnect)?;
-            let _ = notify.send((me, peer_id.clone()));
-            Ok(Bridge::ViewerPaired { host_tx, requester_id: peer_id, target_id: target })
+            let (host_tx, host_close_tx, notify) = reg.take(&target).ok_or(ClassifyError::InvalidConnect)?;
+            let _ = notify.send((me, me_close_tx, peer_id.clone()));
+            Ok(Bridge::ViewerPaired { host_tx, host_close_tx, requester_id: peer_id, target_id: target })
         }
         _ => Err(ClassifyError::InvalidControl),
     }
