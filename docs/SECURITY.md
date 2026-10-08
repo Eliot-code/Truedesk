@@ -5,6 +5,18 @@ The relay is a forwarding service, not a trusted decryption service. This is
 an implementation description, not a certification or a guarantee against
 compromised endpoints.
 
+## Reporting a vulnerability
+
+Please do not open a public issue, discussion, or pull request for a security
+problem. Report it privately through GitHub's private vulnerability reporting:
+open the repository's **Security** tab and choose **Report a vulnerability**
+([direct link](https://github.com/treeot/opendesk/security/advisories/new)).
+
+Include the affected component (relay, host, viewer, or protocol), the version
+or commit, steps to reproduce, and the impact you expect. We will acknowledge
+the report, work on a fix in a private advisory, and credit you when the
+advisory is published unless you prefer otherwise.
+
 ## Key establishment and encryption
 
 1. The endpoints run an ephemeral SPAKE2 password-authenticated key exchange

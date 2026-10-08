@@ -39,5 +39,6 @@ Linux, and Windows.
 
 ## Security issues
 
-Please don't open a public issue for vulnerabilities. Contact the
-maintainers privately first so a fix can ship before details are public.
+Please don't open a public issue for vulnerabilities. Report them privately
+through GitHub's private vulnerability reporting; see
+[`docs/SECURITY.md`](docs/SECURITY.md#reporting-a-vulnerability).
