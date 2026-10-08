@@ -348,6 +348,17 @@ fn set_unattended_2fa(state: tauri::State<'_, AppState>, enabled: bool) -> Resul
         Ok(None)
     }
 }
+/// Unattended access skips the approval prompt, so its password is the only
+/// barrier against online guessing.
+const MIN_UNATTENDED_PASSWORD_LEN: usize = 8;
+
+fn validate_unattended_password(password: &str) -> Result<(), String> {
+    if password.chars().count() < MIN_UNATTENDED_PASSWORD_LEN {
+        return Err(format!("unattended access password must be at least {MIN_UNATTENDED_PASSWORD_LEN} characters"));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn set_unattended_access(
     state: tauri::State<'_, AppState>,
@@ -355,11 +366,11 @@ fn set_unattended_access(
     password: Option<String>,
 ) -> Result<(), String> {
     let mut state = state.lock();
-    let password = password.filter(|value| !value.is_empty());
-    if let Some(password) = password {
+    // A blank field keeps the stored password (the UI says "enter a new
+    // password to replace it"); disabling is how access is turned off.
+    if let Some(password) = password.filter(|value| !value.is_empty()) {
+        validate_unattended_password(&password)?;
         unattended::set_password(&password).map_err(|error| format!("could not store unattended access password: {error}"))?;
-    } else {
-        unattended::delete_password().map_err(|error| format!("could not clear unattended access password: {error}"))?;
     }
     let has_password = unattended::get_password().is_ok();
     if enabled && !has_password {
@@ -528,6 +539,21 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auth_backoff_grows_after_free_attempts_and_resets() {
+        let mut backoff = AuthBackoff::default();
+        let delays: Vec<u64> = (0..10).map(|_| backoff.after_session(false).as_secs()).collect();
+        assert_eq!(delays, [0, 0, 0, 2, 4, 8, 16, 32, 60, 60]);
+        assert_eq!(backoff.after_session(true), Duration::ZERO);
+        assert_eq!(backoff.after_session(false), Duration::ZERO);
+    }
+
+    #[test]
+    fn unattended_password_needs_minimum_length() {
+        assert!(validate_unattended_password("short").is_err());
+        assert!(validate_unattended_password("long enough").is_ok());
+    }
 
     #[test]
     fn send_input_enqueues_bytes() {

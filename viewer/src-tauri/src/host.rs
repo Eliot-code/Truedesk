@@ -152,8 +152,12 @@ pub(crate) async fn run_paired_host_session(
     pairing: host_core::relay_client::Pairing,
     params: HostSessionParams,
     stop_rx: &mut oneshot::Receiver<()>,
-) -> bool {
+) -> HostSessionEnd {
     let host_core::relay_client::Pairing { session: ice_session, peer_id } = pairing;
+    // Set once the viewer has passed the password (and 2FA) checks, which is
+    // when host-core asks for approval.
+    let authenticated = Arc::new(AtomicBool::new(false));
+    let authenticated_flag = authenticated.clone();
     let HostSessionParams { password, unattended_enabled, twofa_enabled, totp_secret } = params;
     let allowlisted = host_core::roles::should_auto_accept_allowlisted(
         app.state::<AppState>().lock().config.is_allowed(&peer_id),
@@ -162,6 +166,7 @@ pub(crate) async fn run_paired_host_session(
     let approve_app = app.clone();
     let (data_ready_tx, data_ready_rx) = oneshot::channel();
     let approve = move || async move {
+        authenticated_flag.store(true, Ordering::Relaxed);
         if allowlisted {
             emit(&approve_app, "status_changed", StatusEvent { state: "in_session" });
             emit(&approve_app, "session_started", SessionStarted { role: "host", remote_id: peer_id.clone() });
@@ -225,7 +230,40 @@ pub(crate) async fn run_paired_host_session(
         },
     );
     clear_data_channel(app);
-    result.is_none()
+    HostSessionEnd { stopped: result.is_none(), authenticated: authenticated.load(Ordering::Relaxed) }
+}
+
+pub(crate) struct HostSessionEnd {
+    /// The user stopped hosting; leave the hosting loop.
+    pub(crate) stopped: bool,
+    /// The viewer got past the password/2FA checks.
+    pub(crate) authenticated: bool,
+}
+
+/// Slows down password guessing against a host: after a few consecutive
+/// sessions that fail authentication, wait before accepting the next pairing
+/// (2 s, 4 s, ... up to 60 s). Any authenticated session resets it.
+#[derive(Default)]
+pub(crate) struct AuthBackoff {
+    consecutive_failures: u32,
+}
+
+impl AuthBackoff {
+    const FREE_ATTEMPTS: u32 = 3;
+    const MAX_DELAY: Duration = Duration::from_secs(60);
+
+    pub(crate) fn after_session(&mut self, authenticated: bool) -> Duration {
+        if authenticated {
+            self.consecutive_failures = 0;
+            return Duration::ZERO;
+        }
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        let over = self.consecutive_failures.saturating_sub(Self::FREE_ATTEMPTS);
+        if over == 0 {
+            return Duration::ZERO;
+        }
+        Duration::from_secs(1u64 << over.min(6)).min(Self::MAX_DELAY)
+    }
 }
 
 /// Each host session runs on this dedicated thread's current-thread runtime.
@@ -254,11 +292,21 @@ pub(crate) fn spawn_host_thread(
         };
         runtime.block_on(async {
             let mut next = first;
+            let mut backoff = AuthBackoff::default();
             loop {
                 let params = host_session_params(&mut app.state::<AppState>().lock());
                 let (ws, pairing) = next;
-                if run_paired_host_session(&app, ws, pairing, params, &mut stop_rx).await {
+                let ended = run_paired_host_session(&app, ws, pairing, params, &mut stop_rx).await;
+                if ended.stopped {
                     break;
+                }
+                let delay = backoff.after_session(ended.authenticated);
+                if !delay.is_zero() {
+                    log::warn!("repeated failed authentication; waiting {}s before accepting the next request", delay.as_secs());
+                    tokio::select! {
+                        _ = tokio::time::sleep(delay) => {}
+                        _ = &mut stop_rx => break,
+                    }
                 }
                 // Ended on its own (viewer left, network drop, rejection):
                 // go straight back to waiting rather than going offline.

@@ -18,13 +18,6 @@ pub fn get_password() -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
-pub fn delete_password() -> Result<(), String> {
-    Entry::new(SERVICE, USER)
-        .map_err(|error| error.to_string())?
-        .delete_credential()
-        .map_err(|error| error.to_string())
-}
-
 pub fn set_totp_secret(secret: &str) -> Result<(), String> {
     Entry::new(SERVICE, TOTP_USER).map_err(|error| error.to_string())?.set_password(secret).map_err(|error| error.to_string())
 }
