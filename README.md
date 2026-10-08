@@ -31,13 +31,13 @@ it is not a media relay and does not receive desktop contents.
 
 ## Features and quickstart
 
-- End-to-end encrypted screen, input, and microphone-audio payloads
+- End-to-end encrypted screen, input, and audio payloads
 - End-to-end encrypted file transfer and text-only clipboard sync
 - Optional unattended access with a stored password and optional TOTP two-factor code
 - Local address book and recent peer IDs
 - Multi-monitor discovery and monitor selection
 
-Audio currently means microphone/input capture, not system-loopback audio. Windows/Linux host support is still less mature than the macOS-tested path.
+Audio is the host's system sound on macOS 14.6+ and Windows, and its microphone elsewhere (Linux, older macOS). Windows/Linux host support is still less mature than the macOS-tested path.
 
 For the architecture, security model, and self-hosting instructions, see
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
@@ -81,7 +81,7 @@ OpenDesk is under active development. What works today:
 | Desktop UI / app shell (ID, connect, accept dialog, permissions) | ✅ |
 | File transfer with hashing and consent UI | ✅ |
 | Address book · unattended access · TOTP 2FA | ✅ |
-| Microphone audio (Opus, 48 kHz) · multi-monitor selection | ✅ |
+| System audio (Opus, 48 kHz; mic fallback) · multi-monitor selection | ✅ |
 
 > **Note:** screen capture is verified on macOS (Windows/Linux code-complete, not yet runtime-tested). Software H.264 for now; hardware encoders slot in behind a trait later. Release bundles are unsigned.
 
@@ -182,8 +182,8 @@ value is applied locally.
 - [x] Desktop app shell: ID display, connect screen, incoming-request accept dialog, permission onboarding, session toolbar
 - [x] Address book, unattended access, 2FA
 - [x] Clipboard sync, multi-monitor
-- [x] Microphone audio
-- [ ] System-loopback audio
+- [x] System audio (macOS 14.6+, Windows)
+- [ ] System audio on Linux (PipeWire monitor)
 - [ ] Hardware-accelerated encoders (VideoToolbox / NVENC / QSV)
 
 ## Contributing

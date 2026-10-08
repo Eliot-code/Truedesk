@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>OpenDesk sends this computer's sound to the person viewing it during a remote session.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>OpenDesk sends microphone audio to the viewer when system audio can't be captured.</string>
+</dict>
+</plist>

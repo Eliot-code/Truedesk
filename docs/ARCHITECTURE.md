@@ -3,7 +3,7 @@
 OpenDesk is a Rust remote-desktop system with a Tauri desktop client and a
 small self-hosted WebSocket relay. A session has two endpoints:
 
-- **Host:** captures the desktop, encodes video, captures microphone audio,
+- **Host:** captures the desktop, encodes video, captures system audio (microphone fallback),
   and applies remote input.
 - **Viewer:** displays the host desktop, sends mouse/keyboard input, and
   provides session controls.
@@ -76,7 +76,7 @@ same sealed protocol frames.
 
 | Function | Protocol path | Key space |
 | --- | --- | --- |
-| Screen video, microphone audio, and remote input | `Video`, `Audio`, and `Input` transport frames | Directional media keys |
+| Screen video, audio, and remote input | `Video`, `Audio`, and `Input` transport frames | Directional media keys |
 | File transfer and text clipboard sync | Reliable `Data` channel | Directional data keys |
 | Monitor list and monitor selection | Sealed `Control` payloads | Directional control keys |
 

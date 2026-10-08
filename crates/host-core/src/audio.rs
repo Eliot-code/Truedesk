@@ -8,55 +8,90 @@ const SAMPLE_RATE: u32 = 48_000;
 const FRAME_DURATION_MS: u16 = 20;
 const SAMPLES_PER_CHANNEL: usize = 960;
 
-/// Capture and packetize the default input as 48 kHz, 20 ms Opus. Devices at
-/// other rates (e.g. 44.1 kHz) or with more than two channels are converted by
-/// `PcmConverter`. The default input remains the safe fallback on platforms
-/// without system-audio loopback.
+/// Capture the host's audio as 48 kHz, 20 ms Opus. Prefers system output
+/// (what the host hears) and falls back to the default microphone where
+/// loopback isn't available: macOS before 14.6, Linux, or a failed tap.
+/// Devices at other rates or with more than two channels are converted by
+/// `PcmConverter`.
 pub fn spawn_capture() -> mpsc::Receiver<AudioFrame> {
     let (tx, rx) = mpsc::channel(8);
     std::thread::spawn(move || {
         let host = cpal::default_host();
-        let Some(device) = host.default_input_device() else { return };
-        let Ok(default_config) = device.default_input_config() else { return };
-        let config: cpal::StreamConfig = default_config.clone().into();
-        if config.channels == 0 { return; }
-        let converter = PcmConverter::new(config.sample_rate.0, usize::from(config.channels));
-        let error = |_error| {};
-        let stream = match default_config.sample_format() {
-            cpal::SampleFormat::I8 => build::<i8, _>(&device, &config, converter, tx.clone(), error),
-            cpal::SampleFormat::I16 => build::<i16, _>(&device, &config, converter, tx.clone(), error),
-            cpal::SampleFormat::I32 => build::<i32, _>(&device, &config, converter, tx.clone(), error),
-            cpal::SampleFormat::I64 => build::<i64, _>(&device, &config, converter, tx.clone(), error),
-            cpal::SampleFormat::U8 => build::<u8, _>(&device, &config, converter, tx.clone(), error),
-            cpal::SampleFormat::U16 => build::<u16, _>(&device, &config, converter, tx.clone(), error),
-            cpal::SampleFormat::U32 => build::<u32, _>(&device, &config, converter, tx.clone(), error),
-            cpal::SampleFormat::U64 => build::<u64, _>(&device, &config, converter, tx.clone(), error),
-            cpal::SampleFormat::F32 => build::<f32, _>(&device, &config, converter, tx.clone(), error),
-            cpal::SampleFormat::F64 => build::<f64, _>(&device, &config, converter, tx.clone(), error),
-            _ => return,
+        let Some(stream) = system_audio_stream(&host, &tx).or_else(|| microphone_stream(&host, &tx)) else {
+            log::warn!("audio capture unavailable: no usable output loopback or input device");
+            return;
         };
-        let Ok(stream) = stream else { return };
-        if stream.play().is_err() { return; }
         while !tx.is_closed() { std::thread::sleep(std::time::Duration::from_millis(250)); }
+        drop(stream);
     });
     rx
 }
 
+/// Loopback capture of the default output device. cpal implements this for
+/// an input stream built on an output device (CoreAudio tap on macOS 14.6+,
+/// WASAPI loopback on Windows).
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn system_audio_stream(host: &cpal::Host, tx: &mpsc::Sender<AudioFrame>) -> Option<cpal::Stream> {
+    let device = host.default_output_device()?;
+    let config = device.default_output_config().ok()?;
+    let stream = open_stream(&device, config, tx);
+    if stream.is_some() { log::info!("audio source: system output"); }
+    stream
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn system_audio_stream(_host: &cpal::Host, _tx: &mpsc::Sender<AudioFrame>) -> Option<cpal::Stream> {
+    None
+}
+
+fn microphone_stream(host: &cpal::Host, tx: &mpsc::Sender<AudioFrame>) -> Option<cpal::Stream> {
+    let device = host.default_input_device()?;
+    let config = device.default_input_config().ok()?;
+    let stream = open_stream(&device, config, tx);
+    if stream.is_some() { log::info!("audio source: microphone"); }
+    stream
+}
+
+fn open_stream(device: &cpal::Device, supported: cpal::SupportedStreamConfig,
+    tx: &mpsc::Sender<AudioFrame>) -> Option<cpal::Stream> {
+    let config: cpal::StreamConfig = supported.into();
+    if config.channels == 0 { return None; }
+    let converter = PcmConverter::new(config.sample_rate, usize::from(config.channels));
+    let error = |error: cpal::Error| log::warn!("audio stream error: {error}");
+    let tx = tx.clone();
+    let stream = match supported.sample_format() {
+        cpal::SampleFormat::I8 => build::<i8, _>(device, &config, converter, tx, error),
+        cpal::SampleFormat::I16 => build::<i16, _>(device, &config, converter, tx, error),
+        cpal::SampleFormat::I32 => build::<i32, _>(device, &config, converter, tx, error),
+        cpal::SampleFormat::I64 => build::<i64, _>(device, &config, converter, tx, error),
+        cpal::SampleFormat::U8 => build::<u8, _>(device, &config, converter, tx, error),
+        cpal::SampleFormat::U16 => build::<u16, _>(device, &config, converter, tx, error),
+        cpal::SampleFormat::U32 => build::<u32, _>(device, &config, converter, tx, error),
+        cpal::SampleFormat::U64 => build::<u64, _>(device, &config, converter, tx, error),
+        cpal::SampleFormat::F32 => build::<f32, _>(device, &config, converter, tx, error),
+        cpal::SampleFormat::F64 => build::<f64, _>(device, &config, converter, tx, error),
+        _ => return None,
+    };
+    let stream = stream.map_err(|error| log::debug!("audio stream build failed: {error}")).ok()?;
+    stream.play().ok()?;
+    Some(stream)
+}
+
 fn build<T, E>(device: &cpal::Device, config: &cpal::StreamConfig, mut converter: PcmConverter,
-    tx: mpsc::Sender<AudioFrame>, error: E) -> Result<cpal::Stream, cpal::BuildStreamError>
+    tx: mpsc::Sender<AudioFrame>, error: E) -> Result<cpal::Stream, cpal::Error>
 where
     T: cpal::Sample + cpal::SizedSample,
     i16: cpal::FromSample<T>,
-    E: FnMut(cpal::StreamError) + Send + 'static,
+    E: FnMut(cpal::Error) + Send + 'static,
 {
     let channels = converter.out_channels() as u8;
     let opus_channels = if channels == 1 { Channels::Mono } else { Channels::Stereo };
     let mut encoder = Encoder::new(SAMPLE_RATE, opus_channels, Application::Audio)
-        .map_err(|_| cpal::BuildStreamError::StreamConfigNotSupported)?;
+        .map_err(|error| cpal::Error::with_message(cpal::ErrorKind::BackendError, format!("opus encoder: {error}")))?;
     let frame_len = SAMPLES_PER_CHANNEL * usize::from(channels);
     let mut pending = Vec::<i16>::with_capacity(frame_len * 2);
     let mut raw = Vec::<i16>::new();
-    device.build_input_stream(config, move |data: &[T], _| {
+    device.build_input_stream(*config, move |data: &[T], _| {
         raw.clear();
         raw.extend(data.iter().map(|sample| i16::from_sample(*sample)));
         converter.push(&raw, &mut pending);

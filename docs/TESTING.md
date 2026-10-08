@@ -34,7 +34,7 @@ Run the relay where both machines can reach it, then point both apps at it
 | 4 | Copy text on each side | Clipboard syncs both ways (toggle on) |
 | 5 | Send a file both ways | Consent prompt, file arrives, size matches |
 | 6 | Switch monitor (if host has 2+) | Stream switches |
-| 7 | Speak near host mic | Viewer hears it; mute works. Try a 44.1 kHz mic too |
+| 7 | Play a video/song on the host | Viewer hears it; mute works. macOS asks for System Audio Recording once. On Linux or macOS < 14.6, speak near the host mic instead |
 | 8 | Wrong password | Rejected, viewer does **not** retry |
 | 9 | Quit host app mid-session | Viewer shows reconnecting, gives up after ~30 s |
 | 10 | Kill host network for 10 s, restore | Viewer reconnects; host re-registers |

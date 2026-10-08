@@ -31,7 +31,7 @@ advisory is published unless you prefer otherwise.
    nonce sequences in separate key spaces. Authentication failures discard the
    payload.
 
-The media key space carries screen video, microphone audio, and remote input.
+The media key space carries screen video, audio, and remote input.
 File and clipboard messages use the reliable Data channel and its separate
 keys. Monitor control messages use the separate Control keys. The relay
 fallback and direct UDP path carry the same sealed payloads.
@@ -60,7 +60,7 @@ even when TLS is enabled at the edge.
 
 The relay does not receive the SPAKE2-derived keys. Assuming the endpoints and
 their password are not compromised, it cannot read or create authenticated
-session payloads, including screen frames, remote input, microphone audio,
+session payloads, including screen frames, remote input, audio,
 file contents, clipboard text, or sealed monitor-control payloads. It can
 forward those bytes, or refuse to forward them, but the relay code does not
 open their AEAD ciphertext.
@@ -97,10 +97,10 @@ identifiers, not as a certificate-backed identity.
 - TLS certificate validation and reverse-proxy configuration still matter for
   transport security. TLS does not replace the inner E2EE layer.
 - There is no implemented two-factor authentication.
-- Unattended passwords are stored as configuration data rather than in a
-  dedicated secret store.
-- Audio currently captures the default microphone/input device; it is not
-  system-loopback audio.
+- The unattended password (and TOTP secret) live in the OS keychain, so
+  anyone who can unlock the host's user account can read them.
+- Host audio is the system output on macOS 14.6+ and Windows; elsewhere it
+  falls back to the default microphone.
 - Windows and Linux host support is not equally mature or fully runtime-tested
   across all capture, permission, and input-injection environments.
 - The current implementation is under active development. Review the source,
