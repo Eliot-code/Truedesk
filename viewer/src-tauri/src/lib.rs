@@ -1572,6 +1572,10 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
+            // Debug builds only: a second instance with its own identity, for
+            // host+viewer testing on one machine (see docs/TESTING.md).
+            #[cfg(debug_assertions)]
+            let app_data_dir = std::env::var_os("OPENDESK_DATA_DIR").map(PathBuf::from).unwrap_or(app_data_dir);
             let config = ConfigStore::load(&app_data_dir)?;
             let contacts = ContactStore::load(&app_data_dir)?;
             app.manage(AppState(Mutex::new(RuntimeState {
