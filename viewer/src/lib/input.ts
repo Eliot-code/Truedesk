@@ -123,7 +123,11 @@ function isModifierKey(key: string): boolean {
   return key === "Shift" || key === "Control" || key === "Alt" || key === "Meta";
 }
 
-/** Capture canvas input and send raw InputEvent bytes in FIFO order. */
+/**
+ * Capture canvas input and send raw InputEvent bytes in FIFO order. Mouse
+ * moves that queue up while the backend is busy collapse into the latest
+ * position, but never past a click, scroll, or key event.
+ */
 export function attachInput(
   canvas: HTMLCanvasElement,
   send: (bytes: Uint8Array) => Promise<void>,
@@ -131,18 +135,38 @@ export function attachInput(
   if (canvas.tabIndex < 0) canvas.tabIndex = 0;
 
   let sendChain = Promise.resolve();
-  const enqueue = (event: InputEvent): void => {
-    const bytes = encodeInputEvent(event, timestampUs());
+  // The queued, not-yet-sent move; later moves overwrite it in place.
+  let pendingMove: { event: InputEvent; tsUs: number } | null = null;
+  const chain = (next: () => Promise<void>): void => {
     sendChain = sendChain
-      .then(() => send(bytes))
+      .then(next)
       .catch((error: unknown) => {
         console.error("Failed to send input event", error);
       });
   };
+  const enqueue = (event: InputEvent): void => {
+    pendingMove = null;
+    const bytes = encodeInputEvent(event, timestampUs());
+    chain(() => send(bytes));
+  };
+
+  const enqueueMove = (event: InputEvent): void => {
+    if (pendingMove) {
+      pendingMove.event = event;
+      pendingMove.tsUs = timestampUs();
+      return;
+    }
+    const slot = { event, tsUs: timestampUs() };
+    pendingMove = slot;
+    chain(() => {
+      if (pendingMove === slot) pendingMove = null;
+      return send(encodeInputEvent(slot.event, slot.tsUs));
+    });
+  };
 
   const onMouseMove = (event: MouseEvent): void => {
     const rect = canvas.getBoundingClientRect();
-    enqueue({
+    enqueueMove({
       kind: "mouseMove",
       x: normalizedCoordinate(event.clientX, rect.left, rect.width),
       y: normalizedCoordinate(event.clientY, rect.top, rect.height),

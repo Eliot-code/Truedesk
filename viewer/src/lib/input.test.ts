@@ -69,4 +69,51 @@ describe("attachInput", () => {
     expect(new DataView(bytes.buffer).getUint32(9)).toBe("!".codePointAt(0));
     expect(bytes[14]).toBe(0b0011);
   });
+  describe("mouse-move coalescing", () => {
+    const setup = () => {
+      const listeners = new Map<string, EventListener>();
+      const canvas = {
+        tabIndex: 0,
+        addEventListener: (type: string, listener: EventListener) => listeners.set(type, listener),
+        removeEventListener: () => {},
+        focus: () => {},
+        getBoundingClientRect: () => ({ left: 0, top: 0, width: 65535, height: 65535 }),
+      } as unknown as HTMLCanvasElement;
+      const sent: string[] = [];
+      let release!: () => void;
+      const blocked = new Promise<void>((resolve) => { release = resolve; });
+      const send = (bytes: Uint8Array) => {
+        const view = new DataView(bytes.buffer);
+        sent.push(bytes[0] === 1 ? `move ${view.getInt32(9)}` : bytes[0] === 2 ? `button ${bytes[10] ? "down" : "up"}` : `other ${bytes[0]}`);
+        return sent.length === 1 ? blocked : Promise.resolve();
+      };
+      attachInput(canvas, send);
+      const move = (x: number) => listeners.get("mousemove")!({ clientX: x, clientY: 0 } as MouseEvent);
+      const down = () => listeners.get("mousedown")!({ button: 0 } as MouseEvent);
+      const flush = async () => { release(); await new Promise((resolve) => setTimeout(resolve, 0)); };
+      return { sent, move, down, flush };
+    };
+
+    it("sends only the latest move while the backend is busy", async () => {
+      const { sent, move, flush } = setup();
+      move(1);
+      await Promise.resolve();
+      for (let x = 2; x <= 50; x += 1) move(x);
+      await flush();
+      expect(sent).toEqual(["move 1", "move 50"]);
+    });
+
+    it("never moves a later position ahead of a click", async () => {
+      const { sent, move, down, flush } = setup();
+      move(1);
+      await Promise.resolve();
+      move(2);
+      move(3);
+      down();
+      move(4);
+      move(5);
+      await flush();
+      expect(sent).toEqual(["move 1", "move 3", "button down", "move 5"]);
+    });
+  });
 });
