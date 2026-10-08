@@ -8,7 +8,11 @@ version = 2
 yanked = "warn"
 # Add specific RustSec IDs here (with a comment) only for an unavoidable
 # transitive advisory that has no fixed upgrade path yet.
-ignore = []
+ignore = [
+    # audiopus_sys (via opus 0.3) is unmaintained; no maintained replacement
+    # yet. Its CMake 4 break is worked around with CMAKE_POLICY_VERSION_MINIMUM.
+    { id = "RUSTSEC-2026-0150", reason = "no fixed upgrade; tracked for replacement" },
+]
 
 [licenses]
 version = 2
@@ -28,6 +32,10 @@ allow = [
     "BSL-1.0",
 ]
 confidence-threshold = 0.9
+
+# Our own crates are unpublished and the project license is still TBD.
+[licenses.private]
+ignore = true
 
 [bans]
 # Warn (don't fail) on duplicate versions and wildcard deps. The capture crate

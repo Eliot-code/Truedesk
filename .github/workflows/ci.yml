@@ -75,6 +75,9 @@ jobs:
   # needs a real desktop session.
   host-core-cross:
     name: host-core (${{ matrix.os }})
+    # audiopus_sys's bundled opus CMakeLists predates CMake 4 (RUSTSEC-2026-0150).
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -88,13 +91,16 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libopus-dev libasound2-dev libxdo-dev
+          sudo apt-get install -y libopus-dev libasound2-dev libxdo-dev libpipewire-0.3-dev libspa-0.2-dev libdbus-1-dev clang
       # Windows: audiopus_sys builds libopus from source via CMake (preinstalled
-      # on windows-latest); enigo/scap use the Windows crate, no extra deps.
+      # on windows-latest; see env above); enigo/scap need no extra deps.
       - run: cargo check -p protocol -p relay -p host-core
 
   tauri-cross:
     name: tauri backend (${{ matrix.os }})
+    # audiopus_sys's bundled opus CMakeLists predates CMake 4 (RUSTSEC-2026-0150).
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -110,7 +116,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libxdo-dev libopus-dev libasound2-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libxdo-dev libopus-dev libasound2-dev libpipewire-0.3-dev libspa-0.2-dev libdbus-1-dev clang
       - run: cargo check --manifest-path viewer/src-tauri/Cargo.toml
 
   cargo-deny:
