@@ -1,10 +1,13 @@
 name: CI
 
+# Docs-only changes don't need a build.
 on:
   push:
     branches: [main]
+    paths-ignore: ["**.md", "docs/**", "LICENSE", ".env.example"]
   pull_request:
     branches: [main]
+    paths-ignore: ["**.md", "docs/**", "LICENSE", ".env.example"]
 
 permissions:
   contents: read

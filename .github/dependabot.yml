@@ -1,21 +1,26 @@
-# Weekly update PRs, so dependency changes are reviewed instead of silent.
+# Monthly, one grouped PR per ecosystem, so updates are reviewed without
+# flooding CI. Security fixes still arrive as soon as an advisory is published.
 version: 2
 updates:
   - package-ecosystem: cargo
-    directory: /
-    schedule: { interval: weekly }
-    open-pull-requests-limit: 5
-  - package-ecosystem: cargo
-    directory: /viewer/src-tauri
-    schedule: { interval: weekly }
-    open-pull-requests-limit: 5
+    directories: [/, /viewer/src-tauri]
+    schedule: { interval: monthly }
+    open-pull-requests-limit: 1
+    groups:
+      cargo: { patterns: ["*"] }
   - package-ecosystem: npm
     directory: /viewer
-    schedule: { interval: weekly }
-    open-pull-requests-limit: 5
+    schedule: { interval: monthly }
+    open-pull-requests-limit: 1
+    groups:
+      npm: { patterns: ["*"] }
   - package-ecosystem: github-actions
     directory: /
-    schedule: { interval: weekly }
+    schedule: { interval: monthly }
+    open-pull-requests-limit: 1
+    groups:
+      actions: { patterns: ["*"] }
   - package-ecosystem: docker
     directory: /crates/relay
-    schedule: { interval: weekly }
+    schedule: { interval: monthly }
+    open-pull-requests-limit: 1
