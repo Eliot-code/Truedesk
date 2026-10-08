@@ -33,11 +33,11 @@ it is not a media relay and does not receive desktop contents.
 
 - End-to-end encrypted screen, input, and microphone-audio payloads
 - End-to-end encrypted file transfer and text-only clipboard sync
-- Optional unattended access with a stored password
+- Optional unattended access with a stored password and optional TOTP two-factor code
 - Local address book and recent peer IDs
 - Multi-monitor discovery and monitor selection
 
-Audio currently means microphone/input capture, not system-loopback audio. Two-factor authentication is not implemented, and Windows/Linux host support is still less mature than the macOS-tested path.
+Audio currently means microphone/input capture, not system-loopback audio. Windows/Linux host support is still less mature than the macOS-tested path.
 
 For the architecture, security model, and self-hosting instructions, see
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
@@ -74,12 +74,13 @@ OpenDesk is under active development. What works today:
 | Password-authenticated key exchange (SPAKE2) | ✅ |
 | Clipboard sync (text-only, E2E encrypted) | ✅ |
 | Screen capture + H.264 encode (macOS/Windows/Linux via `scap` + `openh264`) | ✅ |
-| Remote input: mouse and keyboard (via `enigo`) | 🚧 in progress |
-| Desktop UI / app shell (ID, connect, accept dialog, permissions) | 🗺️ planned |
-| File-transfer protocol, hashing, consent UI, and backend adapters | 🚧 staged; relay session wiring pending |
-| Address book · unattended access · 2FA | 🗺️ planned |
+| Remote input: mouse and keyboard (via `enigo`) | ✅ |
+| Desktop UI / app shell (ID, connect, accept dialog, permissions) | ✅ |
+| File transfer with hashing and consent UI | ✅ |
+| Address book · unattended access · TOTP 2FA | ✅ |
+| Microphone audio (Opus, 48 kHz) · multi-monitor selection | ✅ |
 
-> **PoC note:** connection ID and password are currently hard-coded defaults; screen capture is verified on macOS (Windows/Linux code-complete, not yet runtime-tested). Software H.264 for now; hardware encoders slot in behind a trait later.
+> **Note:** screen capture is verified on macOS (Windows/Linux code-complete, not yet runtime-tested). Software H.264 for now; hardware encoders slot in behind a trait later. Release bundles are unsigned.
 
 ## Architecture
 
@@ -174,12 +175,13 @@ value is applied locally.
 
 ## Roadmap
 
-- [ ] Remote input injection (in progress)
-- [ ] Desktop app shell: ID display, connect screen, incoming-request accept dialog, permission onboarding, session toolbar
+- [x] Remote input injection
+- [x] Desktop app shell: ID display, connect screen, incoming-request accept dialog, permission onboarding, session toolbar
+- [x] Address book, unattended access, 2FA
+- [x] Clipboard sync, multi-monitor
+- [x] Microphone audio
+- [ ] System-loopback audio
 - [ ] Hardware-accelerated encoders (VideoToolbox / NVENC / QSV)
-- [ ] Address book, unattended access, 2FA
-- [ ] Clipboard sync, multi-monitor
-- [ ] Audio
 
 ## Contributing
 

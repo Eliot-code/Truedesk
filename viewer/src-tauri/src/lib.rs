@@ -36,8 +36,9 @@ struct RuntimeState {
     clipboard_thread: Option<ClipboardThread>,
 }
 
-/// The host session owns Enigo, which is not `Send`. Keep the session and its
-/// current-thread Tokio runtime together on a dedicated OS thread. The stop
+/// Each host session runs with its own current-thread Tokio runtime on a
+/// dedicated OS thread (input injection has its own thread inside host-core;
+/// see `roles.rs`). The stop
 /// signal is separate so Tauri commands can shut it down without aborting a
 /// task that may be running non-`Send` code. The thread is the hosting loop
 /// (see `spawn_host_thread`): it re-registers after each session until the
@@ -1036,8 +1037,8 @@ async fn run_paired_host_session(
     result.is_none()
 }
 
-/// The host session owns Enigo (not `Send`), so each session runs on this
-/// dedicated thread's current-thread runtime. The thread is the hosting loop:
+/// Each host session runs on this dedicated thread's current-thread runtime.
+/// The thread is the hosting loop:
 /// after a session ends on its own it re-registers with the relay under the
 /// same ID/token and waits for the next pairing, so a dropped viewer can
 /// reconnect. Only the stop signal (stop_hosting/disconnect) or losing
