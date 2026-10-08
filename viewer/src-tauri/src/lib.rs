@@ -1929,13 +1929,14 @@ mod tests {
             });
             let guard = AbortOnDrop::new(task);
             started_rx.await.unwrap();
-            tokio::task::yield_now().await;
-            let ticks_at_drop = ticks.load(Ordering::Relaxed);
             drop(guard);
-            for _ in 0..3 {
-                tokio::task::yield_now().await;
-            }
-            assert_eq!(ticks.load(Ordering::Relaxed), ticks_at_drop);
+            // The task runs on Tauri's multi-threaded runtime, so it may tick
+            // once more while the abort lands. Let it settle, then it must
+            // stay stopped.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let ticks_after_abort = ticks.load(Ordering::Relaxed);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert_eq!(ticks.load(Ordering::Relaxed), ticks_after_abort);
         });
     }
 }
