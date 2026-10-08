@@ -1,0 +1,43 @@
+# Contributing to OpenDesk
+
+Thanks for helping out! Issues and pull requests are welcome.
+
+## Getting started
+
+1. Fork the repo and create a branch from `main`.
+2. Read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and
+   [`docs/SECURITY.md`](docs/SECURITY.md) before touching the protocol,
+   crypto, or relay.
+3. Keep changes small and focused, one concern per pull request.
+
+## Development
+
+- Rust workspace: `crates/protocol`, `crates/relay`, `crates/host-core`.
+- Desktop app: `viewer/` (React) and `viewer/src-tauri/` (Tauri backend; it is
+  **not** part of the Cargo workspace, so build it with its own manifest).
+- Linux builds need `libpipewire-0.3-dev`, `libspa-0.2-dev`, `libopus-dev`,
+  `libasound2-dev`, `libxdo-dev`, and `clang`. macOS needs `brew install opus`.
+
+## Before opening a pull request
+
+```sh
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --manifest-path viewer/src-tauri/Cargo.toml --all-targets -- -D warnings
+cd viewer && npm ci && npx vitest run && npm run build
+```
+
+Add or update tests for behavior changes. CI runs these checks on macOS,
+Linux, and Windows.
+
+## Commit messages
+
+- Short and imperative, one line, under ~60 characters:
+  `fix(relay): close surviving peer`.
+- Optional prefix: `feat`, `fix`, `docs`, `ci`, `chore`, `refactor`, `test`, `perf`.
+- Add a body only when the *why* isn't obvious from the diff. Keep it brief.
+
+## Security issues
+
+Please don't open a public issue for vulnerabilities. Contact the
+maintainers privately first so a fix can ship before details are public.
