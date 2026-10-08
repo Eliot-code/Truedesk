@@ -27,8 +27,8 @@ export default function Session({ remoteId, role, onDisconnect }: SessionProps) 
   const audioRef = useRef<{ context: AudioContext; nextTime: number } | undefined>(undefined);
   const recorderRef = useRef<MediaRecorder | undefined>(undefined);
   const recordingStreamRef = useRef<MediaStream | undefined>(undefined);
-  const recordingChunksRef = useRef<Blob[]>([]);
   const [recordingActive, setRecordingActive] = useState(false);
+  const recordingStartingRef = useRef(false);
   const [recordingElapsed, setRecordingElapsed] = useState(0);
   const recordingStartedAtRef = useRef<number | undefined>(undefined);
   const [monitors, setMonitors] = useState<api.MonitorInfo[]>([]);
@@ -69,7 +69,7 @@ export default function Session({ remoteId, role, onDisconnect }: SessionProps) 
     recordingStreamRef.current = undefined;
   };
 
-  const toggleRecording = () => {
+  const toggleRecording = async () => {
     if (role !== "viewer") return;
     if (recordingActive) {
       stopRecording();
@@ -78,29 +78,37 @@ export default function Session({ remoteId, role, onDisconnect }: SessionProps) 
 
     const canvas = canvasRef.current;
     if (!canvas?.captureStream || typeof MediaRecorder === "undefined") return;
+    if (recordingStartingRef.current) return;
+    recordingStartingRef.current = true;
+    let id: number;
+    try { id = await api.startRecording(`opendesk-session-${new Date().toISOString()}.webm`); }
+    catch { return; }
+    finally { recordingStartingRef.current = false; }
     try {
       const stream = canvas.captureStream(60);
       const recorder = new MediaRecorder(stream, { mimeType: "video/webm" });
-      recordingChunksRef.current = [];
       recordingStreamRef.current = stream;
       recorderRef.current = recorder;
+      // Chain writes so chunks land on disk in order; each is dropped from
+      // memory once written.
+      let writes = Promise.resolve();
       recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) recordingChunksRef.current.push(event.data);
+        if (event.data.size === 0) return;
+        writes = writes.then(() => event.data.arrayBuffer()).then((chunk) => api.appendRecording(id, chunk));
       };
       recorder.onstop = () => {
-        const blob = new Blob(recordingChunksRef.current, { type: "video/webm" });
-        recordingChunksRef.current = [];
-        void blob.arrayBuffer().then((buffer) => api.saveRecording(new Uint8Array(buffer), `opendesk-session-${new Date().toISOString()}.webm`)).catch(() => {});
+        void writes.catch(() => {}).then(() => api.finishRecording(id)).catch(() => {});
         recorderRef.current = undefined;
       };
       recordingStartedAtRef.current = Date.now();
       setRecordingElapsed(0);
       setRecordingActive(true);
-      recorder.start();
+      recorder.start(1000);
     } catch {
       recordingStreamRef.current?.getTracks().forEach((track) => track.stop());
       recordingStreamRef.current = undefined;
       recorderRef.current = undefined;
+      void api.finishRecording(id).catch(() => {});
     }
   };
 

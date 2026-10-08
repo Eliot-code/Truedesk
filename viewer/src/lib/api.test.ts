@@ -29,6 +29,16 @@ describe("api invoke payload keys (camelCase contract)", () => {
     expect(invoke).toHaveBeenCalledWith("send_input", { bytes: [1, 2, 255] });
   });
 
+  it("appendRecording sends the chunk as base64", async () => {
+    await api.appendRecording(7, new Uint8Array([0, 1, 254, 255]).buffer);
+    expect(invoke).toHaveBeenCalledWith("append_recording", { id: 7, chunk: "AAH+/w==" });
+  });
+
+  it("startRecording passes suggestedName", async () => {
+    await api.startRecording("s.webm");
+    expect(invoke).toHaveBeenCalledWith("start_recording", { suggestedName: "s.webm" });
+  });
+
   it("onVideoFrame listens to the backend event", async () => {
     const handler = vi.fn();
     await api.onVideoFrame(handler);

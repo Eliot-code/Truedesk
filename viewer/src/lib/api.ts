@@ -58,7 +58,17 @@ export const setClipboardSync = (enabled: boolean) => invoke<void>("set_clipboar
 export const setAudioMuted = (muted: boolean) => invoke<void>("set_audio_muted", { muted });
 export const sendFile = (path: string) => invoke<number>("send_file", { path });
 export const respondFile = (id: number, accept: boolean) => invoke<void>("respond_file", { id, accept });
-export const saveRecording = (bytes: Uint8Array, suggestedName: string) => invoke<string>("save_recording", { bytes: Array.from(bytes), suggestedName });
+// Recordings stream to disk in chunks (base64, like frame events) so long
+// sessions are never held in memory.
+export const startRecording = (suggestedName: string) => invoke<number>("start_recording", { suggestedName });
+export const appendRecording = (id: number, chunk: ArrayBuffer) => invoke<void>("append_recording", { id, chunk: toBase64(new Uint8Array(chunk)) });
+export const finishRecording = (id: number) => invoke<string>("finish_recording", { id });
+
+function toBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(binary);
+}
 
 const on = <T>(event: string, handler: (payload: T) => void): Promise<UnlistenFn> => listen<T>(event, ({ payload }) => handler(payload));
 export const onStatusChanged = (handler: (payload: StatusChanged) => void) => on("status_changed", handler);

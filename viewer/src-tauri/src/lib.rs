@@ -262,16 +262,12 @@ pub(crate) fn downloads_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("Downloads"))
 }
 
-/// Maximum size accepted for a recording returned by the viewer UI.
+/// Maximum size of one session recording on disk.
 const MAX_RECORDING_SIZE: usize = 2 * 1024 * 1024 * 1024;
 
 #[allow(dead_code)]
 fn recording_path(suggested_name: &str) -> PathBuf {
     downloads_dir().join(sanitize_recording_name(suggested_name))
-}
-
-fn validate_recording_size(bytes: &[u8]) -> Result<(), String> {
-    validate_recording_size_len(bytes.len())
 }
 
 fn validate_recording_size_len(size: usize) -> Result<(), String> {
@@ -825,38 +821,100 @@ fn respond_file(
     )
 }
 
-#[tauri::command]
-fn save_recording(bytes: Vec<u8>, suggested_name: String) -> Result<String, String> {
-    validate_recording_size(&bytes)?;
+/// A recording streamed to disk chunk by chunk, so long sessions never sit in
+/// memory. The file is opened create-new (never follows an existing symlink
+/// or overwrites a file) and capped at `MAX_RECORDING_SIZE`.
+struct RecordingSink {
+    file: fs::File,
+    path: PathBuf,
+    written: usize,
+}
+
+impl RecordingSink {
+    fn create(directory: &Path, suggested_name: &str) -> Result<Self, String> {
+        let mut path = next_recording_path(directory, suggested_name)?;
+        let file = loop {
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(file) => break file,
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    // A competing writer won the name race; choose another name
+                    // and retain create-new semantics so no file is clobbered.
+                    path = next_recording_path(directory, suggested_name)?;
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+        };
+        if !file.metadata().map_err(|error| error.to_string())?.is_file() {
+            return Err("recording target is not a regular file".into());
+        }
+        Ok(Self { file, path, written: 0 })
+    }
+
+    fn append(&mut self, bytes: &[u8]) -> Result<(), String> {
+        let total = self.written.checked_add(bytes.len()).ok_or("recording size overflow")?;
+        validate_recording_size_len(total)?;
+        io::Write::write_all(&mut self.file, bytes).map_err(|error| error.to_string())?;
+        self.written = total;
+        Ok(())
+    }
+
+    fn finish(self) -> Result<PathBuf, String> {
+        self.file.sync_all().map_err(|error| error.to_string())?;
+        Ok(self.path)
+    }
+}
+
+/// Recordings in progress, keyed by the id handed to the viewer UI.
+#[derive(Default)]
+struct Recordings {
+    next_id: std::sync::atomic::AtomicU32,
+    sinks: Mutex<HashMap<u32, RecordingSink>>,
+}
+
+impl Recordings {
+    fn sinks(&self) -> std::sync::MutexGuard<'_, HashMap<u32, RecordingSink>> {
+        self.sinks.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+fn recordings_dir() -> Result<PathBuf, String> {
     let directory = downloads_dir();
     fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-    let directory_metadata = fs::symlink_metadata(&directory).map_err(|error| error.to_string())?;
-    if directory_metadata.file_type().is_symlink() || !directory_metadata.is_dir() {
+    let metadata = fs::symlink_metadata(&directory).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err("recording Downloads path must be a regular directory".into());
     }
-    let directory = fs::canonicalize(&directory).map_err(|error| error.to_string())?;
-    let mut path = next_recording_path(&directory, &suggested_name)?;
-    let mut file = loop {
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(file) => break file,
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                // A competing writer won the name race; choose another name
-                // and retain create-new semantics so no file is clobbered.
-                path = next_recording_path(&directory, &suggested_name)?;
-            }
-            Err(error) => return Err(error.to_string()),
-        }
-    };
-    io::Write::write_all(&mut file, &bytes).map_err(|error| error.to_string())?;
-    let metadata = file
-        .metadata()
-        .map_err(|error| error.to_string())?;
-    if !metadata.is_file() {
-        return Err("recording target is not a regular file".into());
+    fs::canonicalize(&directory).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn start_recording(recordings: tauri::State<'_, Recordings>, suggested_name: String) -> Result<u32, String> {
+    let sink = RecordingSink::create(&recordings_dir()?, &suggested_name)?;
+    let id = recordings.next_id.fetch_add(1, Ordering::Relaxed);
+    recordings.sinks().insert(id, sink);
+    Ok(id)
+}
+
+/// `chunk` is base64, like the frame events, to keep large payloads off the
+/// JSON number-array path.
+#[tauri::command]
+fn append_recording(recordings: tauri::State<'_, Recordings>, id: u32, chunk: String) -> Result<(), String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(chunk).map_err(|error| error.to_string())?;
+    let mut sinks = recordings.sinks();
+    let sink = sinks.get_mut(&id).ok_or("unknown recording")?;
+    if let Err(error) = sink.append(&bytes) {
+        // Keep what was written so far; stop accepting more for this id.
+        if let Some(sink) = sinks.remove(&id) { let _ = sink.finish(); }
+        return Err(error);
     }
-    // The file was opened with `create_new`, which never follows an existing
-    // symlink or overwrites an existing file.
-    Ok(path.to_string_lossy().into_owned())
+    Ok(())
+}
+
+#[tauri::command]
+fn finish_recording(recordings: tauri::State<'_, Recordings>, id: u32) -> Result<String, String> {
+    let sink = recordings.sinks().remove(&id).ok_or("unknown recording")?;
+    Ok(sink.finish()?.to_string_lossy().into_owned())
 }
 
 /// Per-session host credentials and policy. Read fresh for every pairing so a
@@ -1567,6 +1625,7 @@ fn disconnect(state: tauri::State<'_, AppState>, app: AppHandle) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .manage(Recordings::default())
         .setup(|app| {
             let app_data_dir = app
                 .path()
@@ -1628,7 +1687,9 @@ pub fn run() {
             set_audio_muted,
             send_file,
             respond_file,
-            save_recording,
+            start_recording,
+            append_recording,
+            finish_recording,
             set_relays,
             list_relays
         ])
@@ -1718,6 +1779,33 @@ mod tests {
         assert!(validate_recording_size_len(MAX_RECORDING_SIZE).is_ok());
         let error = validate_recording_size_len(MAX_RECORDING_SIZE + 1).unwrap_err();
         assert!(error.contains("maximum size"));
+    }
+
+    #[test]
+    fn recording_sink_streams_chunks_to_disk() {
+        let directory = std::env::temp_dir().join(format!("opendesk-recording-sink-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+
+        let mut sink = RecordingSink::create(&directory, "session").unwrap();
+        sink.append(b"abc").unwrap();
+        sink.append(b"def").unwrap();
+        let path = sink.finish().unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"abcdef");
+        assert_eq!(path.file_name().and_then(|name| name.to_str()), Some("session.webm"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recording_sink_enforces_size_cap_across_chunks() {
+        let directory = std::env::temp_dir().join(format!("opendesk-recording-cap-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+
+        let mut sink = RecordingSink::create(&directory, "capped").unwrap();
+        sink.written = MAX_RECORDING_SIZE - 2;
+        assert!(sink.append(b"ab").is_ok());
+        assert!(sink.append(b"c").unwrap_err().contains("maximum size"));
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
