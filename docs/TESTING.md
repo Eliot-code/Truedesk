@@ -43,4 +43,10 @@ Run the relay where both machines can reach it, then point both apps at it
 
 macOS asks for **Screen Recording** and **Accessibility** permission the first
 time; restart the app after granting them. Note OS versions and any failing
-step number when reporting issues.
+step number when reporting issues, and attach the app log:
+
+- macOS: `~/Library/Logs/com.opendesk.app/`
+- Windows: `%LOCALAPPDATA%\com.opendesk.app\logs\`
+- Linux: `~/.local/share/com.opendesk.app/logs/`
+
+The relay logs to stderr; set `RUST_LOG=debug` for more detail.

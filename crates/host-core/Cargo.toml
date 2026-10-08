@@ -21,6 +21,7 @@ totp-lite = "2"
 cpal = "0.15"
 opus = "0.3"
 arboard = "3.6.1"
+log = "0.4"
 
 [dev-dependencies]
 relay = { path = "../relay" }

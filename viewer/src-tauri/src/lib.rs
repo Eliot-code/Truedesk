@@ -501,7 +501,15 @@ fn dispatch_data(
     file_rx
 }
 
+/// Lifecycle events that also go to the log file, so a bug report can include
+/// what happened. Media and progress events are too frequent to log.
+const LOGGED_EVENTS: &[&str] = &["status_changed", "session_started", "session_ended", "incoming_request", "error", "file_error"];
+
 fn emit<T: Serialize + Clone>(app: &AppHandle, event: &str, payload: T) {
+    if LOGGED_EVENTS.contains(&event) {
+        let details = serde_json::to_string(&payload).unwrap_or_default();
+        if event.ends_with("error") { log::warn!("{event} {details}"); } else { log::info!("{event} {details}"); }
+    }
     let _ = app.emit(event, payload);
 }
 
@@ -1625,6 +1633,18 @@ fn disconnect(state: tauri::State<'_, AppState>, app: AppHandle) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        // Stdout plus a rotating file in the OS log dir (macOS:
+        // ~/Library/Logs/com.opendesk.app/) for bug reports.
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .level(log::LevelFilter::Info)
+                // ICE logs every candidate check at info; keep only problems.
+                .level_for("webrtc_ice", log::LevelFilter::Warn)
+                .level_for("webrtc_util", log::LevelFilter::Warn)
+                .max_file_size(5 * 1024 * 1024)
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepOne)
+                .build(),
+        )
         .manage(Recordings::default())
         .setup(|app| {
             let app_data_dir = app

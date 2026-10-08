@@ -38,6 +38,8 @@ tokio-tungstenite = "0.24"
 futures-util = "0.3"
 async-trait = "0.1"
 opus = "0.3"
+log = "0.4"
+tauri-plugin-log = "2"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

@@ -28,8 +28,8 @@ impl ContactStore {
                 Ok(contacts) => contacts,
                 Err(error) => {
                     let backup = crate::config::backup_corrupt_file(&path)?;
-                    eprintln!(
-                        "Warning: could not parse contacts file ({error}); backed it up to {}",
+                    log::warn!(
+                        "could not parse contacts file ({error}); backed it up to {}",
                         backup.display()
                     );
                     Vec::new()

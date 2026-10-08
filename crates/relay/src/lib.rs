@@ -306,7 +306,7 @@ fn close_peer(peer_close_tx: &CloseOutbound) {
     let _ = peer_close_tx.send(Some(CloseFrame { code: 1000, reason: Cow::Borrowed("peer disconnected") }));
 }
 
-fn log_event(event: &str, addr: SocketAddr, reason: &str) { eprintln!("[relay] event={event} remote={addr} reason={reason}"); }
+fn log_event(event: &str, addr: SocketAddr, reason: &str) { log::info!("event={event} remote={addr} reason={reason}"); }
 
 pub async fn spawn_test_server() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

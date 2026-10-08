@@ -847,14 +847,13 @@ fn capture_unavailable_message() -> &'static str {
 
 #[cfg(target_os = "macos")]
 fn report_input_unavailable() {
-    eprintln!("Input injection unavailable: macOS Accessibility permission is required. Grant it in System Settings, then restart the host.");
-    eprintln!("Open Accessibility settings: x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility");
+    log::warn!("input injection unavailable: macOS Accessibility permission is required; grant it in System Settings (x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility), then restart the host");
 }
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 fn report_input_unavailable() {
     // Enigo is backed by SendInput on Windows and XTest/uinput on Linux.
-    eprintln!("Input injection unavailable: the platform input backend could not be initialized.");
+    log::warn!("input injection unavailable: the platform input backend could not be initialized");
 }
 
 /// Build the production injector. Called on the injection thread, so the

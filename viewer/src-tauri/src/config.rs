@@ -69,8 +69,8 @@ impl ConfigStore {
                 Ok(config) => config,
                 Err(error) => {
                     let backup = backup_corrupt_file(&path)?;
-                    eprintln!(
-                        "Warning: could not parse config file ({error}); backed it up to {}",
+                    log::warn!(
+                        "could not parse config file ({error}); backed it up to {}",
                         backup.display()
                     );
                     Config::default()
@@ -169,7 +169,7 @@ pub fn is_insecure_remote_relay(url: &str) -> bool {
 fn warn_for_insecure_relays(config: &Config) {
     for relay in std::iter::once(&config.relay_url).chain(config.relay_urls.iter()) {
         if is_insecure_remote_relay(relay) {
-            eprintln!("Warning: insecure remote relay configured: {relay}");
+            log::warn!("insecure remote relay configured: {relay}");
         }
     }
 }

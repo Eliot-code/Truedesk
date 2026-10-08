@@ -100,11 +100,11 @@ where
 {
     match establish_ice(agent_config, controlling, signaling, deadline).await {
         IceOutcome::Nominated(conn) => {
-            eprintln!("INFO transport selected: direct");
+            log::info!("transport selected: direct");
             AnyTransport::Direct(DirectTransport::new(conn))
         }
         IceOutcome::TimedOut => {
-            eprintln!("INFO transport selected: relay (ICE timeout)");
+            log::info!("transport selected: relay (ICE timeout)");
             AnyTransport::Relay(Box::new(relay_fallback))
         }
     }
