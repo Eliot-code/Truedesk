@@ -15,3 +15,7 @@ and Windows (see `docs/RELEASE.md`).
 
 Linux jobs are pinned to `ubuntu-24.04` so a runner image change can't
 silently rename the apt packages they install.
+
+Supply chain: third-party actions are pinned to commit SHAs (the tag is in a
+comment), cargo runs with `--locked`, `deny.toml` allows only crates.io
+sources, and Dependabot (`.github/dependabot.yml`) proposes updates as PRs.

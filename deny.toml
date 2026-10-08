@@ -8,11 +8,7 @@ version = 2
 yanked = "warn"
 # Add specific RustSec IDs here (with a comment) only for an unavoidable
 # transitive advisory that has no fixed upgrade path yet.
-ignore = [
-    # audiopus_sys (via opus 0.3) is unmaintained; no maintained replacement
-    # yet. Its CMake 4 break is worked around with CMAKE_POLICY_VERSION_MINIMUM.
-    { id = "RUSTSEC-2026-0150", reason = "no fixed upgrade; tracked for replacement" },
-]
+ignore = []
 
 [licenses]
 version = 2
@@ -46,4 +42,5 @@ wildcards = "warn"
 
 [sources]
 unknown-registry = "deny"
-unknown-git = "warn"
+# Only crates.io: no git or third-party registries.
+unknown-git = "deny"

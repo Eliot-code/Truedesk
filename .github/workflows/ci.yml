@@ -14,50 +14,51 @@ jobs:
     name: Rust protocol and relay
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
+          toolchain: stable
           components: clippy,rustfmt
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo build -p protocol -p relay
-      - run: cargo test -p protocol -p relay
-      - run: cargo clippy -p protocol -p relay --all-targets -- -D warnings
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo build --locked -p protocol -p relay
+      - run: cargo test --locked -p protocol -p relay
+      - run: cargo clippy --locked -p protocol -p relay --all-targets -- -D warnings
 
   host-core:
     name: Rust host-core
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
+          toolchain: stable
           components: clippy,rustfmt
-      - uses: Swatinem/rust-cache@v2
-      - run: brew install opus
-      - run: cargo build -p host-core
-      - run: cargo test -p host-core
-      - run: cargo clippy -p host-core --all-targets -- -D warnings
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo build --locked -p host-core
+      - run: cargo test --locked -p host-core
+      - run: cargo clippy --locked -p host-core --all-targets -- -D warnings
 
   tauri:
     name: Tauri Rust crate
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
+          toolchain: stable
           components: clippy,rustfmt
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: viewer/src-tauri -> viewer/src-tauri/target
-      - run: brew install opus
-      - run: cargo check --manifest-path viewer/src-tauri/Cargo.toml
-      - run: cargo clippy --manifest-path viewer/src-tauri/Cargo.toml --all-targets -- -D warnings
+      - run: cargo check --locked --manifest-path viewer/src-tauri/Cargo.toml
+      - run: cargo clippy --locked --manifest-path viewer/src-tauri/Cargo.toml --all-targets -- -D warnings
 
   viewer:
     name: Viewer
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: npm
@@ -75,55 +76,52 @@ jobs:
   # needs a real desktop session.
   host-core-cross:
     name: host-core (${{ matrix.os }})
-    # audiopus_sys's bundled opus CMakeLists predates CMake 4 (RUSTSEC-2026-0150).
-    env:
-      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, windows-latest]
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Linux audio/input deps
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libopus-dev libasound2-dev libxdo-dev libpipewire-0.3-dev libspa-0.2-dev libdbus-1-dev clang
-      # Windows: audiopus_sys builds libopus from source via CMake (preinstalled
-      # on windows-latest; see env above); enigo/scap need no extra deps.
-      - run: cargo check -p protocol -p relay -p host-core
+          sudo apt-get install -y libasound2-dev libxdo-dev libpipewire-0.3-dev libspa-0.2-dev libdbus-1-dev clang
+      # libopus is built from source by opusic-sys (CMake is preinstalled).
+      - run: cargo check --locked -p protocol -p relay -p host-core
 
   tauri-cross:
     name: tauri backend (${{ matrix.os }})
-    # audiopus_sys's bundled opus CMakeLists predates CMake 4 (RUSTSEC-2026-0150).
-    env:
-      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, windows-latest]
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: viewer/src-tauri -> viewer/src-tauri/target
       - name: Linux Tauri + audio deps
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libxdo-dev libopus-dev libasound2-dev libpipewire-0.3-dev libspa-0.2-dev libdbus-1-dev clang
-      - run: cargo check --manifest-path viewer/src-tauri/Cargo.toml
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libxdo-dev libasound2-dev libpipewire-0.3-dev libspa-0.2-dev libdbus-1-dev clang
+      - run: cargo check --locked --manifest-path viewer/src-tauri/Cargo.toml
 
   cargo-deny:
     name: Supply-chain (cargo-deny)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check advisories bans licenses sources

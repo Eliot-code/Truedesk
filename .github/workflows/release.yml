@@ -12,9 +12,6 @@ jobs:
   build:
     name: Build unsigned ${{ matrix.os }} bundle
     runs-on: ${{ matrix.os }}
-    # audiopus_sys's bundled opus CMakeLists predates CMake 4 (RUSTSEC-2026-0150).
-    env:
-      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
     strategy:
       fail-fast: false
       matrix:
@@ -24,10 +21,12 @@ jobs:
           - windows-latest
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@v7
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: npm
@@ -45,18 +44,13 @@ jobs:
             patchelf \
             libssl-dev \
             libxdo-dev \
-            libopus-dev \
             libasound2-dev \
             libpipewire-0.3-dev \
             libspa-0.2-dev \
             libdbus-1-dev \
             clang
 
-      - name: Install macOS audio dependency (libopus for the opus crate)
-        if: runner.os == 'macOS'
-        run: brew install opus
-      # Windows: audiopus_sys builds libopus from source via CMake (present on
-      # windows-latest); no extra install step is needed.
+      # libopus is built from source by opusic-sys (CMake is preinstalled).
 
       - name: Install frontend dependencies
         working-directory: viewer
@@ -69,7 +63,7 @@ jobs:
         run: npm run tauri build
 
       - name: Upload unsigned bundles
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: opendesk-${{ runner.os }}-unsigned
           path: viewer/src-tauri/target/release/bundle/**
@@ -81,14 +75,14 @@ jobs:
     needs: build
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: release-artifacts
 
       # Release assets remain unsigned; users may need to bypass Gatekeeper,
       # SmartScreen, or Linux desktop trust prompts when launching them.
       - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ github.ref_name }}
           generate_release_notes: true

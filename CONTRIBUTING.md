@@ -15,8 +15,9 @@ Thanks for helping out! Issues and pull requests are welcome.
 - Rust workspace: `crates/protocol`, `crates/relay`, `crates/host-core`.
 - Desktop app: `viewer/` (React) and `viewer/src-tauri/` (Tauri backend; it is
   **not** part of the Cargo workspace, so build it with its own manifest).
-- Linux builds need `libpipewire-0.3-dev`, `libspa-0.2-dev`, `libopus-dev`,
-  `libasound2-dev`, `libxdo-dev`, and `clang`. macOS needs `brew install opus`.
+- Builds need CMake (libopus is compiled from source). Linux also needs
+  `libpipewire-0.3-dev`, `libspa-0.2-dev`, `libasound2-dev`, `libxdo-dev`, and
+  `clang`.
 
 ## Before opening a pull request
 
