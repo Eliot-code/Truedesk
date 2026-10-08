@@ -1,10 +1,17 @@
 # OpenDesk CI
 
-The workflow keeps platform-sensitive checks separate and independent:
+`ci.yml` runs on every push and pull request to `main`:
 
-- `rust` runs the cross-platform `protocol` and `relay` build, tests, and clippy on Ubuntu.
-- `host-core` runs the macOS-dependent host build, live loopback tests, and clippy on macOS.
-- `tauri` checks and lints the standalone `viewer/src-tauri` manifest on macOS.
-- `viewer` installs the locked Node 20 dependencies and runs the Vite build and Vitest suite on Ubuntu.
+- `rust`: `protocol` and `relay` build, tests, and clippy on Ubuntu.
+- `host-core`: host build, loopback tests, and clippy on macOS.
+- `tauri`: check and clippy for `viewer/src-tauri` (its own manifest) on macOS.
+- `viewer`: Vite build and Vitest suite on Ubuntu (Node 24).
+- `host-core-cross` / `tauri-cross`: compile checks for the Windows and Linux
+  host code, which macOS never builds.
+- `cargo-deny`: advisories, licenses, bans, and sources.
 
-The scoped `cargo fmt --check -p protocol -p relay` was tested locally but currently reports existing formatting differences. It is intentionally not a CI step because this task must not modify Rust source files; the Rust clippy checks remain enabled with warnings denied.
+`release.yml` runs on `v*` tags and builds unsigned bundles for macOS, Linux,
+and Windows (see `docs/RELEASE.md`).
+
+Linux jobs are pinned to `ubuntu-24.04` so a runner image change can't
+silently rename the apt packages they install.
