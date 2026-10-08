@@ -1,0 +1,35 @@
+# One-command relay with automatic HTTPS (Let's Encrypt via Caddy).
+#   1. Point a DNS A/AAAA record (e.g. relay.example.com) at this server.
+#   2. Open ports 80 and 443.
+#   3. DOMAIN=relay.example.com docker compose up -d
+# Clients then use: wss://relay.example.com/ws
+services:
+  relay:
+    build:
+      context: .
+      dockerfile: crates/relay/Dockerfile
+    image: opendesk-relay
+    restart: unless-stopped
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+    expose:
+      - "8080"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - relay
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN to the relay hostname, e.g. relay.example.com}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

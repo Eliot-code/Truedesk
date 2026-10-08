@@ -1,21 +1,21 @@
-# OpenDesk relay — single-HTTP-port server for reverse-proxy platforms (Coolify, etc).
-# The platform terminates TLS on 443 and proxies to this container's PORT.
+# OpenDesk relay: one HTTP port (WebSocket at /ws, health at /health).
+# Put a TLS proxy in front (see compose.yaml + deploy/Caddyfile, or Coolify).
 
-# --- build ---
-FROM rust:1-slim AS build
+# Build and runtime share a Debian release so the binary's glibc matches.
+FROM rust:1-slim-trixie AS build
 WORKDIR /src
 COPY . .
-RUN cargo build --release -p relay
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release --locked -p relay \
+ && cp target/release/relay /relay
 
-# --- runtime ---
-FROM debian:bookworm-slim
-RUN useradd -m -u 10001 relay
-COPY --from=build /src/target/release/relay /usr/local/bin/relay
+FROM debian:trixie-slim
+RUN useradd --system --uid 10001 relay
+COPY --from=build /relay /usr/local/bin/relay
 USER relay
 
-# The platform injects $PORT; default 8080. Only ONE HTTP port is exposed —
-# all traffic (WebSocket over HTTP upgrade) rides this single port.
-ENV PORT=8080
+# Platforms like Coolify inject $PORT; default 8080.
+ENV PORT=8080 RUST_LOG=info
 EXPOSE 8080
-
 CMD ["relay"]

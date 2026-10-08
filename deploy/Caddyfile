@@ -1,0 +1,5 @@
+# Caddy gets and renews the TLS certificate for $DOMAIN automatically and
+# passes WebSocket upgrades through to the relay.
+{$DOMAIN} {
+	reverse_proxy relay:8080
+}

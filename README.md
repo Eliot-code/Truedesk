@@ -46,7 +46,10 @@ For the architecture, security model, and self-hosting instructions, see
 
 Quickstart:
 
-1. Deploy the relay and configure clients with its `wss://.../ws` URL.
+1. Deploy the relay on any server with Docker and a DNS name:
+   `DOMAIN=relay.example.com docker compose up -d` (automatic HTTPS; see
+   [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)). Set clients to
+   `wss://relay.example.com/ws`.
 2. Start hosting on the host device and note its nine-digit peer ID.
 3. From the viewer, enter that ID and the matching session password, then
    approve the request on the host unless unattended access is enabled.

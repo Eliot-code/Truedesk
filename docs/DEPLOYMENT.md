@@ -1,66 +1,65 @@
 # Relay deployment
 
-This guide deploys the OpenDesk relay as one HTTP service. The relay itself
-serves a WebSocket endpoint at `/ws`; it does not terminate TLS. Put it behind
-Coolify, Caddy, Traefik, or another reverse proxy that provides HTTPS and
-WebSocket upgrades.
+The relay is one stateless HTTP service: a WebSocket endpoint at `/ws` and a
+health check at `/health`. It does not terminate TLS itself; the Compose setup
+below puts Caddy in front for automatic HTTPS.
 
 ## Requirements
 
-- a host reachable by the clients;
-- a public DNS name, such as `relay.example.com`;
-- TLS at the reverse proxy, so clients can use `wss://`; and
-- one exposed application port.
+- a server reachable by the clients (any VPS; amd64 or arm64);
+- a DNS name pointing at it, such as `relay.example.com`; and
+- ports 80 and 443 open (80 is only used for the certificate challenge).
 
-No separate relay media port is required. Direct UDP is attempted between
-clients, but the relay fallback and all signaling share the one HTTP port.
+Clients need no open ports. Direct UDP is attempted between clients; the
+relay fallback and all signaling share the one HTTPS port.
 
-## Coolify / Docker deployment
+## Docker Compose (recommended)
 
-The repository includes [`crates/relay/Dockerfile`](../crates/relay/Dockerfile).
-Create a Coolify application from this repository and set its build context to
-the repository root. Use that Dockerfile and configure the application to
-listen on the container port `8080`.
+The repo's `compose.yaml` runs the relay behind Caddy, which gets and renews a
+Let's Encrypt certificate automatically.
 
-Coolify normally injects `PORT`; the binary reads it and binds to
-`0.0.0.0:$PORT`. If the platform does not inject it, set:
-
-```text
-PORT=8080
+```sh
+git clone https://github.com/treeot/opendesk.git
+cd opendesk
+DOMAIN=relay.example.com docker compose up -d
 ```
 
-Expose only the platform's public HTTPS route. Configure the route for
-WebSocket upgrades and point `relay.example.com` at it. Coolify should
-terminate TLS and proxy the public `wss://relay.example.com/ws` request to the
-container's `http://relay:8080/ws` endpoint.
+Or copy `.env.example` to `.env`, set `DOMAIN`, and run `docker compose up -d`.
+Check it with `curl https://relay.example.com/health`, then set each client's
+relay to:
 
-## Minimal steps
+```text
+wss://relay.example.com/ws
+```
 
-1. Create the DNS record for the relay hostname.
-2. Create a Coolify application from this repository and select
-   `crates/relay/Dockerfile`.
-3. Set the application port to `8080` (or use the value supplied through
-   `PORT`).
-4. Enable HTTPS for the hostname and confirm that WebSocket upgrades are
-   allowed.
-5. Deploy and test the endpoint with a WebSocket-capable client at
-   `wss://relay.example.com/ws`.
-6. In each OpenDesk client, set its relay URL to the complete WebSocket URL,
-   including `/ws`, for example:
+Update with `git pull && docker compose up -d --build`. Logs:
+`docker compose logs -f relay` (set `RUST_LOG=debug` in `.env` for more).
 
-   ```text
-   wss://relay.example.com/ws
-   ```
+## Prebuilt image
 
-   The viewer stores this setting locally and uses it for both hosting and
-   connecting. The default development value is `ws://127.0.0.1:8080/ws`.
-7. Start hosting on one device, then connect to its nine-digit peer ID from
-   another device using the session password.
+CI publishes `ghcr.io/treeot/opendesk-relay` (`latest` and version tags from
+releases, `edge` from `main`). Run it behind your own TLS proxy:
 
-The viewer exposes the relay setting through its Tauri `set_relay` command;
-the UI surface for changing that setting may vary while the application is in
-development. A local development relay can be run with `cargo run -p relay`
-and reached at `ws://127.0.0.1:8080/ws`.
+```sh
+docker run -d --restart unless-stopped -p 8080:8080 ghcr.io/treeot/opendesk-relay:latest
+```
+
+Forward `wss://` on 443 to the container's port 8080; WebSocket upgrades pass
+through unchanged.
+
+## Coolify
+
+1. Create an application from this repository, build pack **Dockerfile**,
+   path `crates/relay/Dockerfile`, build context the repository root.
+2. Set the domain (e.g. `relay.example.com`). Coolify provisions TLS and
+   injects `PORT`, which the relay binds automatically (default 8080).
+3. Deploy, then point clients at `wss://relay.example.com/ws`.
+
+## Clients
+
+In the app's home screen, **Relay regions** takes one WebSocket URL per line,
+including `/ws`; clients try them in order. The default development value is
+`ws://127.0.0.1:8080/ws` (`cargo run -p relay`).
 
 ## STUN
 
