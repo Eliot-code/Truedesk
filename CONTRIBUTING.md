@@ -37,6 +37,11 @@ Linux, and Windows.
 - Optional prefix: `feat`, `fix`, `docs`, `ci`, `chore`, `refactor`, `test`, `perf`.
 - Add a body only when the *why* isn't obvious from the diff. Keep it brief.
 
+## License
+
+OpenDesk is licensed under [AGPL-3.0-only](LICENSE). By submitting a pull
+request, you agree that your contribution is licensed under the same terms.
+
 ## Security issues
 
 Please don't open a public issue for vulnerabilities. Report them privately

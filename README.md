@@ -189,4 +189,8 @@ Issues and PRs welcome. The codebase favors small, focused crates and test-drive
 
 ## License
 
-TBD. Intended to be an open-source license (AGPL/GPL or MIT/Apache), to be finalized.
+[GNU Affero General Public License v3.0](LICENSE) (`AGPL-3.0-only`).
+
+You can use, modify, and self-host OpenDesk freely. If you distribute a
+modified version, or run one that others use over a network (for example a
+modified relay), you must make your source available under the same license.

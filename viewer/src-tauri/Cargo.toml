@@ -5,6 +5,7 @@
 name = "viewer"
 version = "0.1.0"
 publish = false
+license = "AGPL-3.0-only"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
