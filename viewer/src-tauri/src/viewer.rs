@@ -1,0 +1,336 @@
+//! Viewer: connecting to a host, input, monitor selection, and 2FA codes.
+
+use super::*;
+
+pub(crate) fn can_reserve_viewer_slot(viewer_task_reserved: bool, viewer_stop_reserved: bool) -> bool {
+    !viewer_task_reserved && !viewer_stop_reserved
+}
+
+pub(crate) fn enqueue_input(sender: Option<mpsc::Sender<Vec<u8>>>, bytes: Vec<u8>) -> Result<(), String> {
+    sender
+        .ok_or_else(|| "no active viewer session".to_string())?
+        .try_send(bytes)
+        .map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => "viewer input queue is full".into(),
+            mpsc::error::TrySendError::Closed(_) => "viewer session is closed".into(),
+        })
+}
+
+#[tauri::command]
+pub(crate) fn connect(
+    state: tauri::State<'_, AppState>,
+    app: AppHandle,
+    target_id: String,
+    password: String,
+    auth_code: Option<String>,
+) -> Result<(), String> {
+    if target_id.len() != 9 || !target_id.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("target ID must be 9 digits".into());
+    }
+    state
+        .lock()
+        .config
+        .add_recent(&target_id)
+        .map_err(|e| e.to_string())?;
+    // A contact is only touched when it already exists; the regular recent-ID
+    // history above continues to cover connections made without saving one.
+    let touch_result = state.lock().contacts.touch(&target_id);
+    if let Err(error) = touch_result {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Err(error.to_string());
+        }
+    }
+    emit(
+        &app,
+        "status_changed",
+        StatusEvent {
+            state: "connecting",
+        },
+    );
+    let (relay_urls, viewer_id) = {
+        let mut state = state.lock();
+        (state.config.config.relay_urls.clone(), state.config.ensure_identity())
+    };
+    let target = target_id.clone();
+    let task_app = app.clone();
+    let viewer_stop = Arc::new(AtomicBool::new(false));
+    {
+        let mut runtime_state = state.lock();
+        if !can_reserve_viewer_slot(
+            runtime_state.viewer_task.is_some(),
+            runtime_state.viewer_stop.is_some(),
+        ) {
+            return Err("viewer session is already active".into());
+        }
+        // Reserve the slot before spawning. `viewer_stop` is the reservation
+        // marker while the JoinHandle is being created and installed.
+        runtime_state.viewer_stop = Some(viewer_stop.clone());
+    }
+    let task_viewer_stop = viewer_stop.clone();
+    let mut task = Some(tauri::async_runtime::spawn(async move {
+        let result = async {
+            // Retry state for the current outage: attempts so far and when the
+            // outage began. Reset once an attempt actually streams media, so
+            // every drop of a working session gets a full reconnect window.
+            let mut reconnect_attempt = 0;
+            let mut outage_started: Option<Instant> = None;
+            let mut session_started = false;
+            loop {
+                if task_viewer_stop.load(Ordering::Relaxed) { break Ok(()); }
+                emit(&task_app, "status_changed", StatusEvent { state: "connecting" });
+                // Set once this attempt streams video; only used to restart the
+                // reconnect window, never to infer an auth failure.
+                let media_received = Arc::new(AtomicBool::new(false));
+                // Clone per attempt: each iteration moves these into the session
+                // task, so the originals must survive for the next reconnect.
+                let password = password.clone();
+                let auth_code = auth_code.clone();
+                let attempt_result = async {
+            let (_, mut ws) = host_core::relay_client::connect_best(&relay_urls).await?;
+            host_core::relay_client::connect_to(&mut ws, &target, &viewer_id)
+                .await
+                .map_err(|error| error.to_string())?;
+
+            let Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(message))) =
+                ws.next().await
+            else {
+                return Err::<(), String>("relay closed while connecting".into());
+            };
+            let Some((Tag::Control, body)) = frame::unwrap(&message) else {
+                return Err("invalid pairing message".into());
+            };
+            let Some(protocol::control::Control::Paired { session, .. }) =
+                protocol::control::Control::from_bytes(body)
+            else {
+                return Err("invalid pairing message".into());
+            };
+            let (frame_tx, mut frame_rx) = mpsc::channel::<Vec<u8>>(64);
+            let (input_tx, input_rx) = mpsc::channel::<Vec<u8>>(256);
+            let (monitor_tx, mut monitor_rx) = mpsc::channel::<Vec<u8>>(16);
+            let (audio_tx, mut audio_rx) = mpsc::channel::<Vec<u8>>(16);
+            task_app.state::<AppState>().lock().viewer_input = Some(input_tx);
+
+            let frame_app = task_app.clone();
+            let frame_media_received = media_received.clone();
+            let _frame_task = AbortOnDrop::new(tauri::async_runtime::spawn(async move {
+                while let Some(plaintext) = frame_rx.recv().await {
+                    if plaintext.len() < 18 {
+                        continue;
+                    }
+                    frame_media_received.store(true, Ordering::Relaxed);
+                    let seq = u64::from_be_bytes(plaintext[0..8].try_into().unwrap());
+                    let timestamp_us = u32::from_be_bytes(plaintext[8..12].try_into().unwrap());
+                    let _codec = plaintext[12];
+                    let flags = plaintext[13];
+                    let width = u16::from_be_bytes(plaintext[14..16].try_into().unwrap());
+                    let height = u16::from_be_bytes(plaintext[16..18].try_into().unwrap());
+                    emit(
+                        &frame_app,
+                        "video_frame",
+                        VideoFrame {
+                            seq,
+                            timestamp_us,
+                            keyframe: flags & 1 != 0,
+                            width,
+                            height,
+                            data: b64(&plaintext[18..]),
+                        },
+                    );
+                }
+            }));
+
+            let audio_app = task_app.clone();
+            let audio_muted = task_app.state::<AppState>().lock().audio_muted.clone();
+            let _audio_task = AbortOnDrop::new(tauri::async_runtime::spawn(async move {
+                let mut decoder: Option<(u32, u8, opus::Decoder)> = None;
+                while let Some(body) = audio_rx.recv().await {
+                    if audio_muted.load(Ordering::Relaxed) { continue; }
+                    if let Some(frame) = protocol::audio::AudioFrame::from_bytes(&body) {
+                        let needs_new_decoder = decoder.as_ref().is_none_or(|(rate, channels, _)| *rate != frame.sample_rate || *channels != frame.channels);
+                        if needs_new_decoder {
+                            let channels = if frame.channels == 1 { opus::Channels::Mono } else { opus::Channels::Stereo };
+                            decoder = opus::Decoder::new(frame.sample_rate, channels).ok().map(|decoder| (frame.sample_rate, frame.channels, decoder));
+                        }
+                        let Some((_, channels, decoder_ref)) = decoder.as_mut() else { continue };
+                        let frame_capacity = usize::from(frame.frame_duration_ms) * frame.sample_rate as usize / 1_000 * usize::from(*channels);
+                        let mut samples = vec![0i16; frame_capacity];
+                        let Ok(sample_count) = decoder_ref.decode(&frame.payload, &mut samples, false) else { continue };
+                        samples.truncate(sample_count * usize::from(*channels));
+                        let mut pcm = Vec::with_capacity(samples.len() * 2);
+                        for sample in &samples { pcm.extend_from_slice(&sample.to_le_bytes()); }
+                        emit(&audio_app, "audio_frame", AudioFrameEvent { sample_rate: frame.sample_rate, channels: *channels, samples: b64(&pcm) });
+                    }
+                }
+            }));
+
+            let monitor_app = task_app.clone();
+            let _monitor_task = AbortOnDrop::new(tauri::async_runtime::spawn(async move {
+                while let Some(body) = monitor_rx.recv().await {
+                    if let Some(Control::MonitorList { monitors }) = Control::from_bytes(&body) {
+                        emit(&monitor_app, "monitor_list", MonitorListEvent { monitors });
+                    }
+                }
+            }));
+
+            let (data_ready_tx, data_ready_rx) = oneshot::channel();
+            let mut session_task = AbortOnDrop::new(tauri::async_runtime::spawn(async move {
+                host_core::roles::run_viewer_session_with_monitors_and_auth_code(
+                    ws,
+                    &password,
+                    &session,
+                    frame_tx,
+                    input_rx,
+                    Some(data_ready_tx),
+                    Some(monitor_tx),
+                    Some(audio_tx),
+                    auth_code.clone(),
+                )
+                .await
+            }));
+            match data_ready_rx.await {
+                Ok(handle) => {
+                    activate_data_channel(&task_app, handle, target.clone());
+                    emit(&task_app, "status_changed", StatusEvent { state: "in_session" });
+                    if !session_started {
+                        emit(
+                            &task_app,
+                            "session_started",
+                            SessionStarted {
+                                role: "viewer",
+                                remote_id: target.clone(),
+                            },
+                        );
+                        session_started = true;
+                    }
+                    match session_task.join().await {
+                        Ok(result) => result.map_err(|error| error.to_string()),
+                        Err(error) => Err(format!("viewer session task failed: {error}")),
+                    }
+                }
+                Err(_) => match session_task.join().await {
+                    Ok(result) => result.map_err(|error| error.to_string()),
+                    Err(error) => Err(format!("viewer session task failed: {error}")),
+                },
+            }
+                }
+                .await;
+                match attempt_result {
+                    Ok(()) => break Ok(()),
+                    Err(message) => {
+                        clear_data_channel(&task_app);
+                        task_app.state::<AppState>().lock().viewer_input = None;
+                        let media_received = media_received.load(Ordering::Relaxed);
+                        let reason = host_core::reconnect::classify_viewer_error(&message);
+                        if reason == host_core::reconnect::DisconnectReason::AuthFailure {
+                            // Only explicit signals land here (failed PAKE or the
+                            // host's Control::Error rejection). Never retry: the
+                            // password/2FA code will not get better (a TOTP code
+                            // is single-use), and a host user already declined.
+                            break Err(host_core::reconnect::auth_failure_message(&message, session_started));
+                        }
+                        if !host_core::reconnect::should_reconnect(reason) {
+                            break Err(message);
+                        }
+                        if media_received {
+                            reconnect_attempt = 0;
+                            outage_started = None;
+                        }
+                        let elapsed = outage_started.get_or_insert_with(Instant::now).elapsed();
+                        let Some(delay) = host_core::reconnect::viewer_retry_delay(reconnect_attempt, elapsed) else {
+                            break Err(format!(
+                                "{message}; gave up reconnecting after {}s",
+                                host_core::reconnect::VIEWER_RECONNECT_WINDOW.as_secs()
+                            ));
+                        };
+                        reconnect_attempt += 1;
+                        emit(&task_app, "error", ErrorEvent { message: format!("viewer session dropped ({message}); reconnecting (attempt {reconnect_attempt})") });
+                        tokio::time::sleep(delay).await;
+                    }
+                }
+            }
+        }.await;
+
+        if let Err(message) = &result {
+            let message = message.clone();
+            emit(
+                &task_app,
+                "error",
+                ErrorEvent {
+                    message,
+                },
+            );
+        }
+        let app_state = task_app.state::<AppState>();
+        let mut state = app_state.lock();
+        state.viewer_input = None;
+        state.viewer_task = None;
+        state.viewer_stop = None;
+        drop(state);
+        clear_data_channel(&task_app);
+        emit(
+            &task_app,
+            "session_ended",
+            SessionEnded {
+                reason: if result.is_ok() {
+                    "ended".into()
+                } else {
+                    "error".into()
+                },
+            },
+        );
+        emit(
+            &task_app,
+            "status_changed",
+            StatusEvent { state: "offline" },
+        );
+    }));
+    let installed = {
+        let mut runtime_state = state.lock();
+        if runtime_state
+            .viewer_stop
+            .as_ref()
+            .is_some_and(|stop| Arc::ptr_eq(stop, &viewer_stop))
+        {
+            runtime_state.viewer_task = task.take();
+            true
+        } else {
+            false
+        }
+    };
+    if !installed {
+        // disconnect() or an early task completion rolled back the
+        // reservation before the handle could be installed.
+        if let Some(task) = task {
+            task.abort();
+        }
+        return Err("viewer session was stopped before it started".into());
+    }
+    Ok(())
+}
+#[tauri::command]
+pub(crate) fn send_input(state: tauri::State<'_, AppState>, bytes: Vec<u8>) -> Result<(), String> {
+    let sender = state.lock().viewer_input.clone();
+    enqueue_input(sender, bytes)
+}
+
+#[tauri::command]
+pub(crate) async fn select_monitor(state: tauri::State<'_, AppState>, id: u32) -> Result<(), String> {
+    let (sender, sealer) = {
+        let state = state.lock();
+        (state.control_sender.clone(), state.control_sealer.clone())
+    };
+    let sender = sender.ok_or_else(|| "no active viewer session".to_owned())?;
+    let sealer = sealer.ok_or_else(|| "control channel is not ready".to_owned())?;
+    let body = Control::SelectMonitor { id }.to_bytes();
+    let sealed = lock_unpoisoned(&sealer).seal(&[Tag::Control as u8], &body);
+    sender.send_frame(Tag::Control, &sealed).await.map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub(crate) async fn send_auth_code(state: tauri::State<'_, AppState>, code: String) -> Result<(), String> {
+    let (sender, sealer) = { let state = state.lock(); (state.control_sender.clone(), state.control_sealer.clone()) };
+    let sender = sender.ok_or_else(|| "no active viewer session".to_owned())?;
+    let sealer = sealer.ok_or_else(|| "control channel is not ready".to_owned())?;
+    let sealed = lock_unpoisoned(&sealer).seal(&[Tag::Control as u8], &Control::AuthCode { code }.to_bytes());
+    sender.send_frame(Tag::Control, &sealed).await.map_err(|error| error.to_string())
+}
