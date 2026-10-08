@@ -254,7 +254,7 @@ pub async fn run_host_session<S, C, E, F, I>(
 ) -> SessionResult<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    C: ScreenCapturer + Send + 'static,
+    C: ScreenCapturer + 'static,
     E: Encoder + Send + 'static,
     F: Fn(u16, u16) -> E,
     I: InputInjector + Send + 'static,
@@ -268,7 +268,7 @@ pub async fn run_host_session_with_data<S, C, E, F, I>(
 ) -> SessionResult<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    C: ScreenCapturer + Send + 'static,
+    C: ScreenCapturer + 'static,
     E: Encoder + Send + 'static,
     F: Fn(u16, u16) -> E,
     I: InputInjector + Send + 'static,
@@ -290,7 +290,7 @@ pub async fn run_host_session_with_data_and_accept<S, C, E, F, I, A, Fut>(
 ) -> SessionResult<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    C: ScreenCapturer + Send + 'static,
+    C: ScreenCapturer + 'static,
     E: Encoder + Send + 'static,
     F: Fn(u16, u16) -> E,
     I: InputInjector + Send + 'static,
@@ -312,7 +312,7 @@ pub async fn run_host_session_with_data_and_accept_and_2fa<S, C, E, F, I, A, Fut
 ) -> SessionResult<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    C: ScreenCapturer + Send + 'static,
+    C: ScreenCapturer + 'static,
     E: Encoder + Send + 'static,
     F: Fn(u16, u16) -> E,
     I: InputInjector + Send + 'static,
@@ -335,7 +335,7 @@ async fn run_host_session_with_data_and_accept_and_2fa_with_factory<S, C, E, F, 
 )-> SessionResult<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    C: ScreenCapturer + Send + 'static,
+    C: ScreenCapturer + 'static,
     E: Encoder + Send + 'static,
     F: Fn(u16, u16) -> E,
     IF: FnOnce() -> Box<dyn InputInjector> + Send + 'static,
