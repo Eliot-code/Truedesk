@@ -179,3 +179,10 @@ async fn bad_2fa_code_reaches_viewer_as_typed_rejection() {
     assert_eq!(error.reason, DisconnectReason::AuthFailure, "{}", error.message);
     assert_eq!(rejection_code(&error.message), Some(reject_code::TWOFA_INVALID));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn missing_2fa_code_is_rejected_promptly() {
+    let error = viewer_rejection(true, true, None).await;
+    assert_eq!(error.reason, DisconnectReason::AuthFailure, "{}", error.message);
+    assert_eq!(rejection_code(&error.message), Some(reject_code::TWOFA_REQUIRED));
+}

@@ -376,7 +376,7 @@ where
     let code_valid = if unattended_enabled && twofa_enabled {
         let body = tokio::time::timeout(Duration::from_secs(30), recv_control(&mut control_rx)).await.ok().flatten();
         let code = body.and_then(|body| control_opener.open(&[Tag::Control as u8], &body)).and_then(|body| match Control::from_bytes(&body) {
-            Some(Control::AuthCode { code }) => Some(code),
+            Some(Control::AuthCode { code }) if !code.is_empty() => Some(code),
             _ => None,
         });
         code_received = code.is_some();
@@ -722,10 +722,10 @@ where
     let (control_send_key, control_recv_key) = protocol::kex::derive_control_keys(&shared, false);
     let mut control_sealer = Sealer::new(control_send_key);
     let mut control_opener = Opener::new(control_recv_key);
-    if let Some(code) = auth_code {
-        let body = Control::AuthCode { code }.to_bytes();
-        sender.send_frame(Tag::Control, &control_sealer.seal(&[Tag::Control as u8], &body)).await.map_err(|error| error.to_string())?;
-    }
+    // Always send one (empty = no code) so a 2FA host can answer at once
+    // instead of waiting for its timeout; other hosts ignore it.
+    let body = Control::AuthCode { code: auth_code.unwrap_or_default() }.to_bytes();
+    sender.send_frame(Tag::Control, &control_sealer.seal(&[Tag::Control as u8], &body)).await.map_err(|error| error.to_string())?;
     let (ice_rx, mut session_control_rx) = split_session_control(control_rx, ice_session.to_owned());
     // Open session control frames in one place (one opener, in order) and
     // split an explicit host rejection (`Control::Error`) out of the stream so
