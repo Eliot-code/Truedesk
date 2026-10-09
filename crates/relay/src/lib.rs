@@ -9,7 +9,6 @@ use axum::Router;
 use futures_util::{SinkExt, StreamExt};
 use registry::{CloseOutbound, Outbound, Registry};
 use session::Bridge;
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -210,18 +209,18 @@ async fn ws_handler(ws: WebSocketUpgrade, ConnectInfo(addr): ConnectInfo<SocketA
 async fn handle(socket: WebSocket, state: RelayState, addr: SocketAddr, guard: Option<ConnectionGuard>) {
     let Some(_guard) = guard else {
         let mut socket = socket;
-        let _ = socket.send(Message::Close(Some(CloseFrame { code: 1013, reason: Cow::Borrowed("relay capacity") }))).await;
+        let _ = socket.send(Message::Close(Some(CloseFrame { code: 1013, reason: "relay capacity".into() }))).await;
         return;
     };
     log_event("connection_open", addr, "accepted");
     let (mut sink, mut stream) = socket.split();
     let (my_tx, mut my_rx) = mpsc::channel::<Vec<u8>>(256);
-    let (close_tx, close_rx) = watch::channel::<Option<CloseFrame<'static>>>(None);
+    let (close_tx, close_rx) = watch::channel::<Option<CloseFrame>>(None);
     let mut writer_close_rx = close_rx.clone();
     let writer = tokio::spawn(async move {
         loop {
             tokio::select! {
-                Some(bytes) = my_rx.recv() => { if sink.send(Message::Binary(bytes)).await.is_err() { break; } }
+                Some(bytes) = my_rx.recv() => { if sink.send(Message::Binary(bytes.into())).await.is_err() { break; } }
                 result = writer_close_rx.changed() => {
                     if result.is_err() { break; }
                     let close = writer_close_rx.borrow().clone();
@@ -270,7 +269,7 @@ async fn handle(socket: WebSocket, state: RelayState, addr: SocketAddr, guard: O
                 session::ClassifyError::InvalidConnect => "invalid_connect",
                 session::ClassifyError::InvalidControl => "invalid_control",
             };
-            let _ = close_tx.send(Some(CloseFrame { code: 1008, reason: Cow::Owned(reason.to_owned()) }));
+            let _ = close_tx.send(Some(CloseFrame { code: 1008, reason: reason.into() }));
             log_event("pairing_failure", addr, reason); return;
         }
     };
@@ -282,7 +281,7 @@ async fn handle(socket: WebSocket, state: RelayState, addr: SocketAddr, guard: O
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn forward_rest(stream: &mut futures_util::stream::SplitStream<WebSocket>, peer_tx: Outbound, mut close_rx: watch::Receiver<Option<CloseFrame<'static>>>, bytes: &mut TokenBucket, signaling: &mut TokenBucket, state: &RelayState, shutdown: &mut watch::Receiver<bool>, addr: SocketAddr) {
+async fn forward_rest(stream: &mut futures_util::stream::SplitStream<WebSocket>, peer_tx: Outbound, mut close_rx: watch::Receiver<Option<CloseFrame>>, bytes: &mut TokenBucket, signaling: &mut TokenBucket, state: &RelayState, shutdown: &mut watch::Receiver<bool>, addr: SocketAddr) {
     loop {
         let next = tokio::select! {
             _ = close_rx.changed() => break,
@@ -295,7 +294,7 @@ async fn forward_rest(stream: &mut futures_util::stream::SplitStream<WebSocket>,
             if frame.first() == Some(&(protocol::Tag::Control as u8)) && !signaling.allow(1) { log_event("connection_rejected", addr, "signaling_rate"); break; }
             let queued = tokio::select! {
                 _ = shutdown.changed() => false,
-                result = tokio::time::timeout(state.config.idle_timeout, peer_tx.send(frame)) => matches!(result, Ok(Ok(()))),
+                result = tokio::time::timeout(state.config.idle_timeout, peer_tx.send(Vec::from(frame))) => matches!(result, Ok(Ok(()))),
             };
             if !queued { break; }
         }
@@ -303,7 +302,7 @@ async fn forward_rest(stream: &mut futures_util::stream::SplitStream<WebSocket>,
 }
 
 fn close_peer(peer_close_tx: &CloseOutbound) {
-    let _ = peer_close_tx.send(Some(CloseFrame { code: 1000, reason: Cow::Borrowed("peer disconnected") }));
+    let _ = peer_close_tx.send(Some(CloseFrame { code: 1000, reason: "peer disconnected".into() }));
 }
 
 fn log_event(event: &str, addr: SocketAddr, reason: &str) { log::info!("event={event} remote={addr} reason={reason}"); }

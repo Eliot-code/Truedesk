@@ -60,7 +60,7 @@ pub async fn register(
             ver: 1,
         }
         .to_bytes(),
-    )))
+    ).into()))
     .await
 }
 
@@ -114,7 +114,7 @@ pub async fn connect_to(
             ver: 1,
         }
         .to_bytes(),
-    )))
+    ).into()))
     .await
 }
 

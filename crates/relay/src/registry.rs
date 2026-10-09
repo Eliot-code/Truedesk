@@ -8,7 +8,7 @@ use tokio::sync::oneshot;
 use tokio::sync::{mpsc::Sender, watch};
 
 pub type Outbound = Sender<Vec<u8>>;
-pub type CloseOutbound = watch::Sender<Option<CloseFrame<'static>>>;
+pub type CloseOutbound = watch::Sender<Option<CloseFrame>>;
 
 /// Delivered to a parked host once a viewer takes its registration: the
 /// viewer's own sender, so the host can start forwarding its traffic there.

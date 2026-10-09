@@ -25,7 +25,7 @@ async fn host_frame_reaches_viewer_unchanged() {
     host.send(Message::Binary(frame::wrap(
         Tag::Control,
         &Control::Register { peer_id: "123456789".into(), token: "00".repeat(32), ver: 1 }.to_bytes(),
-    ))).await.unwrap();
+    ).into())).await.unwrap();
 
     // Avoid the connect racing ahead of the register (no wait-queue yet).
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -33,13 +33,13 @@ async fn host_frame_reaches_viewer_unchanged() {
     viewer.send(Message::Binary(frame::wrap(
         Tag::Control,
         &Control::Connect { target: "123456789".into(), peer_id: "987654321".into(), ver: 1 }.to_bytes(),
-    ))).await.unwrap();
+    ).into())).await.unwrap();
 
     // drain the `paired` control message on the viewer side
     let _paired = viewer.next().await.unwrap().unwrap();
 
     let payload = frame::wrap(Tag::Video, b"opaque-sealed-bytes");
-    host.send(Message::Binary(payload.clone())).await.unwrap();
+    host.send(Message::Binary(payload.clone().into())).await.unwrap();
 
     let got = viewer.next().await.unwrap().unwrap();
     assert_eq!(got.into_data(), payload);
@@ -52,9 +52,9 @@ async fn dropping_host_closes_viewer_and_releases_connections() {
     let url = format!("ws://{addr}/ws");
     let (mut host, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
     let (mut viewer, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
-    host.send(Message::Binary(frame::wrap(Tag::Control, &Control::Register { peer_id: "123456789".into(), token: "00".repeat(32), ver: 1 }.to_bytes()))).await.unwrap();
+    host.send(Message::Binary(frame::wrap(Tag::Control, &Control::Register { peer_id: "123456789".into(), token: "00".repeat(32), ver: 1 }.to_bytes()).into())).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    viewer.send(Message::Binary(frame::wrap(Tag::Control, &Control::Connect { target: "123456789".into(), peer_id: "987654321".into(), ver: 1 }.to_bytes()))).await.unwrap();
+    viewer.send(Message::Binary(frame::wrap(Tag::Control, &Control::Connect { target: "123456789".into(), peer_id: "987654321".into(), ver: 1 }.to_bytes()).into())).await.unwrap();
     let _ = viewer.next().await.unwrap().unwrap();
     drop(host);
     let result = tokio::time::timeout(std::time::Duration::from_secs(2), viewer.next()).await;

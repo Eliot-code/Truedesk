@@ -34,7 +34,7 @@ host-core = { path = "../../crates/host-core" }
 scap = "0.0.8"
 rand = "0.8"
 tokio = { version = "1", features = ["sync", "rt", "time"] }
-tokio-tungstenite = "0.24"
+tokio-tungstenite = "0.30"
 futures-util = "0.3"
 async-trait = "0.1"
 opus = "0.4"

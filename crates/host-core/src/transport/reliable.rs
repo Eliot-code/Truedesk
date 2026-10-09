@@ -84,7 +84,7 @@ where
         let writer_task = tokio::spawn(async move {
             let mut sink = sink;
             while let Some(bytes) = writer_rx.recv().await {
-                if sink.send(Message::Binary(bytes)).await.is_err() {
+                if sink.send(Message::Binary(bytes.into())).await.is_err() {
                     break;
                 }
             }
