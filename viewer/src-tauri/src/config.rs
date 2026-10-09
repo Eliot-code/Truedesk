@@ -190,16 +190,12 @@ pub(crate) fn backup_corrupt_file(path: &Path) -> io::Result<PathBuf> {
 }
 
 pub fn generate_id() -> String {
-    use rand::Rng;
-    rand::thread_rng()
-        .gen_range(100_000_000..=999_999_999)
-        .to_string()
+    rand::random_range(100_000_000..=999_999_999).to_string()
 }
 
 pub fn generate_registration_token() -> String {
-    use rand::RngCore;
     let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::fill(&mut bytes);
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 

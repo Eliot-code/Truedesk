@@ -215,8 +215,7 @@ fn clear_data_channel(app: &AppHandle) {
     }
 }
 fn fresh_password() -> String {
-    use rand::Rng;
-    rand::thread_rng().gen_range(100_000..=999_999).to_string()
+    rand::random_range(100_000..=999_999).to_string()
 }
 fn current_password(state: &mut RuntimeState) -> String {
     state.password.get_or_insert_with(fresh_password).clone()
@@ -315,7 +314,7 @@ fn get_unattended_status(state: tauri::State<'_, AppState>) -> UnattendedStatus 
 fn random_base32_secret() -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
     let mut bytes = [0u8; 20];
-    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut bytes);
+    rand::fill(&mut bytes);
     let mut output = String::with_capacity(32);
     let mut buffer = 0u32;
     let mut bits = 0u8;
