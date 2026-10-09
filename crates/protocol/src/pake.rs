@@ -1,5 +1,5 @@
 use hkdf::Hkdf;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use spake2::{Ed25519Group, Identity, Password, Spake2};
 

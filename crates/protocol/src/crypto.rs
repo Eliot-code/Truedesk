@@ -19,8 +19,8 @@ impl Sealer {
     pub fn seal(&mut self, aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
         let nbytes = nonce_from_counter(self.counter);
         self.counter += 1;
-        let nonce = Nonce::from_slice(&nbytes);
-        let ct = self.cipher.encrypt(nonce, Payload { msg: plaintext, aad }).expect("seal");
+        let nonce = Nonce::from(nbytes);
+        let ct = self.cipher.encrypt(&nonce, Payload { msg: plaintext, aad }).expect("seal");
         let mut wire = Vec::with_capacity(12 + ct.len());
         wire.extend_from_slice(&nbytes);
         wire.extend_from_slice(&ct);
@@ -59,9 +59,9 @@ impl Opener {
             return None;
         }
         let (nbytes, ct) = wire.split_at(12);
-        let nonce = Nonce::from_slice(nbytes);
+        let nonce = Nonce::try_from(nbytes).ok()?;
         // Authenticate first: only genuine frames may touch replay state.
-        let plaintext = self.cipher.decrypt(nonce, Payload { msg: ct, aad }).ok()?;
+        let plaintext = self.cipher.decrypt(&nonce, Payload { msg: ct, aad }).ok()?;
         let counter = u64::from_be_bytes(nbytes[4..12].try_into().ok()?);
         if !self.accept_counter(counter) {
             return None; // authentic but replayed or too old — drop it.
