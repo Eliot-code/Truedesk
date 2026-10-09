@@ -3,7 +3,7 @@
 use crate::{
     audio,
     capture::{ScapCapturer, ScreenCapturer},
-    encode::{self, Encoder, H264Encoder},
+    encode::{self, Encoder, VideoEncoder},
     inject::{EnigoInjector, InputInjector, NoopInjector},
     transport::{self, RelayIceSignaling, RelayTransport, ReliableChannel, Transport, TransportReceiver, TransportSender},
 };
@@ -879,7 +879,7 @@ where
 {
     run_host_session_with_data_and_accept_and_2fa_with_factory(
         ws, password, ice_session, ScapCapturer::new,
-        |w, h| H264Encoder::new(w, h, 15, 1_000_000),
+        |w, h| VideoEncoder::best_available(w, h, 15, 1_000_000),
         default_injector, false, false, None, || async { true }, None,
     )
     .await
@@ -933,7 +933,7 @@ where
         password,
         ice_session,
         ScapCapturer::new,
-        |w, h| H264Encoder::new(w, h, 15, 1_000_000),
+        |w, h| VideoEncoder::best_available(w, h, 15, 1_000_000),
         default_injector,
         unattended_enabled,
         twofa_enabled,
