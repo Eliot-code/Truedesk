@@ -23,6 +23,12 @@ opus = "0.4"
 arboard = "3.6.1"
 log = "0.4"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFDictionary", "CFNumber", "CFString"] }
+objc2-core-media = { version = "0.3.2", default-features = false, features = ["std", "CMBase", "CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMTime"] }
+objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferPool", "CVReturn"] }
+objc2-video-toolbox = { version = "0.3.2", default-features = false, features = ["std", "VTBase", "VTCompressionProperties", "VTCompressionSession", "VTErrors", "VTSession", "objc2-core-media", "objc2-core-video"] }
+
 [dev-dependencies]
 relay = { path = "../relay" }
 tokio = { workspace = true, features = ["full"] }
