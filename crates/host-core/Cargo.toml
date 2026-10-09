@@ -29,6 +29,11 @@ objc2-core-media = { version = "0.3.2", default-features = false, features = ["s
 objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferPool", "CVReturn"] }
 objc2-video-toolbox = { version = "0.3.2", default-features = false, features = ["std", "VTBase", "VTCompressionProperties", "VTCompressionSession", "VTErrors", "VTSession", "objc2-core-media", "objc2-core-video"] }
 
+# Not used directly: scap 0.0.8 accepts any windows-capture 1.x, but 1.5
+# changed Settings::new and breaks scap's Windows build. Cap it here.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-capture = ">=1.3.6, <1.5"
+
 [dev-dependencies]
 relay = { path = "../relay" }
 tokio = { workspace = true, features = ["full"] }
