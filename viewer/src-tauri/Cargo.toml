@@ -20,13 +20,13 @@ name = "viewer_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2.7", features = [] }
 
 [dependencies]
 base64 = "0.23"
 keyring = "4"
-tauri = { version = "2", features = [] }
-tauri-plugin-opener = "2"
+tauri = { version = "2.12", features = [] }
+tauri-plugin-opener = "2.7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 protocol = { path = "../../crates/protocol" }
@@ -39,7 +39,7 @@ futures-util = "0.3"
 async-trait = "0.1"
 opus = "0.4"
 log = "0.4"
-tauri-plugin-log = "2"
+tauri-plugin-log = "2.10"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
