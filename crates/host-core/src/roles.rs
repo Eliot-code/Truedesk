@@ -992,6 +992,28 @@ mod tests {
         assert!(!totp_is_valid(secret, &expired, now));
     }
 
+    /// Known-answer test: RFC 6238 Appendix B SHA-1 vectors (truncated to 6
+    /// digits) for the ASCII seed "12345678901234567890", base32-encoded.
+    /// Also pins SHA-256 (FIPS 180-2 "abc"), used for file digests and the
+    /// TOTP replay-cache key.
+    #[test]
+    fn totp_and_sha256_match_known_answers() {
+        let secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+        for (time, code) in [
+            (59, "287082"),
+            (1_111_111_109, "081804"),
+            (1_111_111_111, "050471"),
+            (1_234_567_890, "005924"),
+            (2_000_000_000, "279037"),
+        ] {
+            assert_eq!(totp_lite::totp_custom::<totp_lite::Sha1>(30, 6, &decode_base32(secret).unwrap(), time), code);
+            assert!(totp_is_valid(secret, code, time));
+        }
+        let digest: [u8; 32] = Sha256::digest(b"abc").into();
+        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(hex, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    }
+
     #[test]
     fn totp_replay_guard_consumes_a_step_but_accepts_a_fresh_step() {
         let secret = "GEZDGNBVGY3TQOJQ";

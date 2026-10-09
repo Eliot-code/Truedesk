@@ -30,11 +30,16 @@ pub fn start(password: &[u8], role_is_host: bool) -> (PakeState, Vec<u8>) {
 /// Returns the raw SPAKE2 shared output (feed into kex::derive_keys).
 pub fn finish(state: PakeState, peer_msg: &[u8]) -> Option<[u8; 32]> {
     let key = state.0.finish(peer_msg).ok()?;
-    // Ed25519Group SPAKE2 output is 32 bytes; hash-normalize defensively.
+    Some(normalize(&key))
+}
+
+/// Ed25519Group SPAKE2 output is 32 bytes; hash-normalize defensively.
+fn normalize(raw: &[u8]) -> [u8; 32] {
     let mut out = [0u8; 32];
-    let hk = Hkdf::<Sha256>::new(None, &key);
-    hk.expand(b"opendesk spake2 normalize", &mut out).ok()?;
-    Some(out)
+    Hkdf::<Sha256>::new(None, raw)
+        .expand(b"opendesk spake2 normalize", &mut out)
+        .expect("32 fits");
+    out
 }
 
 fn confirm_key(shared: &[u8]) -> [u8; 32] {
@@ -110,6 +115,31 @@ mod tests {
         let v_confirm = confirm_tag(&v_key, false);
         assert!(verify_peer(&v_key, true, &h_confirm)); // viewer verifies host
         assert!(verify_peer(&h_key, false, &v_confirm)); // host verifies viewer
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// Known-answer test: pins the HKDF/HMAC-SHA256 confirm-tag derivation and
+    /// SPAKE2 output normalization. Changing these breaks wire compatibility.
+    /// Expected values cross-checked against an independent implementation.
+    #[test]
+    fn confirm_and_normalize_known_answers() {
+        let shared: Vec<u8> = (0u8..32).collect();
+        assert_eq!(
+            hex(&normalize(&shared)),
+            "bfa8894ed08648fc3ab1ec223cfdf806d8644eef5760358949a38b4e496e2553"
+        );
+        assert_eq!(
+            hex(&confirm_tag(&shared, true)),
+            "86cceeb28a8fbb4ff40e982bce66eaa66d2b0b65a5109838e1916748e0a7de5c"
+        );
+        assert_eq!(
+            hex(&confirm_tag(&shared, false)),
+            "6d996a18ae26675c39a167bbb43c35db36220cfbde48449915b7fe021cc94349"
+        );
+        assert!(verify_peer(&shared, true, &confirm_tag(&shared, true)));
     }
 
     #[test]

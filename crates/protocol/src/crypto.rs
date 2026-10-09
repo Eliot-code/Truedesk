@@ -116,6 +116,33 @@ mod tests {
         assert_eq!(o.open(&[0x10], &wire).as_deref(), Some(&b"secret frame"[..]));
     }
 
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// Known-answer test: pins the ChaCha20-Poly1305 wire format
+    /// (nonce || ciphertext || tag) for a fixed key, counter and AAD.
+    /// Changing these outputs breaks wire compatibility with existing peers.
+    /// Expected values cross-checked against an independent implementation.
+    #[test]
+    fn seal_matches_known_answers() {
+        let key: [u8; 32] = core::array::from_fn(|i| i as u8);
+        let mut s = Sealer::new(key);
+        let first = s.seal(&[0x10], b"opendesk known answer");
+        let second = s.seal(&[0x11, 0x01], b"");
+        assert_eq!(
+            hex(&first),
+            "00000000000000000000000077c8275fc983d5ba330a320ed82d6e4696c2849093262e9d82b0c7a8460107434346243a12"
+        );
+        assert_eq!(
+            hex(&second),
+            "0000000000000000000000010093dc94a6e15fb9a57fc2ed2f413dc2"
+        );
+        let mut o = Opener::new(key);
+        assert_eq!(o.open(&[0x10], &first).as_deref(), Some(&b"opendesk known answer"[..]));
+        assert_eq!(o.open(&[0x11, 0x01], &second).as_deref(), Some(&b""[..]));
+    }
+
     #[test]
     fn nonces_advance_and_stay_unique() {
         let mut s = Sealer::new([1u8; 32]);
