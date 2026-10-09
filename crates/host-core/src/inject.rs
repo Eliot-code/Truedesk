@@ -22,7 +22,12 @@ pub struct EnigoInjector {
 
 impl EnigoInjector {
     pub fn new() -> Option<Self> {
-        Enigo::new(&Settings::default())
+        // enigo >= 0.3 checks macOS Accessibility trust here and fails when it
+        // is missing. Don't let it pop the system prompt: this constructor
+        // doubles as the UI's permission probe, which links to the settings
+        // pane itself.
+        let settings = Settings { open_prompt_to_get_permissions: false, ..Settings::default() };
+        Enigo::new(&settings)
             .ok()
             .map(|enigo| Self { enigo })
     }
