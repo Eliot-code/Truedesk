@@ -49,8 +49,11 @@ through unchanged.
 
 ## Coolify
 
-1. Create an application from this repository, build pack **Dockerfile**,
-   path `crates/relay/Dockerfile`, build context the repository root.
+1. Create an application from this repository with build pack
+   **Dockerfile**, **Base Directory** `/` (the repo root; the build needs the
+   whole Cargo workspace), **Dockerfile Location** `/crates/relay/Dockerfile`,
+   and **Ports Exposes** `8080`. Putting the Dockerfile path in Base Directory
+   fails with `mkdir: can't create directory ... File exists`.
 2. Set the domain (e.g. `relay.example.com`). Coolify provisions TLS and
    injects `PORT`, which the relay binds automatically (default 8080).
 3. Deploy, then point clients at `wss://relay.example.com/ws`.
