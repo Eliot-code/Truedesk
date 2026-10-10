@@ -13,6 +13,8 @@
 //! [`VideoEncoder`] picks the best backend for the platform and every backend
 //! honours this contract.
 
+#[cfg(any(target_os = "windows", test))]
+mod nv12;
 #[cfg(target_os = "macos")]
 mod videotoolbox;
 
@@ -111,10 +113,10 @@ impl Encoder for H264Encoder {
 }
 
 /// Annex B start code written in front of every NAL unit.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 const START_CODE: [u8; 4] = [0, 0, 0, 1];
 /// `nal_unit_type` of an IDR slice.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 const NAL_IDR: u8 = 5;
 
 /// Converts length-prefixed (AVCC / ISO 14496-15) NAL units into Annex B.
@@ -151,7 +153,7 @@ pub(crate) fn avcc_to_annex_b(avcc: &[u8], length_size: usize, out: &mut Vec<u8>
 }
 
 /// Appends parameter sets (SPS, PPS, ...) to `out` as Annex B NAL units.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 pub(crate) fn append_parameter_sets<'a>(
     sets: impl IntoIterator<Item = &'a [u8]>,
     out: &mut Vec<u8>,
@@ -160,6 +162,118 @@ pub(crate) fn append_parameter_sets<'a>(
         out.extend_from_slice(&START_CODE);
         out.extend_from_slice(set);
     }
+}
+
+/// `nal_unit_type`s of the sequence and picture parameter sets and of the
+/// access unit delimiter.
+#[cfg(any(target_os = "windows", test))]
+const NAL_SPS: u8 = 7;
+#[cfg(any(target_os = "windows", test))]
+const NAL_PPS: u8 = 8;
+#[cfg(any(target_os = "windows", test))]
+const NAL_AUD: u8 = 9;
+
+/// Splits an Annex B byte stream into its NAL units (without start codes).
+///
+/// Accepts 3- and 4-byte start codes. Returns `None` if the stream does not
+/// begin with a start code or holds an empty NAL unit.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn split_annex_b(stream: &[u8]) -> Option<Vec<&[u8]>> {
+    /// Index of the next `00 00 01` at or after `from`.
+    fn find_start_code(stream: &[u8], from: usize) -> Option<usize> {
+        stream
+            .get(from..)?
+            .windows(3)
+            .position(|window| window == [0, 0, 1])
+            .map(|offset| from + offset)
+    }
+
+    // Only zero bytes may precede the first start code.
+    let first = find_start_code(stream, 0)?;
+    if stream[..first].iter().any(|&byte| byte != 0) {
+        return None;
+    }
+    let mut nals = Vec::new();
+    let mut start = first + 3;
+    loop {
+        let end = find_start_code(stream, start);
+        let nal = &stream[start..end.unwrap_or(stream.len())];
+        // A NAL unit never ends in a zero byte: trailing zeros belong to the
+        // next 4-byte start code (or are trailing_zero_8bits).
+        let len = nal.iter().rposition(|&byte| byte != 0)? + 1;
+        nals.push(&nal[..len]);
+        match end {
+            Some(end) => start = end + 3,
+            None => return Some(nals),
+        }
+    }
+}
+
+/// The most recent SPS and PPS an encoder produced, for IDR access units
+/// that arrive without them in-band.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Default)]
+pub(crate) struct ParameterSets {
+    sps: Vec<Vec<u8>>,
+    pps: Vec<Vec<u8>>,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl ParameterSets {
+    /// Records the SPS/PPS found in `nals`, replacing the previous ones.
+    fn update<'a>(&mut self, nals: impl IntoIterator<Item = &'a [u8]> + Clone) {
+        for (kind, sets) in [(NAL_SPS, &mut self.sps), (NAL_PPS, &mut self.pps)] {
+            let mut found = nals
+                .clone()
+                .into_iter()
+                .filter(|nal| nal[0] & 0x1f == kind)
+                .peekable();
+            if found.peek().is_some() {
+                *sets = found.map(<[u8]>::to_vec).collect();
+            }
+        }
+    }
+
+    /// Records the parameter sets from an Annex B sequence header (Media
+    /// Foundation's `MF_MT_MPEG_SEQUENCE_HEADER`). Malformed input is ignored.
+    pub(crate) fn update_from_annex_b(&mut self, header: &[u8]) {
+        if let Some(nals) = split_annex_b(header) {
+            self.update(nals.iter().copied());
+        }
+    }
+}
+
+/// Rewrites one encoded Annex B access unit to the module contract: 4-byte
+/// start codes, no access unit delimiters, parameter sets only on IDR access
+/// units and there in front (in-band ones, else the cached `sets`).
+///
+/// Returns `Err(())` if the stream is not Annex B or an IDR has no parameter
+/// sets to go with it, and `Ok(None)` if nothing is left to send (the access
+/// unit only held parameter sets or delimiters).
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn normalize_access_unit(
+    stream: &[u8],
+    sets: &mut ParameterSets,
+) -> Result<Option<EncodedFrame>, ()> {
+    let nals = split_annex_b(stream).ok_or(())?;
+    sets.update(nals.iter().copied());
+    let is_body = |nal: &&[u8]| !matches!(nal[0] & 0x1f, NAL_SPS | NAL_PPS | NAL_AUD);
+    if !nals.iter().any(is_body) {
+        return Ok(None);
+    }
+    let keyframe = nals.iter().any(|nal| nal[0] & 0x1f == NAL_IDR);
+    let mut data = Vec::with_capacity(stream.len() + 64);
+    if keyframe {
+        if sets.sps.is_empty() || sets.pps.is_empty() {
+            return Err(());
+        }
+        append_parameter_sets(
+            sets.sps.iter().chain(&sets.pps).map(Vec::as_slice),
+            &mut data,
+        );
+    }
+    append_parameter_sets(nals.into_iter().filter(is_body), &mut data);
+    Ok(Some(EncodedFrame { data, keyframe }))
 }
 
 /// Which implementation a [`VideoEncoder`] is using.
@@ -434,6 +548,96 @@ pub(crate) mod tests {
         let mut out = Vec::new();
         append_parameter_sets([&[0x67, 0x42][..], &[0x68, 0xCE][..]], &mut out);
         assert_eq!(out, [0, 0, 0, 1, 0x67, 0x42, 0, 0, 0, 1, 0x68, 0xCE]);
+    }
+
+    #[test]
+    fn split_annex_b_accepts_3_and_4_byte_start_codes() {
+        let stream = [
+            0, 0, 0, 1, 0x67, 0x42, 0, 0, 1, 0x68, 0xCE, 0, 0, 0, 1, 0x65, 0x88, 0x80,
+        ];
+        assert_eq!(
+            split_annex_b(&stream),
+            Some(vec![&[0x67, 0x42][..], &[0x68, 0xCE], &[0x65, 0x88, 0x80]])
+        );
+        // Leading zero bytes and trailing_zero_8bits are not NAL data.
+        assert_eq!(
+            split_annex_b(&[0, 0, 0, 0, 1, 0x41, 0x9A, 0, 0]),
+            Some(vec![&[0x41, 0x9A][..]])
+        );
+    }
+
+    #[test]
+    fn split_annex_b_rejects_non_annex_b_input() {
+        // AVCC (length-prefixed) data.
+        assert_eq!(split_annex_b(&[0, 0, 0, 2, 0x65, 0x88]), None);
+        // Garbage before the first start code.
+        assert_eq!(split_annex_b(&[7, 0, 0, 1, 0x65]), None);
+        // Empty NAL units.
+        assert_eq!(split_annex_b(&[0, 0, 1, 0, 0, 1, 0x65]), None);
+        assert_eq!(split_annex_b(&[0, 0, 0, 1]), None);
+        assert_eq!(split_annex_b(&[]), None);
+    }
+
+    #[test]
+    fn normalize_puts_parameter_sets_first_and_drops_delimiters() {
+        let mut sets = ParameterSets::default();
+        // AUD, SEI, SPS, PPS, IDR with mixed start codes.
+        let idr = [
+            0, 0, 1, 0x09, 0xF0, 0, 0, 1, 0x06, 0x05, 0, 0, 0, 1, 0x67, 0x42, 0, 0, 1, 0x68, 0xCE,
+            0, 0, 1, 0x65, 0x88,
+        ];
+        let frame = normalize_access_unit(&idr, &mut sets)
+            .expect("Annex B")
+            .expect("frame");
+        assert!(frame.keyframe);
+        assert_eq!(
+            frame.data,
+            [
+                0, 0, 0, 1, 0x67, 0x42, 0, 0, 0, 1, 0x68, 0xCE, 0, 0, 0, 1, 0x06, 0x05, 0, 0, 0, 1,
+                0x65, 0x88
+            ]
+        );
+
+        let delta = normalize_access_unit(&[0, 0, 1, 0x09, 0xF0, 0, 0, 1, 0x41, 0x9A], &mut sets)
+            .expect("Annex B")
+            .expect("frame");
+        assert!(!delta.keyframe);
+        assert_eq!(delta.data, [0, 0, 0, 1, 0x41, 0x9A]);
+    }
+
+    #[test]
+    fn normalize_supplies_cached_parameter_sets_to_bare_idr() {
+        let mut sets = ParameterSets::default();
+        // Without any parameter sets an IDR is undecodable.
+        assert_eq!(
+            normalize_access_unit(&[0, 0, 0, 1, 0x65, 0x88], &mut sets).map(|f| f.is_some()),
+            Err(())
+        );
+
+        sets.update_from_annex_b(&[0, 0, 0, 1, 0x67, 0x42, 0, 0, 0, 1, 0x68, 0xCE]);
+        let frame = normalize_access_unit(&[0, 0, 0, 1, 0x65, 0x88], &mut sets)
+            .expect("Annex B")
+            .expect("frame");
+        assert!(frame.keyframe);
+        assert_eq!(nal_types(&frame.data), [7, 8, 5]);
+        assert_eq!(frame.data[..6], [0, 0, 0, 1, 0x67, 0x42]);
+
+        // An access unit with only new parameter sets updates the cache.
+        assert_eq!(
+            normalize_access_unit(&[0, 0, 1, 0x67, 0x4D, 0, 0, 1, 0x68, 0xEE], &mut sets)
+                .map(|f| f.is_some()),
+            Ok(false)
+        );
+        let frame = normalize_access_unit(&[0, 0, 1, 0x65, 0x88], &mut sets)
+            .expect("Annex B")
+            .expect("frame");
+        assert_eq!(
+            frame.data,
+            [0, 0, 0, 1, 0x67, 0x4D, 0, 0, 0, 1, 0x68, 0xEE, 0, 0, 0, 1, 0x65, 0x88]
+        );
+
+        // Not Annex B.
+        assert!(normalize_access_unit(&[0, 0, 0, 2, 0x41, 0x9A], &mut sets).is_err());
     }
 
     #[test]
