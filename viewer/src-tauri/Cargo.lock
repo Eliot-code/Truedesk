@@ -2147,6 +2147,7 @@ dependencies = [
  "totp-lite",
  "webrtc-ice",
  "webrtc-util",
+ "windows 0.62.2",
  "windows-capture",
 ]
 
