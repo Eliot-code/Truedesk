@@ -27,6 +27,15 @@ port forwarding.
 The full checklist is in
 [docs/TESTING.md](https://github.com/treeot/opendesk/blob/main/docs/TESTING.md).
 
+## Especially worth testing
+
+These are new and haven't been run on real hardware yet:
+
+- **Windows:** hardware video encoding (NVIDIA / Intel / AMD). Check the log
+  for `video encoder:` to see which encoder was picked.
+- **Linux:** hearing the host's system sound (PulseAudio / PipeWire).
+- **macOS:** system sound needs macOS 14.6+; older versions send the mic.
+
 ## Report a problem
 
 [Open an issue](https://github.com/treeot/opendesk/issues/new?template=bug_report.yml)
