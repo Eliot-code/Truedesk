@@ -23,6 +23,12 @@ opus = "0.4"
 arboard = "3.6.1"
 log = "0.4"
 
+# PulseAudio host (pure Rust; also talks to pipewire-pulse) for capturing the
+# default sink's monitor. Not cpal's "pipewire" feature: it needs pipewire
+# 0.10, which conflicts with scap's pipewire 0.8 over libpipewire linking.
+[target.'cfg(target_os = "linux")'.dependencies]
+cpal = { version = "0.18", features = ["pulseaudio"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFDictionary", "CFNumber", "CFString"] }
 objc2-core-media = { version = "0.3.2", default-features = false, features = ["std", "CMBase", "CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMTime"] }

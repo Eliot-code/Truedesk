@@ -10,7 +10,8 @@ const SAMPLES_PER_CHANNEL: usize = 960;
 
 /// Capture the host's audio as 48 kHz, 20 ms Opus. Prefers system output
 /// (what the host hears) and falls back to the default microphone where
-/// loopback isn't available: macOS before 14.6, Linux, or a failed tap.
+/// loopback isn't available: macOS before 14.6, Linux without a PulseAudio
+/// or pipewire-pulse server, or a failed tap.
 /// Devices at other rates or with more than two channels are converted by
 /// `PcmConverter`.
 pub fn spawn_capture() -> mpsc::Receiver<AudioFrame> {
@@ -39,9 +40,41 @@ fn system_audio_stream(host: &cpal::Host, tx: &mpsc::Sender<AudioFrame>) -> Opti
     stream
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+/// Capture of the default sink's monitor source. PulseAudio, and PipeWire
+/// through pipewire-pulse, expose each sink's playback as a `<sink>.monitor`
+/// input. cpal's native PipeWire backend is not an option: it needs pipewire
+/// 0.10, and scap already links libpipewire through pipewire 0.8.
+#[cfg(target_os = "linux")]
+fn system_audio_stream(host: &cpal::Host, tx: &mpsc::Sender<AudioFrame>) -> Option<cpal::Stream> {
+    if host.id() != cpal::HostId::PulseAudio { return None; }
+    let sink = host.default_output_device()?.id().ok()?;
+    let sources: Vec<cpal::Device> = host.input_devices().ok()?.collect();
+    let names: Vec<String> = sources.iter()
+        .map(|device| device.id().map(|id| id.id().to_owned()).unwrap_or_default())
+        .collect();
+    let device = &sources[select_monitor(sink.id(), &names)?];
+    let config = device.default_input_config().ok()?;
+    let stream = open_stream(device, config, tx);
+    if stream.is_some() { log::info!("audio source: system output"); }
+    stream
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 fn system_audio_stream(_host: &cpal::Host, _tx: &mpsc::Sender<AudioFrame>) -> Option<cpal::Stream> {
     None
+}
+
+/// Index of the monitor source for `sink`: `<sink>.monitor` if present,
+/// otherwise the only monitor source when there is exactly one.
+#[cfg(any(target_os = "linux", test))]
+fn select_monitor(sink: &str, sources: &[String]) -> Option<usize> {
+    let exact = format!("{sink}.monitor");
+    if let Some(index) = sources.iter().position(|name| *name == exact) { return Some(index); }
+    let mut monitors = sources.iter().enumerate().filter(|(_, name)| name.ends_with(".monitor"));
+    match (monitors.next(), monitors.next()) {
+        (Some((index, _)), None) => Some(index),
+        _ => None,
+    }
 }
 
 fn microphone_stream(host: &cpal::Host, tx: &mpsc::Sender<AudioFrame>) -> Option<cpal::Stream> {
@@ -153,7 +186,28 @@ impl PcmConverter {
 
 #[cfg(test)]
 mod tests {
-    use super::PcmConverter;
+    use super::{select_monitor, PcmConverter};
+
+    fn names(list: &[&str]) -> Vec<String> { list.iter().map(|s| s.to_string()).collect() }
+
+    #[test]
+    fn monitor_prefers_default_sink() {
+        let sources = names(&["alsa_input.mic", "hdmi.monitor", "speakers.monitor"]);
+        assert_eq!(select_monitor("speakers", &sources), Some(2));
+    }
+
+    #[test]
+    fn monitor_falls_back_to_sole_monitor() {
+        let sources = names(&["alsa_input.mic", "other.monitor"]);
+        assert_eq!(select_monitor("speakers", &sources), Some(1));
+    }
+
+    #[test]
+    fn monitor_ambiguous_or_missing_is_none() {
+        assert_eq!(select_monitor("speakers", &names(&["a.monitor", "b.monitor"])), None);
+        assert_eq!(select_monitor("speakers", &names(&["alsa_input.mic"])), None);
+        assert_eq!(select_monitor("speakers", &[]), None);
+    }
 
     #[test]
     fn passthrough_at_48k_stereo() {
