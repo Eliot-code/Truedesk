@@ -91,7 +91,7 @@ OpenDesk is under active development. What works today:
 | Address book · unattended access · TOTP 2FA | ✅ |
 | System audio (Opus, 48 kHz; mic fallback) · multi-monitor selection | ✅ |
 
-> **Note:** screen capture is verified on macOS (Windows/Linux code-complete, not yet runtime-tested). H.264 is hardware-encoded with VideoToolbox on macOS (software openh264 elsewhere, and as fallback). Release bundles are unsigned.
+> **Note:** screen capture is verified on macOS (Windows/Linux code-complete, not yet runtime-tested). H.264 is hardware-encoded with VideoToolbox on macOS and Media Foundation on Windows (NVENC / QSV / AMF; not yet runtime-tested), with software openh264 on Linux and as fallback. Release bundles are unsigned.
 
 ## Architecture
 
@@ -193,7 +193,8 @@ value is applied locally.
 - [x] System audio (macOS 14.6+, Windows)
 - [x] System audio on Linux (PulseAudio / PipeWire monitor)
 - [x] Hardware H.264 on macOS (VideoToolbox)
-- [ ] Hardware H.264 on Windows (Media Foundation: NVENC / QSV / AMF) and Linux (VAAPI)
+- [x] Hardware H.264 on Windows (Media Foundation: NVENC / QSV / AMF)
+- [ ] Hardware H.264 on Linux (VAAPI)
 
 ## Contributing
 
