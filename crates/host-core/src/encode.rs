@@ -13,6 +13,8 @@
 //! [`VideoEncoder`] picks the best backend for the platform and every backend
 //! honours this contract.
 
+#[cfg(target_os = "windows")]
+mod mediafoundation;
 #[cfg(any(target_os = "windows", test))]
 mod nv12;
 #[cfg(target_os = "macos")]
@@ -283,6 +285,9 @@ pub enum EncoderBackend {
     OpenH264,
     /// Apple VideoToolbox, hardware accelerated (macOS).
     VideoToolbox,
+    /// A Media Foundation hardware encoder MFT (NVENC, Quick Sync, AMF;
+    /// Windows).
+    MediaFoundation,
 }
 
 impl std::fmt::Display for EncoderBackend {
@@ -290,6 +295,7 @@ impl std::fmt::Display for EncoderBackend {
         f.write_str(match self {
             Self::OpenH264 => "openh264 (software)",
             Self::VideoToolbox => "VideoToolbox (hardware)",
+            Self::MediaFoundation => "Media Foundation (hardware)",
         })
     }
 }
@@ -298,17 +304,20 @@ enum Backend {
     OpenH264(Box<H264Encoder>),
     #[cfg(target_os = "macos")]
     VideoToolbox(videotoolbox::VtEncoder),
+    #[cfg(target_os = "windows")]
+    MediaFoundation(mediafoundation::MfEncoder),
 }
 
 /// H.264 encoder that uses the best backend available on this machine.
 ///
-/// On macOS it tries a hardware VideoToolbox session and falls back to
-/// openh264 if the session cannot be created, or if it fails later (the
-/// fallback then starts with a keyframe). Other platforms use openh264; new
-/// hardware backends (Media Foundation, VAAPI) slot in as more `Backend`
-/// variants. Setting `OPENDESK_ENCODER=software` forces openh264.
+/// On macOS it tries a hardware VideoToolbox session, on Windows a Media
+/// Foundation hardware encoder, and falls back to openh264 if the hardware
+/// encoder cannot be created, or if it fails later (the fallback then starts
+/// with a keyframe). Other platforms use openh264; new hardware backends
+/// (VAAPI) slot in as more `Backend` variants. Setting
+/// `OPENDESK_ENCODER=software` forces openh264.
 // The settings are only read when rebuilding after a hardware failure.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 pub struct VideoEncoder {
     backend: Backend,
     width: u16,
@@ -355,7 +364,20 @@ impl VideoEncoder {
         }
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    fn hardware(width: u16, height: u16, fps: u32, bitrate: u32) -> Option<Backend> {
+        match mediafoundation::MfEncoder::new(width, height, fps, bitrate) {
+            Ok(encoder) => Some(Backend::MediaFoundation(encoder)),
+            Err(error) => {
+                log::info!(
+                    "Media Foundation hardware encoder unavailable ({error}); falling back to openh264"
+                );
+                None
+            }
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     fn hardware(_width: u16, _height: u16, _fps: u32, _bitrate: u32) -> Option<Backend> {
         None
     }
@@ -365,7 +387,19 @@ impl VideoEncoder {
             Backend::OpenH264(_) => EncoderBackend::OpenH264,
             #[cfg(target_os = "macos")]
             Backend::VideoToolbox(_) => EncoderBackend::VideoToolbox,
+            #[cfg(target_os = "windows")]
+            Backend::MediaFoundation(_) => EncoderBackend::MediaFoundation,
         }
+    }
+
+    /// Replaces a failed hardware backend with openh264 and encodes `frame`
+    /// with it. A fresh openh264 encoder always starts with a keyframe.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn switch_to_software(&mut self, frame: &RawFrame) -> Option<EncodedFrame> {
+        let mut software = H264Encoder::new(self.width, self.height, self.fps, self.bitrate);
+        let encoded = software.encode(frame);
+        self.backend = Backend::OpenH264(Box::new(software));
+        encoded
     }
 }
 
@@ -378,12 +412,15 @@ impl Encoder for VideoEncoder {
                 Ok(encoded) => encoded,
                 Err(error) => {
                     log::warn!("VideoToolbox encode failed ({error}); switching to openh264");
-                    // A fresh openh264 encoder always starts with a keyframe.
-                    let mut software =
-                        H264Encoder::new(self.width, self.height, self.fps, self.bitrate);
-                    let encoded = software.encode(frame);
-                    self.backend = Backend::OpenH264(Box::new(software));
-                    encoded
+                    self.switch_to_software(frame)
+                }
+            },
+            #[cfg(target_os = "windows")]
+            Backend::MediaFoundation(encoder) => match encoder.encode(frame) {
+                Ok(encoded) => encoded,
+                Err(error) => {
+                    log::warn!("Media Foundation encode failed ({error}); switching to openh264");
+                    self.switch_to_software(frame)
                 }
             },
         }
@@ -394,6 +431,8 @@ impl Encoder for VideoEncoder {
             Backend::OpenH264(encoder) => encoder.force_intra_frame(),
             #[cfg(target_os = "macos")]
             Backend::VideoToolbox(encoder) => encoder.force_intra_frame(),
+            #[cfg(target_os = "windows")]
+            Backend::MediaFoundation(encoder) => encoder.force_intra_frame(),
         }
     }
 }

@@ -39,6 +39,7 @@ objc2-video-toolbox = { version = "0.3.2", default-features = false, features = 
 # changed Settings::new and breaks scap's Windows build. Cap it here.
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-capture = ">=1.3.6, <1.5"
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant"] }
 
 [dev-dependencies]
 relay = { path = "../relay" }
