@@ -9,6 +9,14 @@ Runs over `wss://` on port **443** · **End-to-end encrypted** · The relay is a
 
 </div>
 
+> [!CAUTION]
+> **Misuse Disclaimer:**
+> OpenDesk is for accessing computers you own or have explicit permission to
+> control. The developers do not condone or support any unethical or illegal
+> use of this software. Misuse, such as unauthorized access, control, or
+> invasion of privacy, is strictly against our guidelines. The authors are not
+> responsible for any misuse of the application.
+
 ---
 
 ## What is OpenDesk?
