@@ -45,7 +45,7 @@ it is not a media relay and does not receive desktop contents.
 - Local address book and recent peer IDs
 - Multi-monitor discovery and monitor selection
 
-Audio is the host's system sound on macOS 14.6+ and Windows, and its microphone elsewhere (Linux, older macOS). Windows/Linux host support is still less mature than the macOS-tested path.
+Audio is the host's system sound on macOS 14.6+, Windows, and Linux (PulseAudio or PipeWire via pipewire-pulse), and its microphone elsewhere (older macOS, Linux without either server). Windows/Linux host support is still less mature than the macOS-tested path.
 
 For the architecture, security model, and self-hosting instructions, see
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
@@ -191,7 +191,7 @@ value is applied locally.
 - [x] Address book, unattended access, 2FA
 - [x] Clipboard sync, multi-monitor
 - [x] System audio (macOS 14.6+, Windows)
-- [ ] System audio on Linux (PipeWire monitor)
+- [x] System audio on Linux (PulseAudio / PipeWire monitor)
 - [x] Hardware H.264 on macOS (VideoToolbox)
 - [ ] Hardware H.264 on Windows (Media Foundation: NVENC / QSV / AMF) and Linux (VAAPI)
 

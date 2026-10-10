@@ -99,8 +99,9 @@ identifiers, not as a certificate-backed identity.
 - There is no implemented two-factor authentication.
 - The unattended password (and TOTP secret) live in the OS keychain, so
   anyone who can unlock the host's user account can read them.
-- Host audio is the system output on macOS 14.6+ and Windows; elsewhere it
-  falls back to the default microphone.
+- Host audio is the system output on macOS 14.6+, Windows, and Linux with a
+  PulseAudio or PipeWire (pipewire-pulse) server; elsewhere it falls back to
+  the default microphone.
 - Windows and Linux host support is not equally mature or fully runtime-tested
   across all capture, permission, and input-injection environments.
 - The current implementation is under active development. Review the source,
