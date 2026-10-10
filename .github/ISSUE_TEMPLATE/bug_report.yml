@@ -1,0 +1,40 @@
+name: Bug report
+description: Something didn't work while testing OpenDesk
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: OpenDesk version
+      placeholder: v0.1.0-beta.1
+    validations:
+      required: true
+  - type: input
+    id: host
+    attributes:
+      label: Host computer (the one being controlled)
+      placeholder: macOS 15.4 / Windows 11 / Ubuntu 24.04 (Wayland)
+    validations:
+      required: true
+  - type: input
+    id: viewer
+    attributes:
+      label: Viewer computer
+      placeholder: macOS 15.4 / Windows 11 / Ubuntu 24.04 (Wayland)
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead. A docs/TESTING.md step number helps.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: App logs
+      description: |
+        From both computers if you can. Remove anything you consider private.
+        macOS ~/Library/Logs/com.opendesk.app/ · Windows %LOCALAPPDATA%\com.opendesk.app\logs\ · Linux ~/.local/share/com.opendesk.app/logs/
+      render: text

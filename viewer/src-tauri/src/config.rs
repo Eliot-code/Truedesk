@@ -7,7 +7,13 @@ use std::{
 
 use crate::unattended;
 
-const DEFAULT_RELAY_URL: &str = "ws://127.0.0.1:8080/ws";
+/// Release builds bake in the project's public relay via
+/// `OPENDESK_DEFAULT_RELAY` (set from a repo variable in release.yml); source
+/// builds default to a local development relay.
+const DEFAULT_RELAY_URL: &str = match option_env!("OPENDESK_DEFAULT_RELAY") {
+    Some(url) => url,
+    None => "ws://127.0.0.1:8080/ws",
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {

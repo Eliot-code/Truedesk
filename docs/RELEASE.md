@@ -4,9 +4,18 @@ OpenDesk releases are built as unsigned Tauri bundles for macOS, Linux, and Wind
 
 ## Cut a release
 
-1. Push a version tag matching `v*`, for example `git tag v0.1.0 && git push origin v0.1.0`.
-2. The `Release unsigned bundles` workflow builds all three platforms in parallel.
-3. After the builds finish, the workflow creates the GitHub release and attaches the downloaded bundle artifacts.
+1. Once: set the repo variable `OPENDESK_DEFAULT_RELAY` (Settings → Secrets
+   and variables → Actions → Variables) to the public relay, e.g.
+   `wss://relay.example.com/ws`. It becomes the app's default relay; the
+   release fails without it.
+2. Push a version tag matching `v*`, for example `git tag v0.1.0 && git push origin v0.1.0`.
+   A tag with a suffix (`v0.1.0-beta.1`) is published as a pre-release. Keep
+   the version in `tauri.conf.json` numeric (`0.1.0`): Windows MSI rejects
+   pre-release labels.
+3. The `Release unsigned bundles` workflow builds all three platforms in parallel.
+4. After the builds finish, the workflow creates the GitHub release with
+   `.github/RELEASE_NOTES.md` (install steps for unsigned builds) plus the
+   generated changelog, and attaches the bundles.
 
 The workflow runs `npm run tauri build` from `viewer`. The configured targets are:
 
