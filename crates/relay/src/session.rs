@@ -1,4 +1,4 @@
-use crate::registry::{CloseOutbound, Outbound, Registry};
+use crate::registry::{CloseOutbound, Outbound, Registration, Registry};
 use protocol::{control::Control, frame, Tag};
 use tokio::sync::oneshot;
 
@@ -8,6 +8,10 @@ pub const SUPPORTED_VERSION: u32 = 1;
 pub enum ClassifyError {
     InvalidControl,
     InvalidRegistration,
+    /// The ID is leased to a different token.
+    IdTaken,
+    RegistryFull,
+    NewIdRateLimited,
     InvalidConnect,
     ConnectRateLimited,
 }
@@ -48,7 +52,7 @@ pub enum Bridge {
 /// Reads the classification of the first frame. Returns `None` when the
 /// frame is not a valid Control frame, or a `connect` targets an unknown
 /// peer_id — either way the connection should be dropped.
-pub fn classify(msg: &[u8], me: Outbound, me_close_tx: CloseOutbound, reg: &Registry, source: std::net::IpAddr, ownership_grace: std::time::Duration) -> Result<Bridge, ClassifyError> {
+pub fn classify(msg: &[u8], me: Outbound, me_close_tx: CloseOutbound, reg: &Registry, source: std::net::IpAddr) -> Result<Bridge, ClassifyError> {
     let (tag, body) = frame::unwrap(msg).ok_or(ClassifyError::InvalidControl)?;
     if tag != Tag::Control { return Err(ClassifyError::InvalidControl); }
     match Control::from_bytes(body).ok_or(ClassifyError::InvalidControl)? {
@@ -56,8 +60,11 @@ pub fn classify(msg: &[u8], me: Outbound, me_close_tx: CloseOutbound, reg: &Regi
             let token = decode_token(&token).ok_or(ClassifyError::InvalidRegistration)?;
             if !valid_peer_id(&peer_id) || ver != SUPPORTED_VERSION { return Err(ClassifyError::InvalidRegistration); }
             let (notify_tx, notify_rx) = oneshot::channel();
-            if reg.register(peer_id.clone(), token, me, me_close_tx, notify_tx, ownership_grace) == crate::registry::Registration::Rejected {
-                return Err(ClassifyError::InvalidRegistration);
+            match reg.register(peer_id.clone(), token, source, me, me_close_tx, notify_tx) {
+                Registration::Accepted => {}
+                Registration::IdTaken => return Err(ClassifyError::IdTaken),
+                Registration::Full => return Err(ClassifyError::RegistryFull),
+                Registration::RateLimited => return Err(ClassifyError::NewIdRateLimited),
             }
             Ok(Bridge::HostRegistered { peer_id, notify_rx })
         }
@@ -70,6 +77,11 @@ pub fn classify(msg: &[u8], me: Outbound, me_close_tx: CloseOutbound, reg: &Regi
         }
         _ => Err(ClassifyError::InvalidControl),
     }
+}
+
+/// Builds the `error` Control frame sent before closing a rejected socket.
+pub fn error_frame(code: &str) -> Vec<u8> {
+    frame::wrap(Tag::Control, &Control::Error { code: code.into() }.to_bytes())
 }
 
 /// Builds the `paired` Control frame sent to each side once bridged.

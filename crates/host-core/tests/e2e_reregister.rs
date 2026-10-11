@@ -104,10 +104,11 @@ async fn host_reregisters_with_same_token_after_session_drop() {
     //    relay's ownership lease); a different token still cannot take the ID.
     let mut host_ws = register_host(&urls, HOST_ID, &token).await.expect("re-registration");
     let mut squatter = register_host(&urls, HOST_ID, &"cd".repeat(32)).await.expect("squatter connects");
-    assert!(
-        timeout(Duration::from_secs(5), await_pairing(&mut squatter)).await.expect("squatter closed").is_err(),
-        "relay must reject a different token during the ownership lease"
-    );
+    let rejected = timeout(Duration::from_secs(5), await_pairing(&mut squatter))
+        .await
+        .expect("squatter closed")
+        .expect_err("relay must reject a different token during the ownership lease");
+    assert!(relay_client::is_id_taken(&rejected), "{rejected}");
 
     // 4. The (reconnecting) viewer now pairs and streams again.
     let viewer_ws = viewer_pair(&url, "555555555").await.expect("second viewer connect succeeds");

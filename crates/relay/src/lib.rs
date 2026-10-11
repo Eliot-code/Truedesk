@@ -1,13 +1,18 @@
+mod client_ip;
+mod ratemap;
 mod registry;
 mod session;
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
+use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
+use client_ip::TrustedProxies;
 use futures_util::{SinkExt, StreamExt};
-use registry::{CloseOutbound, Outbound, Registry};
+use ratemap::RateMap;
+use registry::{CloseOutbound, Outbound, Registry, RegistryConfig};
 use session::Bridge;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -20,13 +25,20 @@ use tokio::sync::watch;
 
 const DEFAULT_MAX_CONNECTIONS: usize = 10_000;
 const DEFAULT_MAX_CONNECTIONS_PER_IP: usize = 50;
-const DEFAULT_SIGNAL_CAPACITY: u32 = 6;
-const DEFAULT_SIGNAL_REFILL_SECS: u64 = 10;
+// Control frames after pairing (ICE candidates, auth, monitor selection) are
+// bursty during session setup, so they get a generous bucket; the byte cap
+// still bounds total traffic. Before pairing the relay reads only the first
+// message, and that is limited per IP by the attempt and connect buckets.
+const DEFAULT_SESSION_CONTROL_BURST: u64 = 64;
+const DEFAULT_SESSION_CONTROL_PER_SEC: u64 = 16;
 const DEFAULT_BYTES_PER_SEC: u64 = 64 * 1024 * 1024;
 const DEFAULT_BYTE_BURST: u64 = 8 * 1024 * 1024;
 const DEFAULT_HANDSHAKE_TIMEOUT_SECS: u64 = 15;
 const DEFAULT_PAIR_TIMEOUT_SECS: u64 = 60;
-const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 300;
+// Applies only to paired sockets, where both peers send a keepalive every
+// ~15 s. A parked host registration waits under the pair timeout instead and
+// is never subject to this.
+const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 60;
 // The relay is a blind forwarder: a single WebSocket message carries either a
 // tiny Register/Connect signal OR an opaque payload frame it pipes between
 // peers. The cap therefore has to clear the largest legitimate forwarded frame
@@ -36,68 +48,84 @@ const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 300;
 // traffic; the retained-memory DoS is closed by strict Register field
 // validation (9-digit id, 64-hex token) plus the per-IP limits, not by this.
 const DEFAULT_MAX_SIGNAL_MESSAGE: usize = 8 * 1024 * 1024;
-const DEFAULT_OWNERSHIP_GRACE_SECS: u64 = 300;
 const DEFAULT_CONNECTION_ATTEMPT_BURST: u32 = 20;
 const DEFAULT_CONNECTION_ATTEMPT_REFILL_SECS: u64 = 10;
+const DEFAULT_SWEEP_SECS: u64 = 60;
 
 #[derive(Clone)]
 pub struct RelayState {
     registry: Registry,
     limits: Arc<ConnectionLimits>,
     config: RelayConfig,
+    proxies: Arc<TrustedProxies>,
     shutdown: watch::Receiver<bool>,
     _shutdown_keepalive: Option<watch::Sender<bool>>,
 }
 
 #[derive(Clone, Debug)]
 struct RelayConfig {
-    signal_capacity: u32,
-    signal_refill: Duration,
+    session_control_burst: u64,
+    session_control_per_sec: u64,
     bytes_per_sec: u64,
     byte_burst: u64,
     handshake_timeout: Duration,
     pair_timeout: Duration,
     idle_timeout: Duration,
     max_signal_message: usize,
-    ownership_grace: Duration,
     connection_attempt_burst: u32,
     connection_attempt_refill: Duration,
+    sweep_interval: Duration,
 }
 
 impl Default for RelayConfig {
     fn default() -> Self {
         Self {
-            signal_capacity: DEFAULT_SIGNAL_CAPACITY,
-            signal_refill: Duration::from_secs(DEFAULT_SIGNAL_REFILL_SECS),
+            session_control_burst: DEFAULT_SESSION_CONTROL_BURST,
+            session_control_per_sec: DEFAULT_SESSION_CONTROL_PER_SEC,
             bytes_per_sec: DEFAULT_BYTES_PER_SEC,
             byte_burst: DEFAULT_BYTE_BURST,
             handshake_timeout: Duration::from_secs(DEFAULT_HANDSHAKE_TIMEOUT_SECS),
             pair_timeout: Duration::from_secs(DEFAULT_PAIR_TIMEOUT_SECS),
             idle_timeout: Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS),
             max_signal_message: DEFAULT_MAX_SIGNAL_MESSAGE,
-            ownership_grace: Duration::from_secs(DEFAULT_OWNERSHIP_GRACE_SECS),
             connection_attempt_burst: DEFAULT_CONNECTION_ATTEMPT_BURST,
             connection_attempt_refill: Duration::from_secs(DEFAULT_CONNECTION_ATTEMPT_REFILL_SECS),
+            sweep_interval: Duration::from_secs(DEFAULT_SWEEP_SECS),
         }
     }
 }
 
 impl RelayConfig {
     fn from_env() -> Self {
-        let default = Self::default();
         Self {
-            signal_capacity: env_u64("RELAY_SIGNAL_BURST", default.signal_capacity as u64) as u32,
-            signal_refill: Duration::from_secs(env_u64("RELAY_SIGNAL_REFILL_SECS", DEFAULT_SIGNAL_REFILL_SECS)),
+            session_control_burst: env_u64("RELAY_SESSION_CONTROL_BURST", DEFAULT_SESSION_CONTROL_BURST),
+            session_control_per_sec: env_u64("RELAY_SESSION_CONTROL_PER_SEC", DEFAULT_SESSION_CONTROL_PER_SEC),
             bytes_per_sec: env_u64("RELAY_MAX_BYTES_PER_SEC", DEFAULT_BYTES_PER_SEC),
             byte_burst: env_u64("RELAY_BYTE_BURST", DEFAULT_BYTE_BURST),
             handshake_timeout: Duration::from_secs(env_u64("RELAY_HANDSHAKE_TIMEOUT_SECS", DEFAULT_HANDSHAKE_TIMEOUT_SECS)),
             pair_timeout: Duration::from_secs(env_u64("RELAY_PAIR_TIMEOUT_SECS", DEFAULT_PAIR_TIMEOUT_SECS)),
             idle_timeout: Duration::from_secs(env_u64("RELAY_IDLE_TIMEOUT_SECS", DEFAULT_IDLE_TIMEOUT_SECS)),
             max_signal_message: env_usize("RELAY_MAX_SIGNAL_MESSAGE_BYTES", DEFAULT_MAX_SIGNAL_MESSAGE),
-            ownership_grace: Duration::from_secs(env_u64("RELAY_OWNERSHIP_GRACE_SECS", DEFAULT_OWNERSHIP_GRACE_SECS)),
             connection_attempt_burst: env_u64("RELAY_CONNECTION_ATTEMPT_BURST", DEFAULT_CONNECTION_ATTEMPT_BURST as u64) as u32,
             connection_attempt_refill: Duration::from_secs(env_u64("RELAY_CONNECTION_ATTEMPT_REFILL_SECS", DEFAULT_CONNECTION_ATTEMPT_REFILL_SECS)),
+            sweep_interval: Duration::from_secs(env_u64("RELAY_SWEEP_SECS", DEFAULT_SWEEP_SECS)),
         }
+    }
+}
+
+fn registry_config_from_env() -> RegistryConfig {
+    let default = RegistryConfig::default();
+    // RELAY_OWNERSHIP_GRACE_SECS is the older name for the lease.
+    let lease = env_u64("RELAY_ID_LEASE_SECS", env_u64("RELAY_OWNERSHIP_GRACE_SECS", default.lease.as_secs()));
+    RegistryConfig {
+        lease: Duration::from_secs(lease),
+        max_bindings: env_usize("RELAY_MAX_ID_BINDINGS", default.max_bindings),
+        max_rate_entries: env_usize("RELAY_MAX_RATE_ENTRIES", default.max_rate_entries),
+        connect_burst: env_u64("RELAY_CONNECT_BURST", default.connect_burst as u64) as u32,
+        connect_refill: Duration::from_secs(env_u64("RELAY_CONNECT_REFILL_SECS", default.connect_refill.as_secs())),
+        new_id_burst: env_u64("RELAY_NEW_ID_BURST", default.new_id_burst as u64) as u32,
+        new_id_refill: Duration::from_secs(env_u64("RELAY_NEW_ID_REFILL_SECS", default.new_id_refill.as_secs())),
+        state_file: std::env::var_os("RELAY_STATE_FILE").filter(|value| !value.is_empty()).map(Into::into),
     }
 }
 
@@ -111,35 +139,29 @@ struct ConnectionLimits {
     max: usize,
     per_ip: usize,
     active: AtomicUsize,
+    /// Bounded by `max`: an entry exists only while that IP has a connection open.
     ips: Mutex<HashMap<IpAddr, usize>>,
-    attempts: Mutex<HashMap<IpAddr, (u32, Instant)>>,
-    attempt_capacity: u32,
-    attempt_refill: Duration,
+    attempts: RateMap<IpAddr>,
 }
 
 impl ConnectionLimits {
-    fn from_env(config: &RelayConfig) -> Self {
-        Self {
-            max: env_usize("RELAY_MAX_CONNECTIONS", DEFAULT_MAX_CONNECTIONS),
-            per_ip: env_usize("RELAY_MAX_CONNECTIONS_PER_IP", DEFAULT_MAX_CONNECTIONS_PER_IP),
-            active: AtomicUsize::new(0),
-            ips: Mutex::new(HashMap::new()),
-            attempts: Mutex::new(HashMap::new()),
-            attempt_capacity: config.connection_attempt_burst,
-            attempt_refill: config.connection_attempt_refill,
-        }
+    fn new(max: usize, per_ip: usize, attempt_burst: u32, attempt_refill: Duration, max_rate_entries: usize) -> Self {
+        Self { max, per_ip, active: AtomicUsize::new(0), ips: Mutex::new(HashMap::new()), attempts: RateMap::new(attempt_burst, attempt_refill, max_rate_entries) }
+    }
+
+    fn from_env(config: &RelayConfig, registry: &RegistryConfig) -> Self {
+        Self::new(
+            env_usize("RELAY_MAX_CONNECTIONS", DEFAULT_MAX_CONNECTIONS),
+            env_usize("RELAY_MAX_CONNECTIONS_PER_IP", DEFAULT_MAX_CONNECTIONS_PER_IP),
+            config.connection_attempt_burst,
+            config.connection_attempt_refill,
+            registry.max_rate_entries,
+        )
     }
 
     fn try_acquire(self: &Arc<Self>, ip: IpAddr) -> Option<ConnectionGuard> {
+        if !self.attempts.allow(ip) { return None; }
         let mut ips = self.ips.lock().expect("connection limits lock poisoned");
-        let mut attempts = self.attempts.lock().expect("connection attempt limits lock poisoned");
-        let now = Instant::now();
-        let attempt = attempts.entry(ip).or_insert((self.attempt_capacity, now));
-        let refill = now.duration_since(attempt.1).as_secs_f64() * self.attempt_capacity as f64 / self.attempt_refill.as_secs_f64();
-        attempt.0 = ((attempt.0 as f64 + refill).min(self.attempt_capacity as f64)) as u32;
-        attempt.1 = now;
-        if attempt.0 == 0 { return None; }
-        attempt.0 -= 1;
         let current = ips.get(&ip).copied().unwrap_or(0);
         if self.active.load(Ordering::Relaxed) >= self.max || current >= self.per_ip { return None; }
         self.active.fetch_add(1, Ordering::Relaxed);
@@ -179,40 +201,100 @@ impl TokenBucket {
     }
 }
 
-pub fn app() -> Router {
-    let (tx, rx) = watch::channel(false);
-    let config = RelayConfig::from_env();
-    app_with_state(RelayState { registry: Registry::with_ownership_grace(config.ownership_grace), limits: Arc::new(ConnectionLimits::from_env(&config)), config, shutdown: rx, _shutdown_keepalive: Some(tx) })
+/// Handle to a running relay's shared state, for stats and persistence.
+#[derive(Clone)]
+pub struct RelayHandle { registry: Registry, limits: Arc<ConnectionLimits> }
+
+impl RelayHandle {
+    pub fn active_connections(&self) -> usize { self.limits.active() }
+
+    /// Saves ID bindings to `RELAY_STATE_FILE` if any changed. Call on shutdown.
+    pub fn persist(&self) -> std::io::Result<bool> { self.registry.persist_if_dirty() }
 }
 
-pub fn app_with_shutdown(shutdown: watch::Receiver<bool>) -> Router {
+pub fn app() -> Router {
+    let (tx, rx) = watch::channel(false);
+    build(rx, Some(tx)).0
+}
+
+pub fn app_with_shutdown(shutdown: watch::Receiver<bool>) -> Router { build(shutdown, None).0 }
+
+/// Like [`app_with_shutdown`], also returning a [`RelayHandle`].
+pub fn relay_with_shutdown(shutdown: watch::Receiver<bool>) -> (Router, RelayHandle) { build(shutdown, None) }
+
+fn build(shutdown: watch::Receiver<bool>, keepalive: Option<watch::Sender<bool>>) -> (Router, RelayHandle) {
     let config = RelayConfig::from_env();
-    app_with_state(RelayState { registry: Registry::with_ownership_grace(config.ownership_grace), limits: Arc::new(ConnectionLimits::from_env(&config)), config, shutdown, _shutdown_keepalive: None })
+    let registry_config = registry_config_from_env();
+    let limits = Arc::new(ConnectionLimits::from_env(&config, &registry_config));
+    let registry = Registry::new(registry_config);
+    if let Some(path) = registry.state_file() {
+        match registry.load(path) {
+            Ok(count) => log::info!("loaded {count} id bindings from {}", path.display()),
+            Err(error) => log::warn!("could not load relay state from {}: {error}", path.display()),
+        }
+    }
+    let state = RelayState { registry: registry.clone(), limits: Arc::clone(&limits), config, proxies: Arc::new(TrustedProxies::from_env()), shutdown, _shutdown_keepalive: keepalive };
+    spawn_maintenance(&state);
+    (app_with_state(state), RelayHandle { registry, limits })
+}
+
+/// Every `sweep_interval`: drop expired bindings and idle rate buckets, save
+/// the state file if it changed, and log the connection count.
+fn spawn_maintenance(state: &RelayState) {
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else { return };
+    let registry = state.registry.clone();
+    let limits = Arc::clone(&state.limits);
+    let mut shutdown = state.shutdown.clone();
+    let period = state.config.sweep_interval;
+    runtime.spawn(async move {
+        let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        let mut last_logged = None;
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {}
+                result = shutdown.changed() => { if result.is_err() || *shutdown.borrow() { break; } continue; }
+            }
+            let now = Instant::now();
+            let stats = registry.sweep(now);
+            limits.attempts.sweep(now);
+            let snapshot = (limits.active(), registry.binding_count());
+            if last_logged != Some(snapshot) || stats.bindings_removed > 0 {
+                log::info!("event=stats active_connections={} id_bindings={} expired_bindings={}", snapshot.0, snapshot.1, stats.bindings_removed);
+                last_logged = Some(snapshot);
+            }
+            let saver = registry.clone();
+            match tokio::task::spawn_blocking(move || saver.persist_if_dirty()).await {
+                Ok(Err(error)) => log::warn!("could not save relay state: {error}"),
+                Err(error) => log::warn!("relay state save task failed: {error}"),
+                Ok(Ok(_)) => {}
+            }
+        }
+    });
 }
 
 fn app_with_state(state: RelayState) -> Router {
     Router::new().route("/ws", get(ws_handler)).route("/health", get(health_handler)).with_state(state)
 }
 
-async fn health_handler(State(state): State<RelayState>) -> Response {
-    let body = format!(r#"{{"status":"ok","active_connections":{}}}"#, state.limits.active());
-    ([(axum::http::header::CONTENT_TYPE, "application/json")], body).into_response()
+async fn health_handler() -> Response {
+    ([(axum::http::header::CONTENT_TYPE, "application/json")], r#"{"status":"ok"}"#).into_response()
 }
 
-async fn ws_handler(ws: WebSocketUpgrade, ConnectInfo(addr): ConnectInfo<SocketAddr>, State(state): State<RelayState>) -> Response {
-    let guard = state.limits.try_acquire(addr.ip());
-    if guard.is_none() { log_event("connection_rejected", addr, "capacity"); }
+async fn ws_handler(ws: WebSocketUpgrade, ConnectInfo(addr): ConnectInfo<SocketAddr>, headers: HeaderMap, State(state): State<RelayState>) -> Response {
+    let client = state.proxies.client_ip(addr.ip(), &headers);
+    let guard = state.limits.try_acquire(client);
+    if guard.is_none() { log_event("connection_rejected", client, "capacity"); }
     ws.max_message_size(state.config.max_signal_message).max_frame_size(state.config.max_signal_message)
-        .on_upgrade(move |socket| handle(socket, state, addr, guard))
+        .on_upgrade(move |socket| handle(socket, state, client, guard))
 }
 
-async fn handle(socket: WebSocket, state: RelayState, addr: SocketAddr, guard: Option<ConnectionGuard>) {
+async fn handle(socket: WebSocket, state: RelayState, addr: IpAddr, guard: Option<ConnectionGuard>) {
     let Some(_guard) = guard else {
         let mut socket = socket;
         let _ = socket.send(Message::Close(Some(CloseFrame { code: 1013, reason: "relay capacity".into() }))).await;
         return;
     };
-    log_event("connection_open", addr, "accepted");
+    log::info!("event=connection_open remote={addr} reason=accepted active_connections={}", state.limits.active());
     let (mut sink, mut stream) = socket.split();
     let (my_tx, mut my_rx) = mpsc::channel::<Vec<u8>>(256);
     let (close_tx, close_rx) = watch::channel::<Option<CloseFrame>>(None);
@@ -224,7 +306,16 @@ async fn handle(socket: WebSocket, state: RelayState, addr: SocketAddr, guard: O
                 result = writer_close_rx.changed() => {
                     if result.is_err() { break; }
                     let close = writer_close_rx.borrow().clone();
-                    if let Some(close) = close { let _ = tokio::time::timeout(Duration::from_secs(1), sink.send(Message::Close(Some(close)))).await; }
+                    if let Some(close) = close {
+                        // Flush frames queued before the close (such as an
+                        // error code) so the select race cannot drop them.
+                        let _ = tokio::time::timeout(Duration::from_secs(1), async {
+                            while let Ok(bytes) = my_rx.try_recv() {
+                                if sink.send(Message::Binary(bytes.into())).await.is_err() { return; }
+                            }
+                            let _ = sink.send(Message::Close(Some(close))).await;
+                        }).await;
+                    }
                     break;
                 }
                 else => break,
@@ -238,13 +329,10 @@ async fn handle(socket: WebSocket, state: RelayState, addr: SocketAddr, guard: O
         result = tokio::time::timeout(state.config.handshake_timeout, stream.next()) => result.ok().flatten().and_then(Result::ok),
     };
     let Some(Message::Binary(first)) = first else { writer.abort(); log_event("connection_close", addr, "handshake"); return; };
-    let refill = state.config.signal_capacity as u64 / state.config.signal_refill.as_secs().max(1);
-    let mut signaling = TokenBucket::new(state.config.signal_capacity as u64, refill.max(1));
-    if !signaling.allow(1) { writer.abort(); log_event("connection_rejected", addr, "signaling_rate"); return; }
     let mut bytes = TokenBucket::new(state.config.byte_burst, state.config.bytes_per_sec);
     if !bytes.allow(first.len()) { writer.abort(); log_event("connection_rejected", addr, "byte_rate"); return; }
 
-    let bridge = session::classify(&first, my_tx.clone(), close_tx.clone(), &state.registry, addr.ip(), state.config.ownership_grace);
+    let bridge = session::classify(&first, my_tx.clone(), close_tx.clone(), &state.registry, addr);
     let (peer_tx, peer_close_tx, registered_peer) = match bridge {
         Ok(Bridge::ViewerPaired { host_tx, host_close_tx, requester_id, target_id }) => {
             let _ = host_tx.send(session::paired_frame("host", &requester_id)).await;
@@ -266,22 +354,32 @@ async fn handle(socket: WebSocket, state: RelayState, addr: SocketAddr, guard: O
             let reason = match error {
                 session::ClassifyError::ConnectRateLimited => "connect_rate",
                 session::ClassifyError::InvalidRegistration => "invalid_register",
+                session::ClassifyError::IdTaken => protocol::control::ERROR_ID_TAKEN,
+                session::ClassifyError::RegistryFull => "registry_full",
+                session::ClassifyError::NewIdRateLimited => "new_id_rate",
                 session::ClassifyError::InvalidConnect => "invalid_connect",
                 session::ClassifyError::InvalidControl => "invalid_control",
             };
+            if error == session::ClassifyError::IdTaken {
+                let _ = my_tx.send(session::error_frame(protocol::control::ERROR_ID_TAKEN)).await;
+            }
             let _ = close_tx.send(Some(CloseFrame { code: 1008, reason: reason.into() }));
-            log_event("pairing_failure", addr, reason); return;
+            log_event("pairing_failure", addr, reason);
+            // Give the writer a moment to flush the error and close frames.
+            let _ = tokio::time::timeout(Duration::from_secs(2), writer).await;
+            return;
         }
     };
-    forward_rest(&mut stream, peer_tx, close_rx, &mut bytes, &mut signaling, &state, &mut shutdown, addr).await;
+    let mut control = TokenBucket::new(state.config.session_control_burst, state.config.session_control_per_sec);
+    forward_rest(&mut stream, peer_tx, close_rx, &mut bytes, &mut control, &state, &mut shutdown, addr).await;
     close_peer(&peer_close_tx);
     if let Some(peer_id) = registered_peer { state.registry.unregister(&peer_id, &my_tx); }
     writer.abort();
-    log_event("connection_close", addr, "eof_or_timeout");
+    log::info!("event=connection_close remote={addr} reason=eof_or_timeout active_connections={}", state.limits.active().saturating_sub(1));
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn forward_rest(stream: &mut futures_util::stream::SplitStream<WebSocket>, peer_tx: Outbound, mut close_rx: watch::Receiver<Option<CloseFrame>>, bytes: &mut TokenBucket, signaling: &mut TokenBucket, state: &RelayState, shutdown: &mut watch::Receiver<bool>, addr: SocketAddr) {
+async fn forward_rest(stream: &mut futures_util::stream::SplitStream<WebSocket>, peer_tx: Outbound, mut close_rx: watch::Receiver<Option<CloseFrame>>, bytes: &mut TokenBucket, control: &mut TokenBucket, state: &RelayState, shutdown: &mut watch::Receiver<bool>, addr: IpAddr) {
     loop {
         let next = tokio::select! {
             _ = close_rx.changed() => break,
@@ -291,7 +389,7 @@ async fn forward_rest(stream: &mut futures_util::stream::SplitStream<WebSocket>,
         let Some(Ok(msg)) = next else { break; };
         if let Message::Binary(frame) = msg {
             if !bytes.allow(frame.len()) { log_event("connection_rejected", addr, "byte_rate"); break; }
-            if frame.first() == Some(&(protocol::Tag::Control as u8)) && !signaling.allow(1) { log_event("connection_rejected", addr, "signaling_rate"); break; }
+            if frame.first() == Some(&(protocol::Tag::Control as u8)) && !control.allow(1) { log_event("connection_rejected", addr, "signaling_rate"); break; }
             let queued = tokio::select! {
                 _ = shutdown.changed() => false,
                 result = tokio::time::timeout(state.config.idle_timeout, peer_tx.send(Vec::from(frame))) => matches!(result, Ok(Ok(()))),
@@ -305,13 +403,19 @@ fn close_peer(peer_close_tx: &CloseOutbound) {
     let _ = peer_close_tx.send(Some(CloseFrame { code: 1000, reason: "peer disconnected".into() }));
 }
 
-fn log_event(event: &str, addr: SocketAddr, reason: &str) { log::info!("event={event} remote={addr} reason={reason}"); }
+fn log_event(event: &str, addr: IpAddr, reason: &str) { log::info!("event={event} remote={addr} reason={reason}"); }
 
-pub async fn spawn_test_server() -> String {
+pub async fn spawn_test_server() -> String { spawn_test_server_with_handle().await.0 }
+
+/// Starts a relay on an ephemeral loopback port, returning its address and a
+/// [`RelayHandle`] for stats.
+pub async fn spawn_test_server_with_handle() -> (String, RelayHandle) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
-    tokio::spawn(async move { axum::serve(listener, app().into_make_service_with_connect_info::<SocketAddr>()).await.unwrap() });
-    addr
+    let (tx, rx) = watch::channel(false);
+    let (router, handle) = build(rx, Some(tx));
+    tokio::spawn(async move { axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap() });
+    (addr, handle)
 }
 
 #[cfg(test)]
@@ -329,7 +433,7 @@ mod tests {
 
     #[test]
     fn connection_limits_enforce_global_and_per_ip_caps() {
-        let limits = Arc::new(ConnectionLimits { max: 2, per_ip: 1, active: AtomicUsize::new(0), ips: Mutex::new(HashMap::new()), attempts: Mutex::new(HashMap::new()), attempt_capacity: 20, attempt_refill: Duration::from_secs(10) });
+        let limits = Arc::new(ConnectionLimits::new(2, 1, 20, Duration::from_secs(10), 100));
         let first = limits.try_acquire(IpAddr::V4(Ipv4Addr::LOCALHOST)).unwrap();
         assert!(limits.try_acquire(IpAddr::V4(Ipv4Addr::LOCALHOST)).is_none());
         let second = limits.try_acquire(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2))).unwrap();
@@ -341,13 +445,27 @@ mod tests {
 
     #[test]
     fn connection_attempt_limiter_survives_reconnect() {
-        let limits = Arc::new(ConnectionLimits {
-            max: 2, per_ip: 2, active: AtomicUsize::new(0), ips: Mutex::new(HashMap::new()),
-            attempts: Mutex::new(HashMap::new()), attempt_capacity: 1, attempt_refill: Duration::from_secs(60),
-        });
+        let limits = Arc::new(ConnectionLimits::new(2, 2, 1, Duration::from_secs(60), 100));
         let first = limits.try_acquire(IpAddr::V4(Ipv4Addr::LOCALHOST)).unwrap();
         drop(first);
         assert!(limits.try_acquire(IpAddr::V4(Ipv4Addr::LOCALHOST)).is_none());
+    }
+
+    #[test]
+    fn connection_attempt_map_is_capped() {
+        let limits = Arc::new(ConnectionLimits::new(10, 10, 5, Duration::from_secs(60), 1));
+        let _first = limits.try_acquire(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1))).unwrap();
+        assert!(limits.try_acquire(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 2))).is_none());
+        assert!(limits.try_acquire(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1))).is_some(), "known keys still work");
+    }
+
+    #[test]
+    fn idle_timeout_and_session_control_defaults() {
+        let config = RelayConfig::default();
+        // Several missed ~15 s keepalives before a paired socket is dropped.
+        assert_eq!(config.idle_timeout, Duration::from_secs(60));
+        let mut control = TokenBucket::new(config.session_control_burst, config.session_control_per_sec);
+        assert!((0..48).all(|_| control.allow(1)), "ICE setup bursts must fit");
     }
 
     #[test]

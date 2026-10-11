@@ -1,9 +1,13 @@
+use crate::ratemap::RateMap;
 use axum::extract::ws::CloseFrame;
 use dashmap::{mapref::entry::Entry, DashMap};
-use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::net::IpAddr;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::oneshot;
 use tokio::sync::{mpsc::Sender, watch};
 
@@ -17,98 +21,252 @@ pub type PeerNotify = oneshot::Sender<(Outbound, CloseOutbound, String)>;
 #[derive(Debug, PartialEq, Eq)]
 pub enum Registration {
     Accepted,
-    Rejected,
+    /// The ID is leased to a different token.
+    IdTaken,
+    /// The binding table is at its cap.
+    Full,
+    /// This source claimed too many new IDs recently.
+    RateLimited,
+}
+
+#[derive(Clone, Debug)]
+pub struct RegistryConfig {
+    /// How long an ID stays bound to its token after the host was last seen.
+    pub lease: Duration,
+    pub max_bindings: usize,
+    pub max_rate_entries: usize,
+    pub connect_burst: u32,
+    pub connect_refill: Duration,
+    pub new_id_burst: u32,
+    pub new_id_refill: Duration,
+    pub state_file: Option<PathBuf>,
+}
+
+impl Default for RegistryConfig {
+    fn default() -> Self {
+        Self {
+            lease: Duration::from_secs(30 * 24 * 3600),
+            max_bindings: 100_000,
+            max_rate_entries: 100_000,
+            connect_burst: 6,
+            connect_refill: Duration::from_secs(10),
+            new_id_burst: 20,
+            new_id_refill: Duration::from_secs(3600),
+            state_file: None,
+        }
+    }
 }
 
 #[derive(Clone)]
 pub struct Registry {
     hosts: Arc<DashMap<String, RegistrationState>>,
-    connect_limits: Arc<ConnectLimits>,
-    ownership_grace: Duration,
+    /// Number of entries in `hosts`, kept separately because `DashMap::len`
+    /// would deadlock while a shard is held by `entry`.
+    bindings: Arc<AtomicUsize>,
+    connect_limits: Arc<RateMap<(IpAddr, String)>>,
+    new_id_limits: Arc<RateMap<IpAddr>>,
+    dirty: Arc<AtomicBool>,
+    config: Arc<RegistryConfig>,
 }
 
 struct RegistrationState {
-    token: [u8; 32],
+    /// SHA-256 of the host token; the raw token is never stored.
+    token_hash: [u8; 32],
     owner_until: Instant,
     parked: Option<(Outbound, CloseOutbound, PeerNotify)>,
     active: Option<Outbound>,
 }
 
-struct ConnectLimits {
-    capacity: u32,
-    refill: Duration,
-    attempts: std::sync::Mutex<HashMap<(IpAddr, String), (u32, Instant)>>,
+impl RegistrationState {
+    fn online(&self) -> bool { self.parked.is_some() || self.active.is_some() }
 }
 
-impl Default for ConnectLimits {
-    fn default() -> Self {
-        let capacity = std::env::var("RELAY_CONNECT_BURST").ok().and_then(|v| v.parse().ok()).filter(|v| *v > 0).unwrap_or(6);
-        let refill = std::env::var("RELAY_CONNECT_REFILL_SECS").ok().and_then(|v| v.parse().ok()).filter(|v| *v > 0).unwrap_or(10);
-        Self { capacity, refill: Duration::from_secs(refill), attempts: std::sync::Mutex::new(HashMap::new()) }
-    }
-}
+#[derive(Serialize, Deserialize)]
+struct StateFile { version: u32, bindings: Vec<StoredBinding> }
+
+#[derive(Serialize, Deserialize)]
+struct StoredBinding { id: String, token_sha256: String, expires_unix: u64 }
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SweepStats { pub bindings_removed: usize, pub buckets_removed: usize }
 
 impl Registry {
-    pub fn with_ownership_grace(grace: Duration) -> Self {
-        Self { hosts: Arc::new(DashMap::new()), connect_limits: Arc::new(ConnectLimits::default()), ownership_grace: grace }
+    pub fn new(config: RegistryConfig) -> Self {
+        Self {
+            hosts: Arc::new(DashMap::new()),
+            bindings: Arc::new(AtomicUsize::new(0)),
+            connect_limits: Arc::new(RateMap::new(config.connect_burst, config.connect_refill, config.max_rate_entries)),
+            new_id_limits: Arc::new(RateMap::new(config.new_id_burst, config.new_id_refill, config.max_rate_entries)),
+            dirty: Arc::new(AtomicBool::new(false)),
+            config: Arc::new(config),
+        }
     }
 
-    pub fn register(&self, peer_id: String, token: [u8; 32], tx: Outbound, close_tx: CloseOutbound, notify: PeerNotify, grace: Duration) -> Registration {
+    pub fn register(&self, peer_id: String, token: [u8; 32], source: IpAddr, tx: Outbound, close_tx: CloseOutbound, notify: PeerNotify) -> Registration {
         let now = Instant::now();
-        match self.hosts.entry(peer_id) {
+        let token_hash = hash_token(&token);
+        let state = RegistrationState { token_hash, owner_until: now + self.config.lease, parked: Some((tx, close_tx, notify)), active: None };
+        let result = match self.hosts.entry(peer_id) {
             Entry::Occupied(mut existing) => {
-                if existing.get().owner_until > now && !constant_time_eq(&existing.get().token, &token) {
-                    Registration::Rejected
+                let same_owner = constant_time_eq(&existing.get().token_hash, &token_hash);
+                if !same_owner && existing.get().owner_until > now {
+                    Registration::IdTaken
+                } else if !same_owner && !self.new_id_limits.allow(rate_key(source)) {
+                    Registration::RateLimited
                 } else {
-                    existing.insert(RegistrationState { token, owner_until: now + grace, parked: Some((tx, close_tx, notify)), active: None });
+                    existing.insert(state);
                     Registration::Accepted
                 }
             }
             Entry::Vacant(slot) => {
-                slot.insert(RegistrationState { token, owner_until: now + grace, parked: Some((tx, close_tx, notify)), active: None });
-                Registration::Accepted
+                if self.bindings.load(Ordering::Relaxed) >= self.config.max_bindings {
+                    Registration::Full
+                } else if !self.new_id_limits.allow(rate_key(source)) {
+                    Registration::RateLimited
+                } else {
+                    slot.insert(state);
+                    self.bindings.fetch_add(1, Ordering::Relaxed);
+                    Registration::Accepted
+                }
             }
-        }
+        };
+        if result == Registration::Accepted { self.dirty.store(true, Ordering::Relaxed); }
+        result
     }
+
     pub fn take(&self, peer_id: &str) -> Option<(Outbound, CloseOutbound, PeerNotify)> {
         self.hosts.get_mut(peer_id).and_then(|mut entry| {
             let parked = entry.parked.take();
             if let Some((tx, _, _)) = parked.as_ref() {
                 entry.active = Some(tx.clone());
-                entry.owner_until = Instant::now() + self.ownership_grace;
+                entry.owner_until = Instant::now() + self.config.lease;
             }
             parked
         })
     }
 
     pub fn unregister(&self, peer_id: &str, tx: &Outbound) {
-        if let Entry::Occupied(mut entry) = self.hosts.entry(peer_id.to_owned()) {
-            let parked_matches = entry.get().parked.as_ref().is_some_and(|(current, _, _)| current.same_channel(tx));
-            let active_matches = entry.get().active.as_ref().is_some_and(|current| current.same_channel(tx));
+        if let Some(mut entry) = self.hosts.get_mut(peer_id) {
+            let parked_matches = entry.parked.as_ref().is_some_and(|(current, _, _)| current.same_channel(tx));
+            let active_matches = entry.active.as_ref().is_some_and(|current| current.same_channel(tx));
             if parked_matches || active_matches {
-                entry.get_mut().parked = None;
-                entry.get_mut().active = None;
-                entry.get_mut().owner_until = Instant::now() + self.ownership_grace;
+                entry.parked = None;
+                entry.active = None;
+                entry.owner_until = Instant::now() + self.config.lease;
+                self.dirty.store(true, Ordering::Relaxed);
             }
         }
     }
 
     pub fn allow_connect(&self, source: IpAddr, target: &str) -> bool {
+        self.connect_limits.allow((source, target.to_owned()))
+    }
+
+    pub fn binding_count(&self) -> usize { self.bindings.load(Ordering::Relaxed) }
+
+    /// Drops offline bindings whose lease has expired and rate buckets that
+    /// have refilled.
+    pub fn sweep(&self, now: Instant) -> SweepStats {
+        let mut removed = 0;
+        self.hosts.retain(|_, state| {
+            let keep = state.online() || state.owner_until > now;
+            if !keep { removed += 1; }
+            keep
+        });
+        if removed > 0 {
+            self.bindings.fetch_sub(removed, Ordering::Relaxed);
+            self.dirty.store(true, Ordering::Relaxed);
+        }
+        SweepStats { bindings_removed: removed, buckets_removed: self.connect_limits.sweep(now) + self.new_id_limits.sweep(now) }
+    }
+
+    pub fn state_file(&self) -> Option<&Path> { self.config.state_file.as_deref() }
+
+    /// Writes the bindings to the state file if they changed since the last
+    /// save. No-op without a state file.
+    pub fn persist_if_dirty(&self) -> std::io::Result<bool> {
+        let Some(path) = self.state_file() else { return Ok(false) };
+        if !self.dirty.swap(false, Ordering::Relaxed) { return Ok(false); }
+        let result = self.save(path);
+        if result.is_err() { self.dirty.store(true, Ordering::Relaxed); }
+        result.map(|()| true)
+    }
+
+    fn save(&self, path: &Path) -> std::io::Result<()> {
         let now = Instant::now();
-        let mut attempts = self.connect_limits.attempts.lock().expect("connect limits lock poisoned");
-        let entry = attempts.entry((source, target.to_owned())).or_insert((self.connect_limits.capacity, now));
-        let elapsed = now.duration_since(entry.1).as_secs_f64();
-        let refill = elapsed * self.connect_limits.capacity as f64 / self.connect_limits.refill.as_secs_f64();
-        entry.0 = ((entry.0 as f64 + refill).min(self.connect_limits.capacity as f64)) as u32;
-        entry.1 = now;
-        if entry.0 == 0 { false } else { entry.0 -= 1; true }
+        let now_unix = unix_now();
+        let online_until = now_unix + self.config.lease.as_secs();
+        let bindings = self.hosts.iter().filter_map(|entry| {
+            let expires_unix = if entry.online() { online_until } else { now_unix + entry.owner_until.checked_duration_since(now)?.as_secs() };
+            Some(StoredBinding { id: entry.key().clone(), token_sha256: hex(&entry.token_hash), expires_unix })
+        }).collect();
+        let json = serde_json::to_vec(&StateFile { version: 1, bindings }).map_err(std::io::Error::other)?;
+        write_atomic(path, &json)
+    }
+
+    /// Loads bindings saved by [`Registry::persist_if_dirty`]. A missing file
+    /// is not an error. Expired, malformed and over-cap entries are skipped.
+    pub fn load(&self, path: &Path) -> std::io::Result<usize> {
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(error) => return Err(error),
+        };
+        let file: StateFile = serde_json::from_slice(&bytes).map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        if file.version != 1 { return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "unsupported state file version")); }
+        let now = Instant::now();
+        let now_unix = unix_now();
+        let mut loaded = 0;
+        for binding in file.bindings {
+            if self.bindings.load(Ordering::Relaxed) >= self.config.max_bindings { break; }
+            let Some(token_hash) = crate::session::decode_token(&binding.token_sha256) else { continue };
+            if !crate::session::valid_peer_id(&binding.id) || binding.expires_unix <= now_unix { continue; }
+            let remaining = Duration::from_secs(binding.expires_unix - now_unix).min(self.config.lease);
+            if let Entry::Vacant(slot) = self.hosts.entry(binding.id) {
+                slot.insert(RegistrationState { token_hash, owner_until: now + remaining, parked: None, active: None });
+                self.bindings.fetch_add(1, Ordering::Relaxed);
+                loaded += 1;
+            }
+        }
+        Ok(loaded)
     }
 }
 
 impl Default for Registry {
-    fn default() -> Self {
-        Self::with_ownership_grace(Duration::from_secs(300))
+    fn default() -> Self { Self::new(RegistryConfig::default()) }
+}
+
+/// IPv6 clients usually control a whole /64, so new-ID limits apply per /64.
+fn rate_key(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) if v6.to_ipv4_mapped().is_none() => IpAddr::V6((u128::from(v6) & !((1u128 << 64) - 1)).into()),
+        other => other,
     }
+}
+
+fn hash_token(token: &[u8; 32]) -> [u8; 32] { Sha256::digest(token).into() }
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn unix_now() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_secs()) }
+
+/// Writes `bytes` to a sibling temp file, syncs it and renames it over `path`.
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
+    let mut file = options.open(&tmp)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(&tmp, path)
 }
 
 pub(crate) fn constant_time_eq(left: &[u8; 32], right: &[u8; 32]) -> bool {
@@ -119,19 +277,32 @@ pub(crate) fn constant_time_eq(left: &[u8; 32], right: &[u8; 32]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Outbound, Registration, Registry};
-    use std::time::Duration;
+    use super::{Outbound, Registration, Registry, RegistryConfig};
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::time::{Duration, Instant};
     use tokio::sync::{mpsc, oneshot, watch};
 
-    fn registration(registry: &Registry, id: &str, token: &str) -> (Registration, Outbound) {
+    const SOURCE: IpAddr = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1));
+
+    fn register_from(registry: &Registry, id: &str, token: [u8; 32], source: IpAddr) -> (Registration, Outbound) {
         let (tx, _rx) = mpsc::channel(1);
         let (close_tx, _close_rx) = watch::channel(None);
         let (notify, _wait) = oneshot::channel();
-        let result = registry.register(id.into(), token_from_byte(token), tx.clone(), close_tx, notify, Duration::from_secs(60));
-        (result, tx)
+        (registry.register(id.into(), token, source, tx.clone(), close_tx, notify), tx)
+    }
+
+    fn registration(registry: &Registry, id: &str, token: &str) -> (Registration, Outbound) {
+        register_from(registry, id, token_from_byte(token), SOURCE)
     }
 
     fn token_from_byte(value: &str) -> [u8; 32] { [value.as_bytes().first().copied().unwrap_or(0); 32] }
+
+    fn with_lease(lease: Duration) -> Registry { Registry::new(RegistryConfig { lease, ..RegistryConfig::default() }) }
+
+    #[test]
+    fn default_lease_is_long() {
+        assert!(RegistryConfig::default().lease >= Duration::from_secs(30 * 24 * 3600));
+    }
 
     #[test]
     fn first_registration_binds_id_to_token() {
@@ -145,13 +316,14 @@ mod tests {
         let registry = Registry::default();
         assert_eq!(registration(&registry, "123456789", "same").0, Registration::Accepted);
         assert_eq!(registration(&registry, "123456789", "same").0, Registration::Accepted);
+        assert_eq!(registry.binding_count(), 1);
     }
 
     #[test]
     fn different_token_cannot_replace_live_registration() {
         let registry = Registry::default();
         let (_, original_tx) = registration(&registry, "123456789", "owner");
-        assert_eq!(registration(&registry, "123456789", "attacker").0, Registration::Rejected);
+        assert_eq!(registration(&registry, "123456789", "attacker").0, Registration::IdTaken);
         let (stored_tx, _, _) = registry.take("123456789").unwrap();
         assert!(original_tx.same_channel(&stored_tx));
     }
@@ -161,21 +333,15 @@ mod tests {
         let registry = Registry::default();
         let (_, tx) = registration(&registry, "123456789", "old");
         registry.unregister("123456789", &tx);
-        assert_eq!(registration(&registry, "123456789", "new").0, Registration::Rejected);
+        assert_eq!(registration(&registry, "123456789", "new").0, Registration::IdTaken);
     }
 
     #[test]
     fn ownership_can_be_reclaimed_after_lease_expiry() {
-        let registry = Registry::default();
-        let (tx, _rx) = mpsc::channel(1);
-        let (close_tx, _close_rx) = watch::channel(None);
-        let (notify, _wait) = oneshot::channel();
-        assert_eq!(registry.register("123456789".into(), [1; 32], tx, close_tx, notify, Duration::from_millis(1)), Registration::Accepted);
+        let registry = with_lease(Duration::from_millis(1));
+        assert_eq!(register_from(&registry, "123456789", [1; 32], SOURCE).0, Registration::Accepted);
         std::thread::sleep(Duration::from_millis(3));
-        let (new_tx, _rx) = mpsc::channel(1);
-        let (new_close_tx, _new_close_rx) = watch::channel(None);
-        let (new_notify, _wait) = oneshot::channel();
-        assert_eq!(registry.register("123456789".into(), [2; 32], new_tx, new_close_tx, new_notify, Duration::from_secs(1)), Registration::Accepted);
+        assert_eq!(register_from(&registry, "123456789", [2; 32], SOURCE).0, Registration::Accepted);
     }
 
     #[test]
@@ -192,5 +358,89 @@ mod tests {
         registry.unregister("123456789", &old_tx);
         let (stored_tx, _, _) = registry.take("123456789").unwrap();
         assert!(new_tx.same_channel(&stored_tx));
+    }
+
+    #[test]
+    fn sweep_removes_only_expired_offline_bindings() {
+        let registry = with_lease(Duration::from_millis(1));
+        let (_, offline) = registration(&registry, "111111111", "a");
+        registry.unregister("111111111", &offline);
+        let (_, _parked) = registration(&registry, "222222222", "b");
+        std::thread::sleep(Duration::from_millis(3));
+        let stats = registry.sweep(Instant::now());
+        assert_eq!(stats.bindings_removed, 1);
+        assert_eq!(registry.binding_count(), 1);
+        assert!(registry.take("222222222").is_some(), "online host survives the sweep");
+    }
+
+    #[test]
+    fn binding_cap_rejects_new_ids_but_not_owners() {
+        let registry = Registry::new(RegistryConfig { max_bindings: 1, ..RegistryConfig::default() });
+        assert_eq!(registration(&registry, "111111111", "a").0, Registration::Accepted);
+        assert_eq!(registration(&registry, "222222222", "b").0, Registration::Full);
+        assert_eq!(registration(&registry, "111111111", "a").0, Registration::Accepted);
+    }
+
+    #[test]
+    fn new_id_rate_limit_is_per_source() {
+        let registry = Registry::new(RegistryConfig { new_id_burst: 2, ..RegistryConfig::default() });
+        assert_eq!(registration(&registry, "111111111", "a").0, Registration::Accepted);
+        assert_eq!(registration(&registry, "222222222", "a").0, Registration::Accepted);
+        assert_eq!(registration(&registry, "333333333", "a").0, Registration::RateLimited);
+        // Re-registering an owned ID costs nothing.
+        assert_eq!(registration(&registry, "111111111", "a").0, Registration::Accepted);
+        let other = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5));
+        assert_eq!(register_from(&registry, "333333333", [b'a'; 32], other).0, Registration::Accepted);
+        // Addresses in one IPv6 /64 share a bucket.
+        let v6 = |last: u16| IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 1, 0, 0, 0, last));
+        assert_eq!(register_from(&registry, "444444444", [1; 32], v6(1)).0, Registration::Accepted);
+        assert_eq!(register_from(&registry, "555555555", [1; 32], v6(2)).0, Registration::Accepted);
+        assert_eq!(register_from(&registry, "666666666", [1; 32], v6(3)).0, Registration::RateLimited);
+    }
+
+    #[test]
+    fn connect_limit_map_is_capped() {
+        let registry = Registry::new(RegistryConfig { max_rate_entries: 1, ..RegistryConfig::default() });
+        assert!(registry.allow_connect(SOURCE, "111111111"));
+        assert!(!registry.allow_connect(SOURCE, "222222222"));
+    }
+
+    #[test]
+    fn bindings_survive_a_restart_via_state_file() {
+        let dir = std::env::temp_dir().join(format!("relay-state-{}-{:?}", std::process::id(), std::thread::current().id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.json");
+        let config = RegistryConfig { state_file: Some(path.clone()), ..RegistryConfig::default() };
+        let registry = Registry::new(config.clone());
+        let (_, tx) = registration(&registry, "123456789", "owner");
+        registry.unregister("123456789", &tx);
+        assert!(registry.persist_if_dirty().unwrap());
+        assert!(!registry.persist_if_dirty().unwrap(), "clean registry is not rewritten");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains(&super::hex(&token_from_byte("owner"))), "raw token must not be stored");
+
+        let restarted = Registry::new(config);
+        assert_eq!(restarted.load(&path).unwrap(), 1);
+        assert_eq!(registration(&restarted, "123456789", "squatter").0, Registration::IdTaken);
+        assert_eq!(registration(&restarted, "123456789", "owner").0, Registration::Accepted);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn load_skips_expired_and_malformed_bindings() {
+        let dir = std::env::temp_dir().join(format!("relay-load-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.json");
+        let good = "ab".repeat(32);
+        std::fs::write(&path, format!(r#"{{"version":1,"bindings":[
+            {{"id":"111111111","token_sha256":"{good}","expires_unix":1}},
+            {{"id":"bad","token_sha256":"{good}","expires_unix":99999999999}},
+            {{"id":"222222222","token_sha256":"zz","expires_unix":99999999999}},
+            {{"id":"333333333","token_sha256":"{good}","expires_unix":99999999999}}]}}"#)).unwrap();
+        let registry = Registry::default();
+        assert_eq!(registry.load(&path).unwrap(), 1);
+        assert_eq!(registry.binding_count(), 1);
+        assert_eq!(registry.load(&dir.join("missing.json")).unwrap(), 0);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

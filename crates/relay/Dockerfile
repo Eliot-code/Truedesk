@@ -11,7 +11,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
  && cp target/release/relay /relay
 
 FROM debian:trixie-slim
-RUN useradd --system --uid 10001 relay
+RUN useradd --system --uid 10001 relay \
+ && mkdir /data && chown relay /data
 COPY --from=build /relay /usr/local/bin/relay
 USER relay
 

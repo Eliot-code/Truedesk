@@ -15,10 +15,14 @@ async fn main() {
     let listener = TcpListener::bind(&addr).await.unwrap();
     log::info!("relay listening on {}", listener.local_addr().unwrap());
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    axum::serve(listener, relay::app_with_shutdown(shutdown_rx).into_make_service_with_connect_info::<std::net::SocketAddr>())
+    let (app, handle) = relay::relay_with_shutdown(shutdown_rx);
+    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
         .with_graceful_shutdown(shutdown_signal(shutdown_tx))
         .await
         .unwrap();
+    if let Err(error) = handle.persist() {
+        log::warn!("could not save relay state on shutdown: {error}");
+    }
 }
 
 fn healthcheck(port: &str) -> bool {
