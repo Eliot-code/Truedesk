@@ -250,6 +250,12 @@ pub(crate) async fn run_paired_host_session(
         result = &mut session => Some(result),
         _ = &mut *stop_rx => None,
     };
+    if result.is_none() {
+        // The host user stopped: tell the viewer explicitly so it ends
+        // cleanly instead of treating the close as a drop and reconnecting.
+        // The session (and its writer) is still alive here.
+        send_host_bye(app).await;
+    }
     if let Some(Err(error)) = &result {
         emit(app, "error", ErrorEvent { message: error.to_string() });
     }
@@ -262,6 +268,40 @@ pub(crate) async fn run_paired_host_session(
     );
     clear_data_channel(app);
     HostSessionEnd { stopped: result.is_none(), authenticated: authenticated.load(Ordering::Relaxed) }
+}
+
+/// Best-effort sealed `Control::Bye` on the active session's control channel.
+async fn send_host_bye(app: &AppHandle) {
+    let (sender, sealer) = {
+        let state = app.state::<AppState>();
+        let state = state.lock();
+        (state.control_sender.clone(), state.control_sealer.clone())
+    };
+    if let (Some(sender), Some(sealer)) = (sender, sealer) {
+        host_core::roles::send_bye(&sender, &sealer).await;
+    }
+}
+
+/// Cleans up after a host thread that panicked (e.g. inside encoder
+/// initialization): without it `host_thread` stays `Some` and every later
+/// `start_hosting` silently does nothing. Normal exits clean up themselves.
+/// Only effective where panics unwind (release builds abort on panic).
+struct HostThreadPanicGuard {
+    app: AppHandle,
+    token: Arc<()>,
+}
+
+impl Drop for HostThreadPanicGuard {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            return;
+        }
+        clear_data_channel(&self.app);
+        clear_own_host_thread(&self.app, &self.token);
+        emit(&self.app, "error", ErrorEvent { message: "hosting stopped unexpectedly; start hosting again".into() });
+        emit(&self.app, "session_ended", SessionEnded { reason: "host session failed".into() });
+        emit(&self.app, "status_changed", StatusEvent { state: "offline" });
+    }
 }
 
 pub(crate) struct HostSessionEnd {
@@ -328,6 +368,7 @@ pub(crate) fn spawn_host_thread(
     token: Arc<()>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
+        let _panic_guard = HostThreadPanicGuard { app: app.clone(), token: token.clone() };
         let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(runtime) => runtime,
             Err(error) => {
