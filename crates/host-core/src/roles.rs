@@ -438,17 +438,20 @@ where
     let (mut transport_tx, transport_rx) = transport.into_split();
     let mut audio_rx = audio::spawn_capture();
 
+    let first_frame_deadline = tokio::time::Instant::now() + FIRST_FRAME_DEADLINE;
     let first_frame = loop {
         if let Some(frame) = capturer.next_frame() {
             break frame;
+        }
+        if tokio::time::Instant::now() >= first_frame_deadline {
+            return Err(Box::new(SessionError("screen capture produced no frames")));
         }
         tokio::time::sleep(Duration::from_millis(1_000 / 15)).await;
     };
     let first_frame = even_frame(first_frame).ok_or(SessionError(
         "screen capture returned an invalid or unusable frame",
     ))?;
-    let mut width = first_frame.width;
-    let mut height = first_frame.height;
+    let (width, height) = (first_frame.width, first_frame.height);
     // Input injection makes blocking OS calls, so it runs on its own thread
     // and never stalls capture/encode/send or audio. The injector is built on
     // that thread because platform injectors (Enigo) can be thread-affine.
@@ -458,11 +461,8 @@ where
     // ends the injection thread together with the session.
     let mut input_forwarder = AbortOnDrop(tokio::spawn(forward_input(transport_rx, opener, inject_tx)));
     let fps: u32 = 15;
-    let mut encoder = encoder_factory(width, height)?;
-    let mut pending_first_frame = Some(first_frame);
-    let mut seq = 0u64;
+    let mut video = VideoPipeline::new(first_frame, encoder_factory, dims)?;
     let mut next_frame = tokio::time::Instant::now();
-    let mut last_keyframe = next_frame;
     loop {
         tokio::select! {
             Some(audio_frame) = audio_rx.recv() => {
@@ -477,17 +477,9 @@ where
                     // Authenticated by the per-session control key, so the
                     // session field is informational only.
                     Some(Control::Bye { .. }) => return Ok(()),
-                    Some(Control::SelectMonitor { id }) => {
-                        let frame = if capturer.select_monitor(id) { capturer.next_frame().and_then(even_frame) } else { None };
-                        if let Some(frame) = frame {
-                            width = frame.width;
-                            height = frame.height;
-                            dims.store(pack_dims(width, height), Ordering::Release);
-                            encoder = encoder_factory(width, height)?;
-                            pending_first_frame = Some(frame);
-                            seq = 0;
-                        }
-                    }
+                    // The new monitor's frames arrive later; the video
+                    // pipeline adapts to their size.
+                    Some(Control::SelectMonitor { id }) => { capturer.select_monitor(id); }
                     _ => {}
                 }
             },
@@ -500,18 +492,76 @@ where
             },
             _ = tokio::time::sleep_until(next_frame) => {
                 next_frame += Duration::from_millis(1_000 / u64::from(fps));
-                let frame = pending_first_frame.take().or_else(|| capturer.next_frame().and_then(even_frame));
-                let Some(frame) = frame else { continue };
-                if frame.width != width || frame.height != height { continue; }
-                if last_keyframe.elapsed() >= Duration::from_secs(2) { encoder.force_intra_frame(); last_keyframe = next_frame; }
-                let Some(encoded) = encoder.encode(&frame) else { continue };
-                let mut plaintext = encode::video_header(seq, frame.timestamp_us, encoded.keyframe, width, height);
-                plaintext.extend_from_slice(&encoded.data);
+                let Some(plaintext) = video.next(capturer.next_frame())? else { continue };
                 let sealed = sealer.seal(&[Tag::Video as u8], &plaintext);
                 transport_tx.send(Tag::Video, &sealed).await?;
-                seq += 1;
             }
         }
+    }
+}
+
+/// How long a new session waits for the first captured frame.
+const FIRST_FRAME_DEADLINE: Duration = Duration::from_secs(10);
+/// Interval between forced keyframes, so a viewer recovers from loss.
+const KEYFRAME_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Turns captured frames into sealed-ready video plaintext (header plus
+/// access unit), one per frame tick.
+///
+/// Capture is non-blocking and only yields a frame when the screen changed,
+/// so the last frame is re-encoded on ticks without a new one; that keeps
+/// the keyframe cadence and lets the encoder refine a static picture. A
+/// frame of a new size (display mode or monitor change) replaces the encoder,
+/// which starts with a keyframe, and updates the dimensions used to map input.
+struct VideoPipeline<E, F> {
+    encoder_factory: F,
+    encoder: E,
+    frame: encode::RawFrame,
+    dims: Arc<AtomicU32>,
+    seq: u64,
+    started: std::time::Instant,
+    last_keyframe: std::time::Instant,
+}
+
+impl<E, F> VideoPipeline<E, F>
+where
+    E: Encoder,
+    F: Fn(u16, u16) -> Result<E, encode::EncoderInitError>,
+{
+    /// `frame` must already be even-sized (see [`even_frame`]).
+    fn new(frame: encode::RawFrame, encoder_factory: F, dims: Arc<AtomicU32>) -> SessionResult<Self> {
+        let encoder = encoder_factory(frame.width, frame.height)?;
+        dims.store(pack_dims(frame.width, frame.height), Ordering::Release);
+        let now = std::time::Instant::now();
+        Ok(Self { encoder_factory, encoder, frame, dims, seq: 0, started: now, last_keyframe: now })
+    }
+
+    /// Encodes `fresh` if it is a usable frame, else the previous frame.
+    /// Returns `None` when the encoder produced no output for this tick.
+    fn next(&mut self, fresh: Option<encode::RawFrame>) -> SessionResult<Option<Vec<u8>>> {
+        if let Some(frame) = fresh.and_then(even_frame) {
+            if (frame.width, frame.height) != (self.frame.width, self.frame.height) {
+                log::info!("capture size changed to {}x{}", frame.width, frame.height);
+                self.encoder = (self.encoder_factory)(frame.width, frame.height)?;
+                self.dims.store(pack_dims(frame.width, frame.height), Ordering::Release);
+                self.last_keyframe = std::time::Instant::now();
+            }
+            self.frame = frame;
+        }
+        if self.last_keyframe.elapsed() >= KEYFRAME_INTERVAL {
+            self.encoder.force_intra_frame();
+            self.last_keyframe = std::time::Instant::now();
+        }
+        let Some(encoded) = self.encoder.encode(&self.frame) else { return Ok(None) };
+        // Stamped at encode time: repeated frames need their own timestamps.
+        // The header field is 32-bit microseconds and wraps after ~71 minutes.
+        let timestamp_us = self.started.elapsed().as_micros() as u32;
+        let mut plaintext = encode::video_header(
+            self.seq, timestamp_us, encoded.keyframe, self.frame.width, self.frame.height,
+        );
+        plaintext.extend_from_slice(&encoded.data);
+        self.seq += 1;
+        Ok(Some(plaintext))
     }
 }
 
@@ -1143,5 +1193,66 @@ mod tests {
         drop(tx);
         // The injector (and its probe sender) drops when the thread exits.
         assert_eq!(seen_rx.recv_timeout(std::time::Duration::from_secs(1)), Err(std::sync::mpsc::RecvTimeoutError::Disconnected));
+    }
+
+    /// (seq, keyframe, width, height) from a video plaintext header.
+    fn video_header_fields(plaintext: &[u8]) -> (u64, bool, u16, u16) {
+        (
+            u64::from_be_bytes(plaintext[0..8].try_into().unwrap()),
+            plaintext[13] & 1 == 1,
+            u16::from_be_bytes([plaintext[14], plaintext[15]]),
+            u16::from_be_bytes([plaintext[16], plaintext[17]]),
+        )
+    }
+
+    #[test]
+    fn video_pipeline_follows_capture_size_changes_and_repeats_static_frames() {
+        use crate::capture::{FakeCapturer, ScreenCapturer};
+        let mut capturer = FakeCapturer::new(64, 48);
+        let dims = Arc::new(AtomicU32::new(0));
+        let first = even_frame(capturer.next_frame().unwrap()).unwrap();
+        let mut video = VideoPipeline::new(
+            first,
+            |w, h| encode::H264Encoder::new(w, h, 15, 1_000_000),
+            Arc::clone(&dims),
+        ).unwrap();
+        assert_eq!(unpack_dims(dims.load(Ordering::Acquire)), (64, 48));
+
+        let first = video.next(None).unwrap().expect("first frame encodes");
+        assert_eq!(video_header_fields(&first), (0, true, 64, 48));
+        // No new capture: the last frame is repeated, not skipped.
+        let repeat = video.next(None).unwrap().expect("repeated frame encodes");
+        assert_eq!(video_header_fields(&repeat), (1, false, 64, 48));
+
+        // The display changes size (an odd width is cropped to even).
+        capturer.set_size(97, 32);
+        let resized = video.next(capturer.next_frame()).unwrap().expect("resized frame encodes");
+        assert_eq!(video_header_fields(&resized), (2, true, 96, 32));
+        assert_eq!(unpack_dims(dims.load(Ordering::Acquire)), (96, 32));
+        let repeat = video.next(None).unwrap().expect("repeated frame encodes");
+        assert_eq!(video_header_fields(&repeat), (3, false, 96, 32));
+    }
+
+    #[test]
+    fn video_pipeline_turns_encoder_init_failure_into_an_error() {
+        use crate::capture::{FakeCapturer, ScreenCapturer};
+        // Only 64x48 encoders can be created.
+        let factory = |w, h| {
+            if (w, h) == (64, 48) {
+                encode::H264Encoder::new(w, h, 15, 1_000_000)
+            } else {
+                Err(encode::EncoderInitError::new("unsupported size"))
+            }
+        };
+        let mut capturer = FakeCapturer::new(32, 32);
+        let dims = Arc::new(AtomicU32::new(0));
+        let small = even_frame(capturer.next_frame().unwrap()).unwrap();
+        assert!(VideoPipeline::new(small, factory, Arc::clone(&dims)).is_err());
+
+        capturer.set_size(64, 48);
+        let frame = even_frame(capturer.next_frame().unwrap()).unwrap();
+        let mut video = VideoPipeline::new(frame, factory, dims).unwrap();
+        capturer.set_size(32, 32);
+        assert!(video.next(capturer.next_frame()).is_err());
     }
 }
