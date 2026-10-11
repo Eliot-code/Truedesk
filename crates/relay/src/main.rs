@@ -1,3 +1,4 @@
+use axum::serve::ListenerExt;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
@@ -16,6 +17,8 @@ async fn main() {
     log::info!("relay listening on {}", listener.local_addr().unwrap());
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (app, handle) = relay::relay_with_shutdown(shutdown_rx);
+    // Nagle would delay small input and control frames behind video.
+    let listener = listener.tap_io(|tcp| { let _ = tcp.set_nodelay(true); });
     axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
         .with_graceful_shutdown(shutdown_signal(shutdown_tx))
         .await

@@ -8,7 +8,7 @@ use futures_util::{SinkExt, StreamExt};
 use protocol::{control::{Control, ERROR_ID_TAKEN}, frame, Tag};
 use tokio::net::TcpStream;
 use tokio::time::{timeout, Duration};
-use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{connect_async_with_config, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
 /// The WebSocket type returned by [`connect`].
 pub type RelayWebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -44,7 +44,8 @@ where
 /// Open a WebSocket connection to a relay endpoint (`ws://` or `wss://`).
 pub async fn connect(url: &str) -> Result<RelayWebSocket, tokio_tungstenite::tungstenite::Error> {
     install_crypto_provider();
-    Ok(connect_async(url).await?.0)
+    // Nagle would hold small input frames back waiting for ACKs.
+    Ok(connect_async_with_config(url, None, true).await?.0)
 }
 
 /// rustls needs a process-wide crypto provider before the first TLS handshake.
