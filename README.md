@@ -45,7 +45,7 @@ addresses; it does not relay media or receive desktop contents.
 - Local address book and recent peer IDs
 - Multi-monitor discovery and monitor selection
 
-The host sends its system sound on macOS 14.6+, Windows, and Linux (PulseAudio, or PipeWire via pipewire-pulse). Elsewhere (older macOS, Linux without either server) it sends the microphone. Windows and Linux host support is less mature than macOS, which is where most testing has happened.
+The host sends its system sound on macOS 14.6+, Windows, and Linux (PulseAudio, or PipeWire via pipewire-pulse). Elsewhere (older macOS, Linux without either server) it sends no sound. It never uses the microphone. Windows and Linux host support is less mature than macOS, which is where most testing has happened.
 
 For the architecture, security model, and self-hosting instructions, see
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),

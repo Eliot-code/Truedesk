@@ -100,8 +100,8 @@ identity.
 - TLS certificate validation and reverse-proxy configuration still matter for
   transport security. TLS does not replace the inner E2EE layer.
 - Host audio is the system output on macOS 14.6+, Windows, and Linux with a
-  PulseAudio or PipeWire (pipewire-pulse) server; elsewhere it falls back to
-  the default microphone.
+  PulseAudio or PipeWire (pipewire-pulse) server; elsewhere the host sends
+  no audio. The host never captures the microphone.
 - Windows and Linux host support is less mature and has not been
   runtime-tested across all capture, permission, and input-injection
   environments.

@@ -8,18 +8,18 @@ const SAMPLE_RATE: u32 = 48_000;
 const FRAME_DURATION_MS: u16 = 20;
 const SAMPLES_PER_CHANNEL: usize = 960;
 
-/// Capture the host's audio as 48 kHz, 20 ms Opus. Prefers system output
-/// (what the host hears) and falls back to the default microphone where
-/// loopback isn't available: macOS before 14.6, Linux without a PulseAudio
-/// or pipewire-pulse server, or a failed tap.
+/// Capture the host's system output (what the host hears) as 48 kHz, 20 ms
+/// Opus. Where loopback isn't available (macOS before 14.6, Linux without a
+/// PulseAudio or pipewire-pulse server, or a failed tap) no audio is sent:
+/// the microphone is never used, so viewers can't hear the host's room.
 /// Devices at other rates or with more than two channels are converted by
 /// `PcmConverter`.
 pub fn spawn_capture() -> mpsc::Receiver<AudioFrame> {
     let (tx, rx) = mpsc::channel(8);
     std::thread::spawn(move || {
         let host = cpal::default_host();
-        let Some(stream) = system_audio_stream(&host, &tx).or_else(|| microphone_stream(&host, &tx)) else {
-            log::warn!("audio capture unavailable: no usable output loopback or input device");
+        let Some(stream) = system_audio_stream(&host, &tx) else {
+            log::info!("no audio sent: system audio capture is unavailable on this host");
             return;
         };
         while !tx.is_closed() { std::thread::sleep(std::time::Duration::from_millis(250)); }
@@ -75,14 +75,6 @@ fn select_monitor(sink: &str, sources: &[String]) -> Option<usize> {
         (Some((index, _)), None) => Some(index),
         _ => None,
     }
-}
-
-fn microphone_stream(host: &cpal::Host, tx: &mpsc::Sender<AudioFrame>) -> Option<cpal::Stream> {
-    let device = host.default_input_device()?;
-    let config = device.default_input_config().ok()?;
-    let stream = open_stream(&device, config, tx);
-    if stream.is_some() { log::info!("audio source: microphone"); }
-    stream
 }
 
 fn open_stream(device: &cpal::Device, supported: cpal::SupportedStreamConfig,

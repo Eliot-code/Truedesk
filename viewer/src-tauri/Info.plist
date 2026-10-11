@@ -4,7 +4,5 @@
 <dict>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>OpenDesk sends this computer's sound to the person viewing it during a remote session.</string>
-	<key>NSMicrophoneUsageDescription</key>
-	<string>OpenDesk sends microphone audio to the viewer when system audio can't be captured.</string>
 </dict>
 </plist>
