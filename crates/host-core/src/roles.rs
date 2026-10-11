@@ -1132,7 +1132,74 @@ where
     }
     let (transport_tx, transport_rx) = transport.into_split();
 
-    run_viewer_media_loop_with_control(transport_tx, transport_rx, frame_sink, input_rx, sealer, opener, control_plain_rx, rejected_rx, monitor_sink, audio_sink, timings.dead_peer).await
+    let keyframe_requests = KeyframeRequester { sender: reliable.sender(), sealer: Arc::clone(&control_sealer) };
+    run_viewer_media_loop_with_control(transport_tx, transport_rx, frame_sink, input_rx, sealer, opener, control_plain_rx, rejected_rx, monitor_sink, audio_sink, Some(keyframe_requests), timings.dead_peer).await
+}
+
+/// Ask the host for a keyframe, e.g. after a decoder error. Uses the
+/// session's reliable control channel and control sealer (a viewer gets
+/// both from its [`DataHandle`]: `control_sender` and `control_sealer`).
+/// The host ignores requests within 250 ms of its last keyframe.
+pub async fn request_keyframe(sender: &transport::reliable::ReliableSender, sealer: &SharedSealer) -> Result<(), transport::TransportError> {
+    sender.send_frame(Tag::Control, &seal_control(sealer, &Control::RequestKeyframe)).await
+}
+
+/// What the viewer media loop needs to ask the host for keyframes.
+struct KeyframeRequester {
+    sender: transport::reliable::ReliableSender,
+    sealer: SharedSealer,
+}
+
+/// How long the viewer waits for a requested keyframe before asking again.
+const KEYFRAME_RETRY: Duration = Duration::from_millis(500);
+
+/// Viewer-side continuity check of the video sequence. A frame after a gap
+/// (lost UDP fragments, a dropped frame) references data the decoder never
+/// got, so frames are held back until the next keyframe and the host is
+/// asked for one.
+#[derive(Debug)]
+struct VideoGate {
+    next_seq: Option<u64>,
+    awaiting_keyframe: bool,
+    last_request: Option<Instant>,
+}
+
+impl VideoGate {
+    fn new() -> Self { Self { next_seq: None, awaiting_keyframe: true, last_request: None } }
+
+    /// Whether frame `seq` can be decoded.
+    fn accept(&mut self, seq: u64, keyframe: bool) -> bool {
+        if self.next_seq.is_some_and(|next| seq < next) {
+            // Late or duplicate: the decoder has moved past it.
+            return false;
+        }
+        if keyframe {
+            self.awaiting_keyframe = false;
+        } else if self.awaiting_keyframe || self.next_seq.is_some_and(|next| seq != next) {
+            self.awaiting_keyframe = true;
+            return false;
+        }
+        self.next_seq = Some(seq + 1);
+        true
+    }
+
+    /// An accepted frame never reached the decoder.
+    fn lost(&mut self) { self.awaiting_keyframe = true; }
+
+    /// Whether to (re)send a keyframe request now.
+    fn should_request(&mut self, now: Instant) -> bool {
+        if !self.awaiting_keyframe || self.last_request.is_some_and(|at| now.duration_since(at) < KEYFRAME_RETRY) {
+            return false;
+        }
+        self.last_request = Some(now);
+        true
+    }
+}
+
+/// (seq, keyframe) from a video plaintext header (see `encode::video_header`).
+fn video_seq(plaintext: &[u8]) -> Option<(u64, bool)> {
+    let header = plaintext.get(..18)?;
+    Some((u64::from_be_bytes(header[..8].try_into().ok()?), header[13] & 1 == 1))
 }
 
 #[allow(dead_code)]
@@ -1146,7 +1213,7 @@ async fn run_viewer_media_loop(
 ) -> Result<(), String> {
     let (_tx, rx) = mpsc::channel(1);
     let (_rejected_tx, rejected_rx) = mpsc::channel(1);
-    run_viewer_media_loop_with_control(transport_tx, transport_rx, frame_sink, input_rx, sealer, opener, rx, rejected_rx, None, None, DEAD_PEER_TIMEOUT).await
+    run_viewer_media_loop_with_control(transport_tx, transport_rx, frame_sink, input_rx, sealer, opener, rx, rejected_rx, None, None, None, DEAD_PEER_TIMEOUT).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1161,14 +1228,20 @@ async fn run_viewer_media_loop_with_control(
     mut rejected_rx: tokio::sync::mpsc::Receiver<String>,
     monitor_sink: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
     audio_sink: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    keyframe_requests: Option<KeyframeRequester>,
     dead_peer: Duration,
 ) -> Result<(), String> {
     // The host keepalives on the relay socket even when media is direct, so
     // silence there means the host is gone: a direct transport never reports
     // a dead peer on its own.
     let mut peer_deadline = tokio::time::Instant::now() + dead_peer;
+    let mut gate = VideoGate::new();
+    // A decodable frame the frame sink had no room for yet. Video never
+    // blocks this loop: input and control keep flowing while it waits.
+    let mut pending_video: Option<Vec<u8>> = None;
     loop {
         tokio::select! {
+            // Input is polled before media so a video burst never delays it.
             biased;
             Some(code) = rejected_rx.recv() => return Err(rejection_error(&code)),
             plaintext = control_rx.recv() => {
@@ -1187,9 +1260,18 @@ async fn run_viewer_media_loop_with_control(
                     _ => {}
                 }
             },
+            input = input_rx.recv() => {
+                let Some(bytes) = input else { return Ok(()) };
+                let sealed = sealer.seal(&[Tag::Input as u8], &bytes);
+                if transport_tx.send(Tag::Input, &sealed).await.is_err() { return Err("viewer input transport closed".into()) }
+            }
             _ = tokio::time::sleep_until(peer_deadline) => {
                 return Err(format!("connection closed: host stopped responding for {}s", dead_peer.as_secs()));
             },
+            permit = frame_sink.reserve(), if pending_video.is_some() => {
+                let Ok(permit) = permit else { return Err("viewer frame channel closed".into()) };
+                if let Some(frame) = pending_video.take() { permit.send(frame); }
+            }
             received = transport_rx.recv() => {
                 let Some((tag, sealed)) = received else {
                     // The host's rejection and its close can race through
@@ -1202,15 +1284,36 @@ async fn run_viewer_media_loop_with_control(
                 };
                 let Some(plaintext) = opener.open(&[tag as u8], &sealed) else { continue };
                 match tag {
-                    Tag::Video => if frame_sink.send(plaintext).await.is_err() { return Err("viewer frame channel closed".into()) },
-                    Tag::Audio => if let Some(sink) = &audio_sink { if sink.send(plaintext).await.is_err() { return Err("viewer audio channel closed".into()) } },
+                    Tag::Video => {
+                        let Some((seq, keyframe)) = video_seq(&plaintext) else { continue };
+                        if gate.accept(seq, keyframe) {
+                            if pending_video.is_some() && !keyframe {
+                                // The sink is still behind: this delta cannot
+                                // be queued without breaking its reference.
+                                gate.lost();
+                            } else {
+                                // A keyframe supersedes a stale pending frame.
+                                pending_video = None;
+                                match frame_sink.try_send(plaintext) {
+                                    Ok(()) => {}
+                                    Err(mpsc::error::TrySendError::Full(frame)) => pending_video = Some(frame),
+                                    Err(mpsc::error::TrySendError::Closed(_)) => return Err("viewer frame channel closed".into()),
+                                }
+                            }
+                        }
+                        if gate.should_request(Instant::now()) {
+                            if let Some(requests) = &keyframe_requests {
+                                log::debug!("video frames lost; requesting a keyframe");
+                                let _ = request_keyframe(&requests.sender, &requests.sealer).await;
+                            }
+                        }
+                    }
+                    // Audio is dropped rather than waited for.
+                    Tag::Audio => if let Some(sink) = &audio_sink {
+                        if let Err(mpsc::error::TrySendError::Closed(_)) = sink.try_send(plaintext) { return Err("viewer audio channel closed".into()) }
+                    },
                     _ => {}
                 }
-            }
-            input = input_rx.recv() => {
-                let Some(bytes) = input else { return Ok(()) };
-                let sealed = sealer.seal(&[Tag::Input as u8], &bytes);
-                if transport_tx.send(Tag::Input, &sealed).await.is_err() { return Err("viewer input transport closed".into()) }
             }
         }
     }
@@ -1446,7 +1549,8 @@ mod tests {
             Opener::new(viewer_recv),
         ));
 
-        let video = b"18-byte-header-plus-h264".to_vec();
+        let mut video = encode::video_header(0, 0, true, 64, 48);
+        video.extend_from_slice(b"h264");
         let sealed_video = host_video_sealer.seal(&[Tag::Video as u8], &video);
         host_tx.send(Tag::Video, &sealed_video).await.unwrap();
         assert_eq!(timeout(Duration::from_secs(1), frames.recv()).await.unwrap(), Some(video));
@@ -1637,6 +1741,51 @@ mod tests {
         assert!(!video_header_fields(&video.next(None).unwrap().unwrap()).1);
     }
 
+    #[test]
+    fn video_gate_drops_frames_after_a_gap_until_a_keyframe() {
+        let mut gate = VideoGate::new();
+        let now = Instant::now();
+        // A stream must start at a keyframe.
+        assert!(!gate.accept(0, false));
+        assert!(gate.should_request(now));
+        assert!(gate.accept(1, true));
+        assert!(gate.accept(2, false));
+        assert!(!gate.should_request(now + KEYFRAME_RETRY));
+        // Frame 3 is lost: 4 and 5 reference it.
+        assert!(!gate.accept(4, false));
+        assert!(gate.should_request(now + KEYFRAME_RETRY));
+        assert!(!gate.accept(5, false));
+        assert!(!gate.should_request(now + KEYFRAME_RETRY), "requests are rate limited");
+        assert!(gate.should_request(now + KEYFRAME_RETRY * 2), "an unanswered request is repeated");
+        // A late frame 3 does not resume the stream either.
+        assert!(!gate.accept(3, false));
+        assert!(gate.accept(6, true));
+        assert!(gate.accept(7, false));
+        // Duplicates and stale frames are ignored without a request.
+        assert!(!gate.accept(7, false));
+        assert!(!gate.accept(1, true));
+        assert!(!gate.should_request(now + KEYFRAME_RETRY * 3));
+    }
+
+    #[test]
+    fn video_gate_waits_for_a_keyframe_after_a_local_drop() {
+        let mut gate = VideoGate::new();
+        assert!(gate.accept(0, true));
+        gate.lost();
+        assert!(!gate.accept(1, false));
+        assert!(gate.should_request(Instant::now()));
+        assert!(gate.accept(2, true));
+    }
+
+    #[test]
+    fn video_seq_reads_the_header() {
+        let mut plaintext = encode::video_header(42, 7, true, 64, 48);
+        plaintext.extend_from_slice(b"au");
+        assert_eq!(video_seq(&plaintext), Some((42, true)));
+        assert_eq!(video_seq(&encode::video_header(43, 7, false, 64, 48)), Some((43, false)));
+        assert_eq!(video_seq(&[0; 17]), None);
+    }
+
     #[tokio::test]
     async fn unit_slot_hands_over_one_unit_at_a_time() {
         let slot = Arc::new(UnitSlot::default());
@@ -1671,6 +1820,83 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
         slot.put(vec![9]);
         assert_eq!(timeout(Duration::from_secs(1), consumer).await.unwrap().unwrap(), vec![9]);
+    }
+
+    #[tokio::test]
+    async fn viewer_requests_a_keyframe_after_a_sequence_gap() {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::protocol::Role;
+        let shared = [31u8; 32];
+        let (viewer_send, viewer_recv) = derive_keys(&shared, false);
+        let (host_send, _) = derive_keys(&shared, true);
+        let mut host_video_sealer = Sealer::new(host_send);
+        let (viewer_control_send, _) = protocol::kex::derive_control_keys(&shared, false);
+        let (_, host_control_recv) = protocol::kex::derive_control_keys(&shared, true);
+
+        // The viewer's control channel, read raw on the host end.
+        let (viewer_ws, host_ws) = tokio::io::duplex(64 * 1024);
+        let viewer_ws = WebSocketStream::from_raw_socket(viewer_ws, Role::Client, None).await;
+        let mut host_ws = WebSocketStream::from_raw_socket(host_ws, Role::Server, None).await;
+        let reliable = ReliableChannel::spawn(viewer_ws);
+        let requests = KeyframeRequester { sender: reliable.sender(), sealer: Arc::new(Mutex::new(Sealer::new(viewer_control_send))) };
+
+        let (viewer_conn, host_conn) = pipe();
+        let (viewer_tx, viewer_rx) = DirectTransport::new(Arc::new(viewer_conn)).into_split();
+        let (mut host_tx, _host_rx) = DirectTransport::new(Arc::new(host_conn)).into_split();
+        let (frame_sink, mut frames) = mpsc::channel(8);
+        let (_input_tx, input_rx) = mpsc::channel(1);
+        let (_control_tx, control_rx) = mpsc::channel(1);
+        let (_rejected_tx, rejected_rx) = mpsc::channel(1);
+        let viewer = tokio::spawn(run_viewer_media_loop_with_control(
+            viewer_tx, viewer_rx, frame_sink, input_rx, Sealer::new(viewer_send), Opener::new(viewer_recv),
+            control_rx, rejected_rx, None, None, Some(requests), DEAD_PEER_TIMEOUT,
+        ));
+
+        for (seq, keyframe) in [(0, true), (1, false), (3, false), (4, true)] {
+            let plaintext = encode::video_header(seq, 0, keyframe, 64, 48);
+            let sealed = host_video_sealer.seal(&[Tag::Video as u8], &plaintext);
+            host_tx.send(Tag::Video, &sealed).await.unwrap();
+        }
+        let mut seqs = Vec::new();
+        for _ in 0..3 {
+            let frame = timeout(Duration::from_secs(1), frames.recv()).await.unwrap().unwrap();
+            seqs.push(video_seq(&frame).unwrap().0);
+        }
+        assert_eq!(seqs, [0, 1, 4], "frame 3 follows a gap and is held back");
+
+        let message = timeout(Duration::from_secs(1), host_ws.next()).await.unwrap().unwrap().unwrap();
+        let (tag, body) = protocol::frame::unwrap(&message.into_data()).map(|(tag, body)| (tag, body.to_vec())).unwrap();
+        assert_eq!(tag, Tag::Control);
+        let plaintext = Opener::new(host_control_recv).open(&[Tag::Control as u8], &body).unwrap();
+        assert_eq!(Control::from_bytes(&plaintext), Some(Control::RequestKeyframe));
+        viewer.abort();
+    }
+
+    #[tokio::test]
+    async fn viewer_input_flows_while_the_frame_sink_is_full() {
+        let shared = [32u8; 32];
+        let (viewer_send, viewer_recv) = derive_keys(&shared, false);
+        let (host_send, host_recv) = derive_keys(&shared, true);
+        let mut host_video_sealer = Sealer::new(host_send);
+        let mut host_input_opener = Opener::new(host_recv);
+        let (viewer_conn, host_conn) = pipe();
+        let (viewer_tx, viewer_rx) = DirectTransport::new(Arc::new(viewer_conn)).into_split();
+        let (mut host_tx, mut host_rx) = DirectTransport::new(Arc::new(host_conn)).into_split();
+        // Nobody drains the frame sink.
+        let (frame_sink, _frames) = mpsc::channel(1);
+        let (input_tx, input_rx) = mpsc::channel(4);
+        let viewer = tokio::spawn(run_viewer_media_loop(
+            viewer_tx, viewer_rx, frame_sink, input_rx, Sealer::new(viewer_send), Opener::new(viewer_recv),
+        ));
+        for seq in 0..10 {
+            let sealed = host_video_sealer.seal(&[Tag::Video as u8], &encode::video_header(seq, 0, seq == 0, 64, 48));
+            host_tx.send(Tag::Video, &sealed).await.unwrap();
+        }
+        input_tx.send(b"click".to_vec()).await.unwrap();
+        let (tag, sealed) = timeout(Duration::from_secs(1), host_rx.recv()).await.expect("input is not blocked by video").unwrap();
+        assert_eq!(tag, Tag::Input);
+        assert_eq!(host_input_opener.open(&[Tag::Input as u8], &sealed), Some(b"click".to_vec()));
+        viewer.abort();
     }
 
     mod liveness {
@@ -1776,6 +2002,38 @@ mod tests {
         }
 
         fn drain_frames(viewer: &mut Viewer) { while viewer.frames.try_recv().is_ok() {} }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn viewer_keyframe_request_gets_a_keyframe() {
+            let timings = SessionTimings::default();
+            let (_relay, host_ws, viewer_ws) = TestRelay::start(Duration::from_secs(3600)).await;
+            let host = spawn_host(host_ws, timings, None);
+            let (frame_tx, mut frames) = mpsc::channel(64);
+            let (_input, input_rx) = mpsc::channel(4);
+            let (ready_tx, ready_rx) = oneshot::channel();
+            let viewer = tokio::spawn(async move {
+                run_viewer_session_inner(viewer_ws, PASSWORD, SESSION, frame_tx, input_rx, Some(ready_tx), None, None, None, timings).await
+            });
+            let handle = timeout(Duration::from_secs(20), ready_rx).await.unwrap().unwrap();
+            let first = timeout(Duration::from_secs(20), frames.recv()).await.unwrap().unwrap();
+            assert!(video_header_fields(&first).1, "the stream starts with a keyframe");
+
+            // Past the host's rate limit, well before its periodic keyframe.
+            tokio::time::sleep(stream::MIN_REQUESTED_KEYFRAME_SPACING + Duration::from_millis(50)).await;
+            while frames.try_recv().is_ok() {}
+            request_keyframe(&handle.control_sender, &handle.control_sealer).await.unwrap();
+            timeout(Duration::from_secs(2), async {
+                loop {
+                    let frame = frames.recv().await.expect("viewer frame sink closed");
+                    let (seq, keyframe, _, _) = video_header_fields(&frame);
+                    if keyframe && seq > 0 { break; }
+                }
+            })
+            .await
+            .expect("the host answers a keyframe request");
+            host.abort();
+            viewer.abort();
+        }
 
         #[tokio::test(flavor = "multi_thread")]
         async fn keepalive_holds_idle_relay_sockets_open() {
