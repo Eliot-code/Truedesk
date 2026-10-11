@@ -120,8 +120,13 @@ where
                     stream.next().await
                 };
                 let Some(message) = message else { break };
-                let Ok(Message::Binary(bytes)) = message else {
-                    break;
+                let bytes = match message {
+                    Ok(Message::Binary(bytes)) => bytes,
+                    // WebSocket-level pings (answered by tungstenite) and
+                    // pongs are liveness traffic, and Text is not part of the
+                    // protocol: none of them may tear the session down.
+                    Ok(Message::Ping(_) | Message::Pong(_) | Message::Text(_) | Message::Frame(_)) => continue,
+                    Ok(Message::Close(_)) | Err(_) => break,
                 };
                 let Some((tag, body)) = frame::unwrap(&bytes) else {
                     continue;
@@ -303,6 +308,24 @@ mod tests {
                 .await
                 .unwrap(),
             Some((Tag::Video, b"still flowing".to_vec()))
+        );
+    }
+
+    #[tokio::test]
+    async fn ping_pong_and_text_frames_do_not_close_the_channel() {
+        let (left, right) = tokio::io::duplex(64 * 1024);
+        let mut raw = WebSocketStream::from_raw_socket(left, Role::Client, None).await;
+        let right = WebSocketStream::from_raw_socket(right, Role::Server, None).await;
+        let mut channel = ReliableChannel::spawn(right);
+        let mut control_rx = channel.take_control_rx().unwrap();
+
+        raw.send(Message::Ping(b"are you there".to_vec().into())).await.unwrap();
+        raw.send(Message::Pong(Vec::new().into())).await.unwrap();
+        raw.send(Message::Text("not protocol".into())).await.unwrap();
+        raw.send(Message::Binary(frame::wrap(Tag::Control, b"still open").into())).await.unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(1), control_rx.recv()).await.unwrap(),
+            Some(b"still open".to_vec())
         );
     }
 
