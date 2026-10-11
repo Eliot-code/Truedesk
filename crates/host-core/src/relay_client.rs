@@ -5,7 +5,7 @@
 #![allow(clippy::result_large_err)]
 
 use futures_util::{SinkExt, StreamExt};
-use protocol::{control::Control, frame, Tag};
+use protocol::{control::{Control, ERROR_ID_TAKEN}, frame, Tag};
 use tokio::net::TcpStream;
 use tokio::time::{timeout, Duration};
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
@@ -103,11 +103,21 @@ pub async fn await_pairing(ws: &mut RelayWebSocket) -> Result<Pairing, String> {
         let Some((Tag::Control, body)) = frame::unwrap(&message) else {
             return Err("invalid pairing message".into());
         };
-        let Some(Control::Paired { session, peer_id, .. }) = Control::from_bytes(body) else {
-            return Err("invalid pairing message".into());
+        return match Control::from_bytes(body) {
+            Some(Control::Paired { session, peer_id, .. }) => Ok(Pairing { session, peer_id }),
+            Some(Control::Error { code }) if code == ERROR_ID_TAKEN => Err(format!(
+                "relay rejected registration ({ERROR_ID_TAKEN}): this ID is registered to another device"
+            )),
+            Some(Control::Error { code }) => Err(format!("relay rejected registration ({code})")),
+            _ => Err("invalid pairing message".into()),
         };
-        return Ok(Pairing { session, peer_id });
     }
+}
+
+/// True when an [`await_pairing`] error means the relay refused the
+/// registration because the ID belongs to a different token.
+pub fn is_id_taken(error: &str) -> bool {
+    error.contains(ERROR_ID_TAKEN)
 }
 
 /// Ask the relay to connect this WebSocket to a registered peer.

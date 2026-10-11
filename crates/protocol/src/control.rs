@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+/// `Control::Error` code the relay sends when a `register` names an ID that is
+/// leased to a different token.
+pub const ERROR_ID_TAKEN: &str = "id_taken";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum Control {
