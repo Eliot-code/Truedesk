@@ -1,6 +1,6 @@
 //! Relay media transport view over the session's [`ReliableChannel`].
 
-use super::{ReliableSender, Transport, TransportError, TransportReceiver, TransportSender};
+use super::{reliable::VideoPermit, ReliableSender, Transport, TransportError, TransportReceiver, TransportSender};
 use protocol::Tag;
 use std::marker::PhantomData;
 use tokio::sync::mpsc;
@@ -22,18 +22,36 @@ impl<S> RelayTransport<S> {
 impl<S> Transport for RelayTransport<S> {
     fn into_split(mut self) -> (Box<dyn TransportSender>, Box<dyn TransportReceiver>) {
         (
-            Box::new(RelaySender { sender: self.sender }),
+            Box::new(RelaySender { sender: self.sender, video_permit: None }),
             Box::new(RelayReceiver { media_rx: self.media_rx.take().expect("media receiver already taken") }),
         )
     }
 }
 
-pub struct RelaySender { sender: ReliableSender }
+pub struct RelaySender {
+    sender: ReliableSender,
+    /// Video budget reserved by `ready_for_video` for the next video frame.
+    video_permit: Option<VideoPermit>,
+}
 
 #[async_trait::async_trait]
 impl TransportSender for RelaySender {
     async fn send(&mut self, tag: Tag, sealed: &[u8]) -> Result<(), TransportError> {
-        self.sender.send_frame(tag, sealed).await
+        if tag != Tag::Video {
+            return self.sender.send_frame(tag, sealed).await;
+        }
+        let permit = match self.video_permit.take() {
+            Some(permit) => permit,
+            None => self.sender.video_permit().await?,
+        };
+        self.sender.send_video(permit, sealed).await
+    }
+
+    async fn ready_for_video(&mut self) {
+        if self.video_permit.is_none() {
+            // A closed writer surfaces as an error on the next send.
+            self.video_permit = self.sender.video_permit().await.ok();
+        }
     }
 }
 

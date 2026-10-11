@@ -9,7 +9,7 @@ use super::TransportError;
 use futures_util::{SinkExt, StreamExt};
 use protocol::{frame, Tag};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use std::collections::VecDeque;
 use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
@@ -25,6 +25,16 @@ const MAX_PENDING_DATA: usize = 256;
 const MAX_PENDING_DATA_BYTES: usize = 4 * 1024 * 1024 - MAX_DATA_BODY;
 const MAX_PENDING_MEDIA_BYTES: usize = 8 * 1024 * 1024 - MAX_VIDEO_BODY;
 const MAX_PENDING_MEDIA: usize = 128;
+/// Video frames waiting for the media consumer. A consumer this far behind
+/// gets new frames dropped (it sees a sequence gap and asks for a
+/// keyframe) instead of an ever older backlog; audio and input are not
+/// evicted by video.
+const MAX_PENDING_VIDEO: usize = 3;
+/// Video frames queued for or being written to the socket. A sender waits
+/// for one to flush before queueing another, so on a slow link the host
+/// encodes fresh frames instead of building seconds of queue, and control
+/// frames never wait behind more than this many video frames.
+pub const MAX_VIDEO_IN_FLIGHT: usize = 2;
 /// KEX messages are small SPAKE2 values; 4 KiB rejects malformed growth.
 const MAX_KEX_BODY: usize = 4 * 1024;
 /// Control is JSON ICE/monitor/auth traffic; 64 KiB is far above normal use.
@@ -53,15 +63,46 @@ pub struct ReliableChannel<S> {
 /// Cloneable sending handle for the session's single WebSocket writer.
 #[derive(Clone)]
 pub struct ReliableSender {
-    writer_tx: mpsc::Sender<Vec<u8>>,
+    writer_tx: mpsc::Sender<Outgoing>,
+    video_budget: Arc<Semaphore>,
 }
+
+/// A wrapped frame for the writer. A video frame carries its in-flight
+/// permit, released once the frame is written.
+struct Outgoing {
+    bytes: Vec<u8>,
+    _video_permit: Option<OwnedSemaphorePermit>,
+}
+
+/// The right to queue one video frame (see [`MAX_VIDEO_IN_FLIGHT`]).
+pub struct VideoPermit(OwnedSemaphorePermit);
 
 impl ReliableSender {
     pub async fn send_frame(&self, tag: Tag, body: &[u8]) -> Result<(), TransportError> {
-        self.writer_tx
-            .send(frame::wrap(tag, body))
+        if tag == Tag::Video {
+            let permit = self.video_permit().await?;
+            return self.send_video(permit, body).await;
+        }
+        self.queue(Outgoing { bytes: frame::wrap(tag, body), _video_permit: None }).await
+    }
+
+    /// Waits until fewer than [`MAX_VIDEO_IN_FLIGHT`] video frames are
+    /// queued. Cancel safe.
+    pub async fn video_permit(&self) -> Result<VideoPermit, TransportError> {
+        Arc::clone(&self.video_budget)
+            .acquire_owned()
             .await
+            .map(VideoPermit)
             .map_err(|_| TransportError::Closed)
+    }
+
+    /// Queues a video frame using a permit from [`Self::video_permit`].
+    pub async fn send_video(&self, permit: VideoPermit, body: &[u8]) -> Result<(), TransportError> {
+        self.queue(Outgoing { bytes: frame::wrap(Tag::Video, body), _video_permit: Some(permit.0) }).await
+    }
+
+    async fn queue(&self, outgoing: Outgoing) -> Result<(), TransportError> {
+        self.writer_tx.send(outgoing).await.map_err(|_| TransportError::Closed)
     }
 }
 
@@ -72,7 +113,8 @@ where
     /// Start the reader and writer tasks for an already connected WebSocket.
     pub fn spawn(ws: WebSocketStream<S>) -> Self {
         let (sink, mut stream) = ws.split();
-        let (writer_tx, mut writer_rx) = mpsc::channel::<Vec<u8>>(CHANNEL_CAPACITY);
+        let (writer_tx, mut writer_rx) = mpsc::channel::<Outgoing>(CHANNEL_CAPACITY);
+        let video_budget = Arc::new(Semaphore::new(MAX_VIDEO_IN_FLIGHT));
         // One slot makes the staging-byte budgets below cover the channel too
         // (the slot is bounded by the largest frame for its path).
         let (data_tx, data_rx) = mpsc::channel::<Vec<u8>>(1);
@@ -83,7 +125,8 @@ where
 
         let writer_task = tokio::spawn(async move {
             let mut sink = sink;
-            while let Some(bytes) = writer_rx.recv().await {
+            // Each frame's video permit (if any) drops after it is written.
+            while let Some(Outgoing { bytes, _video_permit }) = writer_rx.recv().await {
                 if sink.send(Message::Binary(bytes.into())).await.is_err() {
                     break;
                 }
@@ -145,8 +188,7 @@ where
                         if !reader_application_traffic_enabled.load(Ordering::Acquire) { continue; }
                         if enqueue_data(&mut pending_data, &mut pending_data_bytes, body).is_err() { break; }
                     }
-                    // Media is lossy under pressure; drop the oldest item so
-                    // the consumer sees the freshest frame available.
+                    // Media is lossy under pressure (see `enqueue_media`).
                     Tag::Video | Tag::Audio | Tag::Input => {
                         if !reader_application_traffic_enabled.load(Ordering::Acquire) { continue; }
                         enqueue_media(&mut pending_media, &mut pending_media_bytes, tag, body);
@@ -163,7 +205,7 @@ where
         });
 
         Self {
-            sender: ReliableSender { writer_tx },
+            sender: ReliableSender { writer_tx, video_budget },
             data_rx: Some(data_rx),
             media_rx: Some(media_rx),
             control_rx: Some(control_rx),
@@ -220,8 +262,14 @@ fn enqueue_data(queue: &mut VecDeque<Vec<u8>>, bytes: &mut usize, body: &[u8]) -
     Ok(())
 }
 
+/// Video beyond [`MAX_PENDING_VIDEO`] is dropped on arrival: the queued
+/// frames stay decodable and the consumer detects the gap. Otherwise the
+/// oldest items are dropped to stay within the count and byte budgets.
 fn enqueue_media(queue: &mut VecDeque<(Tag, Vec<u8>)>, bytes: &mut usize, tag: Tag, body: &[u8]) {
     if body.len() > MAX_PENDING_MEDIA_BYTES { return; }
+    if tag == Tag::Video && queue.iter().filter(|(queued, _)| *queued == Tag::Video).count() >= MAX_PENDING_VIDEO {
+        return;
+    }
     while queue.len() >= MAX_PENDING_MEDIA || (*bytes).saturating_add(body.len()) > MAX_PENDING_MEDIA_BYTES {
         if let Some((_, old_body)) = queue.pop_front() { *bytes -= old_body.len(); } else { break; }
     }
@@ -272,7 +320,9 @@ mod tests {
         let sends = async {
             for index in 0..32u8 {
                 a.send_frame(Tag::Data, &[index]).await.unwrap();
-                a.send_frame(Tag::Video, &[index + 32]).await.unwrap();
+                // Video is capped while the consumer lags (tested below);
+                // input and audio are not.
+                a.send_frame(Tag::Input, &[index + 32]).await.unwrap();
                 a.send_frame(Tag::Audio, &[index + 64]).await.unwrap();
             }
         };
@@ -285,7 +335,7 @@ mod tests {
         assert_eq!(data, (0..32u8).map(|n| vec![n]).collect::<Vec<_>>());
         assert_eq!(
             media,
-            (0..32u8).flat_map(|n| [(Tag::Video, vec![n + 32]), (Tag::Audio, vec![n + 64])])
+            (0..32u8).flat_map(|n| [(Tag::Input, vec![n + 32]), (Tag::Audio, vec![n + 64])])
                 .collect::<Vec<_>>()
         );
     }
@@ -339,11 +389,67 @@ mod tests {
 
         let mut media = VecDeque::new();
         let mut media_bytes = 0;
-        enqueue_media(&mut media, &mut media_bytes, Tag::Video, &[1; 1536 * 1024]);
-        enqueue_media(&mut media, &mut media_bytes, Tag::Video, &[2; 1536 * 1024]);
-        enqueue_media(&mut media, &mut media_bytes, Tag::Video, &[3; 1536 * 1024]);
+        enqueue_media(&mut media, &mut media_bytes, Tag::Audio, &[1; 1536 * 1024]);
+        enqueue_media(&mut media, &mut media_bytes, Tag::Audio, &[2; 1536 * 1024]);
+        enqueue_media(&mut media, &mut media_bytes, Tag::Audio, &[3; 1536 * 1024]);
         assert!(media_bytes <= MAX_PENDING_MEDIA_BYTES);
         assert_eq!(media.front().map(|(_, body)| body[0]), Some(2));
+    }
+
+    #[test]
+    fn pending_video_is_capped_without_evicting_input() {
+        let mut media = VecDeque::new();
+        let mut bytes = 0;
+        enqueue_media(&mut media, &mut bytes, Tag::Input, b"key down");
+        for n in 0..5u8 {
+            enqueue_media(&mut media, &mut bytes, Tag::Video, &[n]);
+        }
+        enqueue_media(&mut media, &mut bytes, Tag::Input, b"key up");
+        // The oldest video frames are kept (still decodable), later ones dropped.
+        let mut expected = vec![(Tag::Input, b"key down".to_vec())];
+        expected.extend((0..MAX_PENDING_VIDEO as u8).map(|n| (Tag::Video, vec![n])));
+        expected.push((Tag::Input, b"key up".to_vec()));
+        assert_eq!(media.into_iter().collect::<Vec<_>>(), expected);
+    }
+
+    #[tokio::test]
+    async fn video_in_flight_is_bounded_but_control_is_not() {
+        // Nobody reads the far end, so the writer stalls after the duplex
+        // buffer fills: queued video must then hold every permit.
+        let (left, _right) = tokio::io::duplex(1024);
+        let left = WebSocketStream::from_raw_socket(left, Role::Client, None).await;
+        let channel = ReliableChannel::spawn(left);
+        let sender = channel.sender();
+        let mut permits = Vec::new();
+        for _ in 0..MAX_VIDEO_IN_FLIGHT + 2 {
+            match timeout(Duration::from_millis(100), sender.video_permit()).await {
+                Ok(permit) => {
+                    sender.send_video(permit.unwrap(), &[0; 4096]).await.unwrap();
+                    permits.push(());
+                }
+                Err(_) => break,
+            }
+        }
+        assert_eq!(permits.len(), MAX_VIDEO_IN_FLIGHT, "video beyond the budget must wait");
+        timeout(Duration::from_millis(100), sender.send_frame(Tag::Control, b"keyframe please"))
+            .await
+            .expect("control frames do not wait for the video budget")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn video_permits_return_once_frames_are_written() {
+        let (left, right) = tokio::io::duplex(1024 * 1024);
+        let left = WebSocketStream::from_raw_socket(left, Role::Client, None).await;
+        let right = WebSocketStream::from_raw_socket(right, Role::Server, None).await;
+        let a = ReliableChannel::spawn(left);
+        let mut b = ReliableChannel::spawn(right);
+        b.enable_application_traffic();
+        let mut media_rx = b.take_media_rx().unwrap();
+        for n in 0..10u8 {
+            timeout(Duration::from_secs(1), a.send_frame(Tag::Video, &[n])).await.expect("budget frees up").unwrap();
+            assert_eq!(timeout(Duration::from_secs(1), media_rx.recv()).await.unwrap(), Some((Tag::Video, vec![n])));
+        }
     }
 
     #[tokio::test]

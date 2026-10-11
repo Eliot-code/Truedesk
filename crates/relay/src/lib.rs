@@ -51,6 +51,8 @@ const DEFAULT_MAX_SIGNAL_MESSAGE: usize = 8 * 1024 * 1024;
 const DEFAULT_CONNECTION_ATTEMPT_BURST: u32 = 20;
 const DEFAULT_CONNECTION_ATTEMPT_REFILL_SECS: u64 = 10;
 const DEFAULT_SWEEP_SECS: u64 = 60;
+/// Frames queued toward one peer before the other peer's reads pause.
+const PEER_QUEUE: usize = 32;
 
 #[derive(Clone)]
 pub struct RelayState {
@@ -296,7 +298,10 @@ async fn handle(socket: WebSocket, state: RelayState, addr: IpAddr, guard: Optio
     };
     log::info!("event=connection_open remote={addr} reason=accepted active_connections={}", state.limits.active());
     let (mut sink, mut stream) = socket.split();
-    let (my_tx, mut my_rx) = mpsc::channel::<Vec<u8>>(256);
+    // Kept short: a deep queue here is seconds of stale video when the
+    // receiving peer is slower than the sender. A full queue backpressures
+    // the sending peer, whose host bounds video in flight.
+    let (my_tx, mut my_rx) = mpsc::channel::<Vec<u8>>(PEER_QUEUE);
     let (close_tx, close_rx) = watch::channel::<Option<CloseFrame>>(None);
     let mut writer_close_rx = close_rx.clone();
     let writer = tokio::spawn(async move {

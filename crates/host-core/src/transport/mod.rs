@@ -55,6 +55,12 @@ pub trait Transport {
 #[async_trait::async_trait]
 pub trait TransportSender: Send {
     async fn send(&mut self, tag: protocol::Tag, sealed: &[u8]) -> Result<(), TransportError>;
+
+    /// Resolves once a video frame can be sent without queueing behind
+    /// unsent video. The host waits on this before taking a new encoded
+    /// frame, so a slow link makes it skip captures instead of building
+    /// latency. Cancel safe; the default (UDP) is always ready.
+    async fn ready_for_video(&mut self) {}
 }
 
 /// The independently owned receiving half of a transport.
