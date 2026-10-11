@@ -34,6 +34,10 @@ pub struct Config {
     pub unattended_enabled: bool,
     #[serde(default)]
     pub unattended_twofa_enabled: bool,
+    /// Clipboard sync during sessions. Off unless the user turns it on, since
+    /// it shares clipboard contents with the remote peer in both directions.
+    #[serde(default)]
+    pub clipboard_sync: bool,
 }
 
 impl Default for Config {
@@ -49,6 +53,7 @@ impl Default for Config {
             legacy_unattended_password: None,
             unattended_enabled: false,
             unattended_twofa_enabled: false,
+            clipboard_sync: false,
         }
     }
 }
@@ -106,7 +111,7 @@ impl ConfigStore {
     pub fn save(&self) -> io::Result<()> {
         warn_for_insecure_relays(&self.config);
         let bytes = serde_json::to_vec_pretty(&self.config).map_err(io::Error::other)?;
-        fs::write(&self.path, bytes)
+        write_atomic(&self.path, &bytes)
     }
 
     pub fn ensure_identity(&mut self) -> String {
@@ -146,28 +151,73 @@ impl ConfigStore {
         self.save()
     }
 
-    pub fn set_relays(&mut self, urls: Vec<String>) -> io::Result<()> {
-        self.config.relay_url = urls[0].clone();
+    /// Replace the ordered relay list. Rejects an empty list and any URL that
+    /// fails [`validate_relay_url`] before anything is changed.
+    pub fn set_relays(&mut self, urls: Vec<String>) -> Result<(), String> {
+        let Some(first) = urls.first() else {
+            return Err("at least one relay URL is required".into());
+        };
+        for url in &urls {
+            validate_relay_url(url)?;
+        }
+        self.config.relay_url = first.clone();
         self.config.relay_urls = urls;
+        self.save().map_err(|error| error.to_string())
+    }
+
+    pub fn set_clipboard_sync(&mut self, enabled: bool) -> io::Result<()> {
+        self.config.clipboard_sync = enabled;
         self.save()
     }
 }
 
+/// A relay URL must be `wss://`, or plain `ws://` only to a loopback or
+/// private-network address (local development and LAN relays). Unencrypted
+/// relays on the internet expose pairing metadata and are refused.
+pub fn validate_relay_url(url: &str) -> Result<(), String> {
+    let lower = url.to_ascii_lowercase();
+    if lower.starts_with("wss://") {
+        return Ok(());
+    }
+    if !lower.starts_with("ws://") {
+        return Err(format!("relay URL must start with wss:// (or ws:// for a local relay): {url}"));
+    }
+    if is_insecure_remote_relay(url) {
+        return Err(format!(
+            "unencrypted ws:// relays are only allowed on this computer or a private network; use wss:// for {url}"
+        ));
+    }
+    Ok(())
+}
+
+/// Whether `url` is a plain `ws://` relay outside loopback and private
+/// network ranges (10/8, 172.16/12, 192.168/16, 169.254/16, fc00::/7,
+/// fe80::/10). Host names other than `localhost` count as remote because
+/// their resolution is not known here.
 pub fn is_insecure_remote_relay(url: &str) -> bool {
-    let Some(authority) = url.strip_prefix("ws://").and_then(|rest| rest.split(['/', '?', '#']).next()) else {
+    let Some(rest) = url.get(..5).filter(|scheme| scheme.eq_ignore_ascii_case("ws://")).map(|_| &url[5..]) else {
         return false;
     };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
     let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
     let host = if let Some(host) = host.strip_prefix('[') {
         host.split(']').next().unwrap_or(host)
     } else {
         host.rsplit_once(':').map_or(host, |(host, _)| host)
     };
-    if host.eq_ignore_ascii_case("localhost") || host == "::1" {
+    if host.eq_ignore_ascii_case("localhost") {
         return false;
     }
-    match host.parse::<std::net::Ipv4Addr>() {
-        Ok(address) => !address.octets().starts_with(&[127]),
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(address)) => {
+            !(address.is_loopback() || address.is_private() || address.is_link_local())
+        }
+        Ok(std::net::IpAddr::V6(address)) => {
+            let first = address.segments()[0];
+            let unique_local = first & 0xfe00 == 0xfc00;
+            let link_local = first & 0xffc0 == 0xfe80;
+            !(address.is_loopback() || unique_local || link_local)
+        }
         Err(_) => true,
     }
 }
@@ -178,6 +228,38 @@ fn warn_for_insecure_relays(config: &Config) {
             log::warn!("insecure remote relay configured: {relay}");
         }
     }
+}
+
+/// Replace `path` with `bytes` so a crash leaves either the old or the new
+/// file, never a truncated one: write a temp file in the same directory,
+/// fsync it, rename it over the original, then (on unix) fsync the directory
+/// so the rename itself is durable.
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+    let dir = path.parent().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no parent directory"))?;
+    let file_name = path.file_name().and_then(|name| name.to_str()).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "path has no valid file name")
+    })?;
+    let mut suffix = [0u8; 8];
+    rand::fill(&mut suffix);
+    let suffix: String = suffix.iter().map(|byte| format!("{byte:02x}")).collect();
+    let temp = dir.join(format!(".{file_name}.{suffix}.tmp"));
+    let result = (|| {
+        let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&temp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temp, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+        return result;
+    }
+    #[cfg(unix)]
+    if let Ok(dir) = fs::File::open(dir) {
+        let _ = dir.sync_all();
+    }
+    Ok(())
 }
 
 pub(crate) fn backup_corrupt_file(path: &Path) -> io::Result<PathBuf> {
@@ -344,6 +426,72 @@ mod tests {
         assert!(!is_insecure_remote_relay("ws://[::1]:8080/ws"));
         assert!(!is_insecure_remote_relay("wss://example.com/ws"));
         assert!(is_insecure_remote_relay("ws://example.com/ws"));
-        assert!(is_insecure_remote_relay("ws://10.0.0.5:8080/ws"));
+        assert!(is_insecure_remote_relay("WS://example.com/ws"));
+        assert!(is_insecure_remote_relay("ws://8.8.8.8:8080/ws"));
+        assert!(is_insecure_remote_relay("ws://[2001:db8::1]:8080/ws"));
+        assert!(!is_insecure_remote_relay("ws://10.0.0.5:8080/ws"));
+        assert!(!is_insecure_remote_relay("ws://192.168.1.20/ws"));
+        assert!(!is_insecure_remote_relay("ws://172.16.4.1/ws"));
+        assert!(!is_insecure_remote_relay("ws://[fd00::5]:8080/ws"));
+    }
+
+    #[test]
+    fn relay_url_validation_rejects_remote_plain_websocket() {
+        assert!(validate_relay_url("wss://relay.example.com/ws").is_ok());
+        assert!(validate_relay_url("ws://127.0.0.1:8080/ws").is_ok());
+        assert!(validate_relay_url("ws://192.168.1.20:8080/ws").is_ok());
+        let error = validate_relay_url("ws://relay.example.com/ws").unwrap_err();
+        assert!(error.contains("wss://"), "{error}");
+        assert!(validate_relay_url("ws://203.0.113.9:8080/ws").is_err());
+        assert!(validate_relay_url("https://relay.example.com").is_err());
+        assert!(validate_relay_url("relay.example.com").is_err());
+    }
+
+    #[test]
+    fn set_relays_validates_every_url_before_saving() {
+        let dir = test_dir();
+        let mut store = ConfigStore::load(&dir).unwrap();
+        let before = store.config.relay_urls.clone();
+        let result = store.set_relays(vec!["wss://a.example/ws".into(), "ws://b.example/ws".into()]);
+        assert!(result.is_err());
+        assert_eq!(store.config.relay_urls, before);
+        assert!(store.set_relays(Vec::new()).is_err());
+        store.set_relays(vec!["wss://a.example/ws".into(), "ws://10.1.2.3/ws".into()]).unwrap();
+        assert_eq!(store.config.relay_url, "wss://a.example/ws");
+        assert_eq!(ConfigStore::load(&dir).unwrap().config.relay_urls, ["wss://a.example/ws", "ws://10.1.2.3/ws"]);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn atomic_write_replaces_file_and_leaves_no_temp() {
+        let dir = test_dir();
+        let path = dir.join("config.json");
+        fs::write(&path, b"old contents that are longer").unwrap();
+        write_atomic(&path, b"new").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        write_atomic(&dir.join("fresh.json"), b"{}").unwrap();
+        assert_eq!(fs::read(dir.join("fresh.json")).unwrap(), b"{}");
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+        // A failed write leaves the original untouched.
+        assert!(write_atomic(&dir.join("missing-dir").join("x.json"), b"x").is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn clipboard_sync_defaults_off_and_persists() {
+        let dir = test_dir();
+        let mut store = ConfigStore::load(&dir).unwrap();
+        assert!(!store.config.clipboard_sync);
+        store.set_clipboard_sync(true).unwrap();
+        assert!(ConfigStore::load(&dir).unwrap().config.clipboard_sync);
+        let legacy: Config = serde_json::from_str(r#"{"id":"123456789","relay_url":"wss://x","allow_list":[],"recent_ids":[]}"#).unwrap();
+        assert!(!legacy.clipboard_sync);
+        let _ = fs::remove_dir_all(dir);
     }
 }

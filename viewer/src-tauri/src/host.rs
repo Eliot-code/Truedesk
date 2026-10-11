@@ -76,6 +76,19 @@ pub(crate) fn host_session_params(s: &mut RuntimeState) -> HostSessionParams {
     HostSessionParams { password, unattended_enabled, twofa_enabled, totp_secret }
 }
 
+/// Wakes hosting loops when the saved relay list changes, so a parked
+/// registration moves to the new list right away instead of at its next
+/// renewal.
+fn relays_changed() -> &'static tokio::sync::Notify {
+    static RELAYS_CHANGED: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
+    RELAYS_CHANGED.get_or_init(tokio::sync::Notify::new)
+}
+
+/// Call after saving a new relay list: every hosting loop re-registers.
+pub(crate) fn notify_relays_changed() {
+    relays_changed().notify_waiters();
+}
+
 /// The relay identity a hosting loop registers under. It is stable for the
 /// loop's lifetime: re-registering with the same token is accepted by the
 /// relay's ownership lease, so a host can come back after every session.
@@ -91,6 +104,9 @@ pub(crate) struct HostRegistration {
 /// slot. Callers may also cancel by dropping the future (task abort or a
 /// `select!` on the host thread's stop signal).
 ///
+/// Registration uses the saved relay list in order (first reachable wins),
+/// and starts over at once when [`notify_relays_changed`] reports a new list.
+///
 /// Status: "online" when a registration is parked on the relay; "connecting"
 /// (plus one error event per failure streak) while registration is failing.
 /// A healthy registration that the relay expires (its pairing timeout) is
@@ -103,16 +119,26 @@ pub(crate) async fn register_host_until_paired(
     let mut backoff = host_core::reconnect::HostRegistrationBackoff::new();
     let mut online = false;
     loop {
+        // Created before the attempt so a change saved while connecting is
+        // not missed (a Notified future counts from creation).
+        let relay_change = relays_changed().notified();
+        tokio::pin!(relay_change);
         let delay = backoff.delay();
         if !delay.is_zero() {
-            tokio::time::sleep(delay).await;
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => {}
+                _ = &mut relay_change => {
+                    backoff = host_core::reconnect::HostRegistrationBackoff::new();
+                    continue;
+                }
+            }
         }
         if !still_hosting() {
             return None;
         }
         // Re-read per attempt so a relay change applies to the next registration.
-        let relay_url = app.state::<AppState>().lock().config.config.relay_url.clone();
-        let failure = match host_core::relay_client::register_host(&[relay_url], &registration.id, &registration.token).await {
+        let relay_urls = app.state::<AppState>().lock().config.config.relay_urls.clone();
+        let failure = match host_core::relay_client::register_host(&relay_urls, &registration.id, &registration.token).await {
             Err(error) => {
                 backoff.record_failure();
                 error
@@ -123,7 +149,15 @@ pub(crate) async fn register_host_until_paired(
                     online = true;
                 }
                 let parked_at = Instant::now();
-                match host_core::relay_client::await_pairing(&mut ws).await {
+                let paired = tokio::select! {
+                    paired = host_core::relay_client::await_pairing(&mut ws) => paired,
+                    _ = &mut relay_change => {
+                        log::info!("relay list changed; re-registering");
+                        backoff = host_core::reconnect::HostRegistrationBackoff::new();
+                        continue;
+                    }
+                };
+                match paired {
                     Ok(pairing) => return Some((ws, pairing)),
                     Err(error) => {
                         backoff.record_parked_then_closed(parked_at.elapsed());
@@ -159,19 +193,16 @@ pub(crate) async fn run_paired_host_session(
     let authenticated = Arc::new(AtomicBool::new(false));
     let authenticated_flag = authenticated.clone();
     let HostSessionParams { password, unattended_enabled, twofa_enabled, totp_secret } = params;
-    let allowlisted = host_core::roles::should_auto_accept_allowlisted(
-        app.state::<AppState>().lock().config.is_allowed(&peer_id),
-    );
+    // The viewer's peer ID comes from the relay's pairing message and is not
+    // authenticated, so an allow-listed ID never skips approval; the prompt
+    // only marks it as a known device. Unattended access (its own password,
+    // plus optional TOTP) is the only path without a prompt.
+    let known = app.state::<AppState>().lock().config.is_allowed(&peer_id);
     let remote_id = peer_id.clone();
     let approve_app = app.clone();
     let (data_ready_tx, data_ready_rx) = oneshot::channel();
     let approve = move || async move {
         authenticated_flag.store(true, Ordering::Relaxed);
-        if allowlisted {
-            emit(&approve_app, "status_changed", StatusEvent { state: "in_session" });
-            emit(&approve_app, "session_started", SessionStarted { role: "host", remote_id: peer_id.clone() });
-            return true;
-        }
         if unattended_enabled {
             emit(&approve_app, "status_changed", StatusEvent { state: "in_session" });
             emit(&approve_app, "session_started", SessionStarted { role: "host", remote_id: peer_id.clone() });
@@ -191,7 +222,7 @@ pub(crate) async fn run_paired_host_session(
             return false;
         }
         emit(&approve_app, "incoming_request", IncomingRequest {
-            peer_id: peer_id.clone(), fingerprint: "pending".into(),
+            peer_id: peer_id.clone(), fingerprint: "pending".into(), known,
         });
         let allowed = decision_rx.await.unwrap_or(false);
         if allowed {
@@ -240,29 +271,46 @@ pub(crate) struct HostSessionEnd {
     pub(crate) authenticated: bool,
 }
 
-/// Slows down password guessing against a host: after a few consecutive
-/// sessions that fail authentication, wait before accepting the next pairing
-/// (2 s, 4 s, ... up to 60 s). Any authenticated session resets it.
+/// Limits password guessing against a host. The main defence is rotation:
+/// the one-time session password changes after every authenticated session
+/// and after every third consecutive failed one, so a guesser gets at most
+/// three tries per password (3 in 900,000). On top of that a short delay
+/// (2 s, 4 s, then 5 s) slows repeated failures. The delay is capped low
+/// because the host is unregistered while it waits: a long delay would let
+/// anyone who knows the host ID keep it offline with a few bad logins.
 #[derive(Default)]
 pub(crate) struct AuthBackoff {
     consecutive_failures: u32,
 }
 
+/// What the hosting loop does after a session ends.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct AfterSession {
+    /// Wait this long before registering again.
+    pub(crate) delay: Duration,
+    /// Replace the one-time session password.
+    pub(crate) rotate_password: bool,
+}
+
 impl AuthBackoff {
     const FREE_ATTEMPTS: u32 = 3;
-    const MAX_DELAY: Duration = Duration::from_secs(60);
+    const ROTATE_EVERY_FAILURES: u32 = 3;
+    const MAX_DELAY: Duration = Duration::from_secs(5);
 
-    pub(crate) fn after_session(&mut self, authenticated: bool) -> Duration {
+    pub(crate) fn after_session(&mut self, authenticated: bool) -> AfterSession {
         if authenticated {
             self.consecutive_failures = 0;
-            return Duration::ZERO;
+            return AfterSession { delay: Duration::ZERO, rotate_password: true };
         }
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        let rotate_password = self.consecutive_failures.is_multiple_of(Self::ROTATE_EVERY_FAILURES);
         let over = self.consecutive_failures.saturating_sub(Self::FREE_ATTEMPTS);
-        if over == 0 {
-            return Duration::ZERO;
-        }
-        Duration::from_secs(1u64 << over.min(6)).min(Self::MAX_DELAY)
+        let delay = if over == 0 {
+            Duration::ZERO
+        } else {
+            Duration::from_secs(1u64 << over.min(6)).min(Self::MAX_DELAY)
+        };
+        AfterSession { delay, rotate_password }
     }
 }
 
@@ -297,10 +345,15 @@ pub(crate) fn spawn_host_thread(
                 let params = host_session_params(&mut app.state::<AppState>().lock());
                 let (ws, pairing) = next;
                 let ended = run_paired_host_session(&app, ws, pairing, params, &mut stop_rx).await;
+                let AfterSession { delay, rotate_password } = backoff.after_session(ended.authenticated);
+                if rotate_password {
+                    // A finished session's password must not let anyone back
+                    // in, and a guesser gets a fresh target every 3 misses.
+                    rotate_session_password(&app);
+                }
                 if ended.stopped {
                     break;
                 }
-                let delay = backoff.after_session(ended.authenticated);
                 if !delay.is_zero() {
                     log::warn!("repeated failed authentication; waiting {}s before accepting the next request", delay.as_secs());
                     tokio::select! {

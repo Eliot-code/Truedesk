@@ -205,7 +205,9 @@ fn clear_data_channel(app: &AppHandle) {
         state.file_sealer = None;
         state.control_sender = None;
         state.control_sealer = None;
-        state.clipboard_enabled.store(true, Ordering::Relaxed);
+        // Back to the user's saved preference for the next session.
+        let saved = state.config.config.clipboard_sync;
+        state.clipboard_enabled.store(saved, Ordering::Relaxed);
         state.pending_file_requests.clear();
         thread
     };
@@ -231,11 +233,17 @@ fn get_identity(state: tauri::State<'_, AppState>) -> Identity {
     }
 }
 #[tauri::command]
-fn rotate_password(state: tauri::State<'_, AppState>) -> PasswordResponse {
-    let mut state = state.lock();
+fn rotate_password(app: AppHandle) -> PasswordResponse {
+    PasswordResponse { password: rotate_session_password(&app) }
+}
+/// Replace the one-time session password and tell the UI through the
+/// `password_rotated` event (payload `{ password }`), so automatic rotation
+/// after a session or failed logins shows up without a refresh.
+fn rotate_session_password(app: &AppHandle) -> String {
     let password = fresh_password();
-    state.password = Some(password.clone());
-    PasswordResponse { password }
+    app.state::<AppState>().lock().password = Some(password.clone());
+    emit(app, "password_rotated", PasswordResponse { password: password.clone() });
+    password
 }
 #[tauri::command]
 fn get_config(state: tauri::State<'_, AppState>) -> AppConfig {
@@ -244,6 +252,7 @@ fn get_config(state: tauri::State<'_, AppState>) -> AppConfig {
         relay_url: state.config.config.relay_url.clone(),
         relay_urls: state.config.config.relay_urls.clone(),
         recent_ids: state.config.config.recent_ids.clone(),
+        clipboard_sync: state.config.config.clipboard_sync,
     }
 }
 #[tauri::command]
@@ -283,19 +292,20 @@ fn touch_contact(state: tauri::State<'_, AppState>, peer_id: String) -> Result<(
 }
 #[tauri::command]
 fn set_relay(state: tauri::State<'_, AppState>, url: String) -> Result<(), String> {
-    if url.trim().is_empty() {
+    let url = url.trim().to_owned();
+    if url.is_empty() {
         return Err("relay URL cannot be empty".into());
     }
-    let mut state = state.lock();
-    state.config.config.relay_url = url;
-    state.config.config.relay_urls = vec![state.config.config.relay_url.clone()];
-    state.config.save().map_err(|e| e.to_string())
+    state.lock().config.set_relays(vec![url])?;
+    notify_relays_changed();
+    Ok(())
 }
 #[tauri::command]
 fn set_relays(state: tauri::State<'_, AppState>, urls: Vec<String>) -> Result<(), String> {
     let urls: Vec<String> = urls.into_iter().map(|url| url.trim().to_owned()).filter(|url| !url.is_empty()).collect();
-    if urls.is_empty() { return Err("at least one relay URL is required".into()); }
-    state.lock().config.set_relays(urls).map_err(|e| e.to_string())
+    state.lock().config.set_relays(urls)?;
+    notify_relays_changed();
+    Ok(())
 }
 #[tauri::command]
 fn list_relays(state: tauri::State<'_, AppState>) -> Vec<String> {
@@ -349,11 +359,58 @@ fn set_unattended_2fa(state: tauri::State<'_, AppState>, enabled: bool) -> Resul
 }
 /// Unattended access skips the approval prompt, so its password is the only
 /// barrier against online guessing.
-const MIN_UNATTENDED_PASSWORD_LEN: usize = 8;
+const MIN_UNATTENDED_PASSWORD_LEN: usize = 12;
+
+/// Very common passwords (lowercase) long enough to pass the length rule but
+/// among the first guesses of any dictionary attack.
+const COMMON_PASSWORDS: &[&str] = &[
+    "123456789012", "1234567890123", "12345678901234", "123456789abc", "1234567890qwerty",
+    "qwertyuiop12", "qwertyuiop123", "qwertyuiopasdf", "qwertyuiopasdfgh", "1q2w3e4r5t6y",
+    "1q2w3e4r5t6y7u", "q1w2e3r4t5y6", "1qaz2wsx3edc", "1qaz2wsx3edc4rfv", "zaq12wsxcde3",
+    "qazwsxedcrfv", "qazwsxedcrfvtgb", "asdfghjkl123", "zxcvbnm12345", "zxcvbnm123456",
+    "abcdefghijkl", "abcdefghijklm", "abcdefghijklmnop", "abc123abc123", "abcd1234abcd",
+    "abcd12345678", "password1234", "password12345", "password123456", "password1234!",
+    "password123!", "passwordpassword", "mypassword123", "mypassword1234", "p@ssw0rd1234",
+    "p@ssword1234", "passw0rd1234", "letmein12345", "letmein123456", "welcome12345",
+    "welcome123456", "welcome2024!", "welcome2025!", "welcome2026!", "iloveyou1234",
+    "iloveyou12345", "iloveyouiloveyou", "trustno1trustno1", "changeme1234", "changeme12345",
+    "administrator", "administrator1", "admin1234567", "admin12345678", "adminadmin123",
+    "rootroot1234", "superman1234", "batman123456", "dragon123456", "football1234",
+    "baseball1234", "basketball12", "basketball123", "monkey123456", "sunshine1234",
+    "princess1234", "starwars1234", "pokemon12345", "master123456", "shadow123456",
+    "michael12345", "jennifer1234", "computer1234", "internet1234", "opendesk1234",
+    "opendesk12345", "remotedesktop", "remoteaccess1", "remoteaccess123", "unattended123",
+    "qwerty123456", "qwerty1234567", "qwertyqwerty", "qwertyqwerty1", "1234qwerasdf",
+    "1234qwerasdfzxcv", "asdfasdfasdf", "asdf1234asdf", "11223344556677", "112233445566",
+    "123123123123", "123321123321", "121212121212", "147258369147", "159753159753",
+    "789456123789", "987654321987", "0987654321ab", "aaaaaa111111", "abc123456789",
+    "football12345", "letmeinletmein", "hello1234567", "secret123456",
+];
+
+/// Whether every character is the same (`aaaaaaaaaaaa`).
+fn is_single_repeated_char(password: &str) -> bool {
+    let mut chars = password.chars();
+    chars.next().is_some_and(|first| chars.all(|c| c == first))
+}
+
+/// Whether the password is a run of digits counting up or down by one
+/// (`123456789012`, `987654321098`), wrapping between 9 and 0.
+fn is_sequential_digits(password: &str) -> bool {
+    let digits: Vec<u8> = password.bytes().collect();
+    if digits.len() < 2 || !digits.iter().all(u8::is_ascii_digit) {
+        return false;
+    }
+    let step = |delta: u8| digits.windows(2).all(|pair| (pair[0] - b'0' + delta) % 10 == pair[1] - b'0');
+    step(1) || step(9)
+}
 
 fn validate_unattended_password(password: &str) -> Result<(), String> {
     if password.chars().count() < MIN_UNATTENDED_PASSWORD_LEN {
         return Err(format!("unattended access password must be at least {MIN_UNATTENDED_PASSWORD_LEN} characters"));
+    }
+    let lower = password.to_lowercase();
+    if is_single_repeated_char(password) || is_sequential_digits(password) || COMMON_PASSWORDS.contains(&lower.as_str()) {
+        return Err("this unattended access password is too common or predictable; choose a less guessable one".into());
     }
     Ok(())
 }
@@ -392,7 +449,12 @@ fn open_permission_settings(which: String) -> Result<(), String> {
 }
 #[tauri::command]
 fn set_clipboard_sync(state: tauri::State<'_, AppState>, enabled: bool) {
-    state.lock().clipboard_enabled.store(enabled, Ordering::Relaxed);
+    let mut state = state.lock();
+    state.clipboard_enabled.store(enabled, Ordering::Relaxed);
+    // The live toggle applies even if saving the preference fails.
+    if let Err(error) = state.config.set_clipboard_sync(enabled) {
+        log::warn!("could not save clipboard sync preference: {error}");
+    }
 }
 
 #[tauri::command]
@@ -475,6 +537,7 @@ pub fn run() {
             let app_data_dir = std::env::var_os("OPENDESK_DATA_DIR").map(PathBuf::from).unwrap_or(app_data_dir);
             let config = ConfigStore::load(&app_data_dir)?;
             let contacts = ContactStore::load(&app_data_dir)?;
+            let clipboard_sync = config.config.clipboard_sync;
             app.manage(AppState(Mutex::new(RuntimeState {
                 config,
                 contacts,
@@ -490,7 +553,7 @@ pub fn run() {
                 file_sealer: None,
                 control_sender: None,
                 control_sealer: None,
-                clipboard_enabled: Arc::new(AtomicBool::new(true)),
+                clipboard_enabled: Arc::new(AtomicBool::new(clipboard_sync)),
                 audio_muted: Arc::new(AtomicBool::new(false)),
                 clipboard_thread: None,
             })));
@@ -540,18 +603,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn auth_backoff_grows_after_free_attempts_and_resets() {
+    fn auth_backoff_stays_short_and_resets() {
         let mut backoff = AuthBackoff::default();
-        let delays: Vec<u64> = (0..10).map(|_| backoff.after_session(false).as_secs()).collect();
-        assert_eq!(delays, [0, 0, 0, 2, 4, 8, 16, 32, 60, 60]);
-        assert_eq!(backoff.after_session(true), Duration::ZERO);
-        assert_eq!(backoff.after_session(false), Duration::ZERO);
+        let delays: Vec<u64> = (0..8).map(|_| backoff.after_session(false).delay.as_secs()).collect();
+        assert_eq!(delays, [0, 0, 0, 2, 4, 5, 5, 5]);
+        assert_eq!(backoff.after_session(true).delay, Duration::ZERO);
+        assert_eq!(backoff.after_session(false).delay, Duration::ZERO);
+    }
+
+    #[test]
+    fn session_password_rotates_after_success_and_every_third_failure() {
+        let mut backoff = AuthBackoff::default();
+        let rotations: Vec<bool> = (0..7).map(|_| backoff.after_session(false).rotate_password).collect();
+        assert_eq!(rotations, [false, false, true, false, false, true, false]);
+        assert!(backoff.after_session(true).rotate_password);
+        assert!(!backoff.after_session(false).rotate_password);
     }
 
     #[test]
     fn unattended_password_needs_minimum_length() {
         assert!(validate_unattended_password("short").is_err());
-        assert!(validate_unattended_password("long enough").is_ok());
+        let error = validate_unattended_password("long enough").unwrap_err();
+        assert!(error.contains("12 characters"), "{error}");
+        assert!(validate_unattended_password("tulip-orbit-canyon").is_ok());
+    }
+
+    #[test]
+    fn unattended_password_rejects_common_and_predictable() {
+        for weak in ["Password1234", "QWERTY123456", "aaaaaaaaaaaa", "123456789012", "987654321098", "000000000000", "Administrator"] {
+            assert!(validate_unattended_password(weak).is_err(), "{weak} should be rejected");
+        }
+        assert!(validate_unattended_password("135792468024").is_ok());
+        assert!(is_sequential_digits("890123"));
+        assert!(!is_sequential_digits("12a4"));
     }
 
     #[test]

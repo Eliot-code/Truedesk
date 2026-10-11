@@ -85,7 +85,7 @@ impl ContactStore {
 
     fn save(&self) -> io::Result<()> {
         let bytes = serde_json::to_vec_pretty(&self.contacts).map_err(io::Error::other)?;
-        fs::write(&self.path, bytes)
+        crate::config::write_atomic(&self.path, &bytes)
     }
 }
 

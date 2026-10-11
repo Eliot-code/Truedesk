@@ -7,7 +7,7 @@ pub(crate) struct Identity {
     pub(crate) id: String,
     pub(crate) password: String,
 }
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub(crate) struct PasswordResponse {
     pub(crate) password: String,
 }
@@ -16,6 +16,7 @@ pub(crate) struct AppConfig {
     pub(crate) relay_url: String,
     pub(crate) relay_urls: Vec<String>,
     pub(crate) recent_ids: Vec<String>,
+    pub(crate) clipboard_sync: bool,
 }
 #[derive(Serialize)]
 pub(crate) struct UnattendedStatus {
@@ -36,6 +37,9 @@ pub(crate) struct StatusEvent {
 pub(crate) struct IncomingRequest {
     pub(crate) peer_id: String,
     pub(crate) fingerprint: String,
+    /// The claimed peer ID is on the allow list. Informational only: the ID
+    /// is not authenticated, so known devices still need approval.
+    pub(crate) known: bool,
 }
 #[derive(Serialize, Clone)]
 pub(crate) struct SessionStarted {
