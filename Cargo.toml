@@ -6,3 +6,7 @@ members = ["crates/protocol", "crates/relay", "crates/host-core"]
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Optimize dependencies in dev builds; capture, crypto and codecs crawl at opt-level 0.
+[profile.dev.package."*"]
+opt-level = 2

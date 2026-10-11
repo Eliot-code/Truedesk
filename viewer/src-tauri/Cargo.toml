@@ -51,3 +51,7 @@ lto = true
 opt-level = 3
 panic = "abort"
 strip = true
+
+# Optimize dependencies in dev builds; capture, crypto and codecs crawl at opt-level 0.
+[profile.dev.package."*"]
+opt-level = 2
