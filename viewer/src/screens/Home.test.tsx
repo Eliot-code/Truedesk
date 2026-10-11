@@ -19,6 +19,16 @@ describe("Home", () => {
     vi.mocked(api.startHosting).mockResolvedValue(undefined); vi.mocked(api.connect).mockResolvedValue(undefined);
   });
   it("renders the identity returned by the backend", async () => { render(<Home status="online" onConnect={vi.fn()} incomingRequest={null} onDismissRequest={vi.fn()} />); expect(await screen.findByText("123456789")).toBeTruthy(); });
+  it("reveals the session password on demand", async () => {
+    render(<Home status="online" onConnect={vi.fn()} incomingRequest={null} onDismissRequest={vi.fn()} />);
+    const field = await screen.findByLabelText("Session password") as HTMLInputElement;
+    await waitFor(() => expect(field.value).toBe("654321"));
+    expect(field.type).toBe("password");
+    fireEvent.click(screen.getByRole("button", { name: "Show password" }));
+    expect(field.type).toBe("text");
+    fireEvent.click(screen.getByRole("button", { name: "Hide password" }));
+    expect(field.type).toBe("password");
+  });
   it("connects with the entered target ID and password", async () => {
     const onConnect = vi.fn().mockResolvedValue(undefined);
     const prompt = vi.spyOn(window, "prompt").mockReturnValue(null);
