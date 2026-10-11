@@ -24,7 +24,7 @@ const KNOWN_ERRORS: [RegExp, string][] = [
   [/relay closed while connecting/i, "The relay closed the connection. Check the ID and try again."],
   [/incoming request expired/i, "That request has expired."],
   [/incoming file offer expired|no incoming file offer with that id/i, "That file offer is no longer available."],
-  [/check the password and connect again/i, "Wrong password. Check it and connect again."],
+  [/check the password and connect again/i, "Wrong password. The host's password changes after every session, so check the current one and connect again."],
 ];
 
 export function friendlyError(error: unknown): string {

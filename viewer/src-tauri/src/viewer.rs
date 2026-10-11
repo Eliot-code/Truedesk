@@ -99,10 +99,12 @@ pub(crate) fn connect(
             let Some((Tag::Control, body)) = frame::unwrap(&message) else {
                 return Err("invalid pairing message".into());
             };
-            let Some(protocol::control::Control::Paired { session, .. }) =
-                protocol::control::Control::from_bytes(body)
-            else {
-                return Err("invalid pairing message".into());
+            let session = match protocol::control::Control::from_bytes(body) {
+                Some(protocol::control::Control::Paired { session, .. }) => session,
+                Some(protocol::control::Control::Error { code }) if code == protocol::control::ERROR_PEER_UNAVAILABLE => {
+                    return Err(host_core::reconnect::PEER_UNAVAILABLE_MESSAGE.into());
+                }
+                _ => return Err("invalid pairing message".into()),
             };
             let (frame_tx, mut frame_rx) = mpsc::channel::<Vec<u8>>(64);
             let (input_tx, input_rx) = mpsc::channel::<Vec<u8>>(256);
@@ -228,7 +230,7 @@ pub(crate) fn connect(
                             // is single-use), and a host user already declined.
                             break Err(host_core::reconnect::auth_failure_message(&message, session_started));
                         }
-                        if !host_core::reconnect::should_reconnect(reason) {
+                        if !host_core::reconnect::should_retry_viewer(reason, session_started) {
                             break Err(message);
                         }
                         if media_received {

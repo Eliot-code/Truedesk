@@ -96,6 +96,18 @@ async fn register_with_foreign_token_gets_id_taken_error() {
 }
 
 #[tokio::test]
+async fn connect_to_absent_peer_gets_peer_unavailable_error() {
+    let addr = relay::spawn_test_server().await;
+    let (mut viewer, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws")).await.unwrap();
+    viewer.send(control(Control::Connect { target: "123456789".into(), peer_id: "987654321".into(), ver: 1 })).await.unwrap();
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(2), viewer.next()).await.unwrap().unwrap().unwrap();
+    let data = reply.into_data();
+    let (tag, body) = frame::unwrap(&data).unwrap();
+    assert_eq!(tag, Tag::Control);
+    assert_eq!(Control::from_bytes(body), Some(Control::Error { code: protocol::control::ERROR_PEER_UNAVAILABLE.into() }));
+}
+
+#[tokio::test]
 async fn ice_burst_after_pairing_is_not_rate_limited() {
     let addr = relay::spawn_test_server().await;
     let url = format!("ws://{addr}/ws");

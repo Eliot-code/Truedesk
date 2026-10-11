@@ -23,6 +23,8 @@ pub enum DisconnectReason {
     Transient,
     CleanUserDisconnect,
     AuthFailure,
+    /// The relay says the target ID is offline or already in a session.
+    PeerUnavailable,
 }
 
 /// Viewer backoff for the `attempt`-th retry (0-based): 500ms, 1s, 2s, 4s, 4s…
@@ -41,6 +43,18 @@ pub fn viewer_retry_delay(attempt: u32, elapsed: Duration) -> Option<Duration> {
 pub fn should_reconnect(reason: DisconnectReason) -> bool {
     matches!(reason, DisconnectReason::Transient)
 }
+
+/// Viewer retry rule. An unavailable peer ends a first connect at once, but
+/// is retried after a session ran: the host re-registers right after a drop.
+pub fn should_retry_viewer(reason: DisconnectReason, session_started: bool) -> bool {
+    match reason {
+        DisconnectReason::PeerUnavailable => session_started,
+        reason => should_reconnect(reason),
+    }
+}
+
+/// Viewer error text when the relay reports the target as unavailable.
+pub const PEER_UNAVAILABLE_MESSAGE: &str = "That device is offline or already in a session.";
 
 /// Stable `Control::Error` codes a host sends when it rejects a viewer after
 /// the key exchange.
@@ -78,6 +92,9 @@ pub fn classify_viewer_error(error: &str) -> DisconnectReason {
     if error == HOST_ENDED_MESSAGE {
         return DisconnectReason::CleanUserDisconnect;
     }
+    if error == PEER_UNAVAILABLE_MESSAGE {
+        return DisconnectReason::PeerUnavailable;
+    }
     let lower = error.to_ascii_lowercase();
     if lower.contains("invalid spake2") || lower.contains("key confirmation failed")
         || lower.contains("session rejected") {
@@ -112,7 +129,7 @@ pub fn auth_failure_message(error: &str, after_session: bool) -> String {
             "The 2FA code was rejected (wrong, expired, or already used). Enter the current code and connect again.".to_owned()
         }
         Some(other) => format!("The host rejected the session ({other})."),
-        None => format!("{error}; authentication failed—check the password and connect again"),
+        None => format!("{error}; authentication failed—check the password and connect again (it changes after every session)"),
     }
 }
 
@@ -206,6 +223,21 @@ mod tests {
         assert_eq!(viewer_retry_delay(5, Duration::from_secs(29)), Some(Duration::from_secs(1)));
         assert_eq!(viewer_retry_delay(0, VIEWER_RECONNECT_WINDOW), None);
         assert_eq!(viewer_retry_delay(0, Duration::from_secs(45)), None);
+    }
+
+    #[test]
+    fn unavailable_peer_ends_a_first_connect_but_not_a_reconnect() {
+        let reason = classify_viewer_error(PEER_UNAVAILABLE_MESSAGE);
+        assert_eq!(reason, DisconnectReason::PeerUnavailable);
+        assert!(!should_retry_viewer(reason, false));
+        assert!(should_retry_viewer(reason, true));
+        assert!(should_retry_viewer(DisconnectReason::Transient, false));
+        assert!(!should_retry_viewer(DisconnectReason::AuthFailure, true));
+    }
+
+    #[test]
+    fn wrong_password_message_mentions_rotation() {
+        assert!(auth_failure_message("key confirmation failed", false).contains("changes after every session"));
     }
 
     #[test]

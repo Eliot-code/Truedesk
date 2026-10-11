@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 /// `Control::Error` code the relay sends when a `register` names an ID that is
 /// leased to a different token.
 pub const ERROR_ID_TAKEN: &str = "id_taken";
+/// `Control::Error` code the relay sends when a `connect` names an ID that is
+/// not waiting for a viewer: offline, or already in a session.
+pub const ERROR_PEER_UNAVAILABLE: &str = "peer_unavailable";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]

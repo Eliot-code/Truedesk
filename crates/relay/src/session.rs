@@ -13,6 +13,8 @@ pub enum ClassifyError {
     RegistryFull,
     NewIdRateLimited,
     InvalidConnect,
+    /// The target ID is not registered right now.
+    PeerUnavailable,
     ConnectRateLimited,
 }
 
@@ -71,7 +73,7 @@ pub fn classify(msg: &[u8], me: Outbound, me_close_tx: CloseOutbound, reg: &Regi
         Control::Connect { target, peer_id, ver } => {
             if !valid_peer_id(&target) || !valid_peer_id(&peer_id) || ver != SUPPORTED_VERSION { return Err(ClassifyError::InvalidConnect); }
             if !reg.allow_connect(source, &target) { return Err(ClassifyError::ConnectRateLimited); }
-            let (host_tx, host_close_tx, notify) = reg.take(&target).ok_or(ClassifyError::InvalidConnect)?;
+            let (host_tx, host_close_tx, notify) = reg.take(&target).ok_or(ClassifyError::PeerUnavailable)?;
             let _ = notify.send((me, me_close_tx, peer_id.clone()));
             Ok(Bridge::ViewerPaired { host_tx, host_close_tx, requester_id: peer_id, target_id: target })
         }

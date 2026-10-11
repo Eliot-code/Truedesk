@@ -358,10 +358,11 @@ async fn handle(socket: WebSocket, state: RelayState, addr: IpAddr, guard: Optio
                 session::ClassifyError::RegistryFull => "registry_full",
                 session::ClassifyError::NewIdRateLimited => "new_id_rate",
                 session::ClassifyError::InvalidConnect => "invalid_connect",
+                session::ClassifyError::PeerUnavailable => protocol::control::ERROR_PEER_UNAVAILABLE,
                 session::ClassifyError::InvalidControl => "invalid_control",
             };
-            if error == session::ClassifyError::IdTaken {
-                let _ = my_tx.send(session::error_frame(protocol::control::ERROR_ID_TAKEN)).await;
+            if matches!(error, session::ClassifyError::IdTaken | session::ClassifyError::PeerUnavailable) {
+                let _ = my_tx.send(session::error_frame(reason)).await;
             }
             let _ = close_tx.send(Some(CloseFrame { code: 1008, reason: reason.into() }));
             log_event("pairing_failure", addr, reason);
