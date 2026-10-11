@@ -1,6 +1,6 @@
 # OpenDesk releases
 
-OpenDesk releases are built as unsigned Tauri bundles for macOS, Linux, and Windows.
+Releases are unsigned Tauri bundles for macOS, Linux, and Windows.
 
 ## Cut a release
 
@@ -13,19 +13,24 @@ OpenDesk releases are built as unsigned Tauri bundles for macOS, Linux, and Wind
    the version in `tauri.conf.json` numeric (`0.1.0`): Windows MSI rejects
    pre-release labels.
 3. The `Release unsigned bundles` workflow builds all three platforms in parallel.
-4. After the builds finish, the workflow creates the GitHub release with
+4. When the builds finish, the workflow creates the GitHub release with
    `.github/RELEASE_NOTES.md` (install steps for unsigned builds) plus the
-   generated changelog, and attaches the bundles.
+   generated changelog, and attaches the installers.
 
-The workflow runs `npm run tauri build` from `viewer`. The configured targets are:
+The workflow runs `npm run tauri build` from `viewer` and uploads only the
+installers:
 
-- macOS: `.app` and `.dmg`
-- Linux: AppImage and `.deb`
+- macOS: `.dmg` (Apple silicon, macOS 12.3+)
+- Linux: AppImage, `.deb`, and `.rpm`
 - Windows: NSIS `.exe` and MSI
 
-## Unsigned build caveat
+## Unsigned builds
 
-No code signing, notarization, certificates, or Windows signing are configured. These artifacts are suitable for testing and distribution where users accept the trust warnings, but they do not provide platform publisher verification.
+There's no paid code signing or notarization on any platform. macOS builds
+are ad-hoc signed (`signingIdentity: "-"` in `tauri.conf.json`), which turns
+Gatekeeper's "damaged" error into a "can't verify the developer" prompt that
+users can approve. Use these builds for testing, or distribute them to users who
+accept the OS trust warnings. They carry no verified publisher identity.
 
 - macOS may show Gatekeeper warnings. In Finder, use Control-click → Open, or approve the app in System Settings → Privacy & Security.
 - Windows may show a SmartScreen warning. Use More info → Run anyway only if you trust the release source.

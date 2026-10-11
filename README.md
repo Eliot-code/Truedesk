@@ -2,10 +2,10 @@
 
 # OpenDesk
 
-**A self-hosted, zero-knowledge, open-source remote desktop.**
-An open-source alternative to [AnyDesk](https://anydesk.com) and [TeamViewer](https://teamviewer.com), built in Rust.
+A self-hosted, open-source remote desktop with end-to-end encryption.
+An alternative to [AnyDesk](https://anydesk.com) and [TeamViewer](https://teamviewer.com), written in Rust.
 
-Runs over `wss://` on port **443** · **End-to-end encrypted** · The relay is a **blind pipe** that never sees your screen, keystrokes, or keys.
+Runs over `wss://` on port 443. The relay forwards encrypted bytes and never sees your screen, keystrokes, or keys.
 
 </div>
 
@@ -19,33 +19,33 @@ Runs over `wss://` on port **443** · **End-to-end encrypted** · The relay is a
 
 ---
 
-## What is OpenDesk?
+## Overview
 
-OpenDesk lets one device view and control another over the internet, through a relay server you host yourself. Frames and input are sealed on each endpoint with a key only the two peers hold, derived from a session password. The relay forwards bytes it cannot decrypt, so the encryption is end-to-end rather than only in transit.
+OpenDesk lets one device view and control another over the internet through a relay server you host yourself. Each endpoint seals frames and input with a key that only the two peers hold, derived from a session password. The relay forwards bytes it cannot decrypt, so the encryption is end to end, not only in transit.
 
 Each peer opens one outbound `wss://` connection on port 443. After SPAKE2 key
-confirmation, both the host and viewer run the Rust transport: they gather and
-exchange ICE candidates and attempt a direct UDP path. If that fails, the same
-connection remains the encrypted relay fallback. No inbound ports or port
-forwarding are needed. The direct attempt requires outbound UDP; strict-UDP
-networks fall back to relay automatically. The relay assigns one pairing
-session ID and sends it in `Control::Paired` to both peers, so their ICE
-candidate messages are routed to the same session.
+confirmation, the host and viewer gather and exchange ICE candidates and try a
+direct UDP path. If that fails, the same WebSocket connection carries the
+encrypted traffic instead. You don't need inbound ports or port forwarding. The
+direct attempt needs outbound UDP; on networks that block it, the session falls
+back to the relay. The relay assigns one pairing session ID and sends it to
+both peers in `Control::Paired`, so it can route their ICE candidate messages
+to the same session.
 
 ICE uses Google Public STUN by default (`stun:stun.l.google.com:19302`) to find
-server-reflexive addresses. A self-hosted STUN service can be substituted in
-the host-core `AgentConfig.urls` configuration. STUN helps discover addresses;
-it is not a media relay and does not receive desktop contents.
+server-reflexive addresses. You can substitute a self-hosted STUN service in
+the host-core `AgentConfig.urls` configuration. STUN only helps discover
+addresses; it does not relay media or receive desktop contents.
 
 ## Features and quickstart
 
-- End-to-end encrypted screen, input, and audio payloads
+- End-to-end encrypted screen, input, and audio
 - End-to-end encrypted file transfer and text-only clipboard sync
-- Optional unattended access with a stored password and optional TOTP two-factor code
+- Optional unattended access with a stored password and an optional TOTP two-factor code
 - Local address book and recent peer IDs
 - Multi-monitor discovery and monitor selection
 
-Audio is the host's system sound on macOS 14.6+, Windows, and Linux (PulseAudio or PipeWire via pipewire-pulse), and its microphone elsewhere (older macOS, Linux without either server). Windows/Linux host support is still less mature than the macOS-tested path.
+The host sends its system sound on macOS 14.6+, Windows, and Linux (PulseAudio, or PipeWire via pipewire-pulse). Elsewhere (older macOS, Linux without either server) it sends the microphone. Windows and Linux host support is less mature than macOS, which is where most testing has happened.
 
 For the architecture, security model, and self-hosting instructions, see
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
@@ -63,19 +63,19 @@ Quickstart:
    approve the request on the host unless unattended access is enabled.
 
 For local development, run `cargo run -p relay`, use
-`ws://127.0.0.1:8080/ws`, and start the host/viewer development commands
-described below.
+`ws://127.0.0.1:8080/ws`, and start the app as described in
+[Build and run](#build-and-run).
 
-## Why
+## Why OpenDesk
 
-- **Zero-knowledge by design.** Two crypto layers: TLS on the wire, and an inner ChaCha20-Poly1305 layer end-to-end. Whoever runs the relay sees nothing.
-- **Password-authenticated (SPAKE2).** Only someone with your session password derives the key. A malicious relay cannot man-in-the-middle it.
-- **Self-hosted and cross-platform.** One relay binary. Host and viewer target macOS, Windows, and Linux through one code path.
-- **Small and auditable.** The relay parses one control message type. Everything else is opaque to it.
+- **The relay can't read your session.** TLS protects the wire, and an inner ChaCha20-Poly1305 layer encrypts payloads end to end. Whoever runs the relay sees only metadata.
+- **Password-authenticated keys (SPAKE2).** Only someone with the session password derives the key, and a malicious relay cannot man-in-the-middle the exchange.
+- **Self-hosted and cross-platform.** You run one relay binary. Host and viewer share one code path on macOS, Windows, and Linux.
+- **Small enough to audit.** The relay parses only the control messages it needs for pairing and routing. Session payloads are opaque to it.
 
 ## Status
 
-OpenDesk is under active development. What works today:
+OpenDesk is under active development. Current state:
 
 | Area | Status |
 |------|--------|
@@ -91,16 +91,17 @@ OpenDesk is under active development. What works today:
 | Address book · unattended access · TOTP 2FA | ✅ |
 | System audio (Opus, 48 kHz; mic fallback) · multi-monitor selection | ✅ |
 
-> **Note:** screen capture is verified on macOS (Windows/Linux code-complete, not yet runtime-tested). H.264 is hardware-encoded with VideoToolbox on macOS and Media Foundation on Windows (NVENC / QSV / AMF; not yet runtime-tested), with software openh264 on Linux and as fallback. Release bundles are unsigned.
+> [!NOTE]
+> Screen capture is verified on macOS. The Windows and Linux code is complete but not yet runtime-tested. H.264 uses hardware encoding through VideoToolbox on macOS and Media Foundation on Windows (NVENC / QSV / AMF; not yet runtime-tested). Linux uses software openh264, which is also the fallback on the other platforms. Release bundles are unsigned.
 
 ## Architecture
 
 ```
 ┌──────────────────┐        wss://relay:443        ┌──────────────────┐
-│   HOST AGENT      │◄─────── outbound only ───────►│      RELAY        │
-│  (Rust)           │      (looks like HTTPS)        │  (Rust / axum)    │
+│   HOST            │◄─────── outbound only ───────►│      RELAY        │
+│  (desktop app)    │      (looks like HTTPS)        │  (Rust / axum)    │
 │  scap capture     │                                │  blind pipe:      │
-│  openh264 encode  │──── sealed frames ────────────►│  no keys,         │
+│  H.264 (HW/sw)    │──── sealed frames ────────────►│  no keys,         │
 │  enigo inject     │◄─── sealed input ─────────────│  no plaintext,    │
 │  SPAKE2 + AEAD    │                                │  routes by ID     │
 └──────────────────┘                                └────────┬─────────┘
@@ -117,13 +118,14 @@ OpenDesk is under active development. What works today:
 
 - **`crates/protocol`**: shared wire types. Frame tags, control messages, ChaCha20-Poly1305 seal/open, SPAKE2 handshake, HKDF directional keys, input event codec.
 - **`crates/relay`**: axum WebSocket server. Pairs a host and viewer by ID and forwards sealed bytes it cannot read.
-- **`crates/host-agent`**: captures the screen, encodes H.264, seals and sends. Receives and injects remote input.
-- **`viewer/`**: Tauri desktop app. The Rust backend runs crypto and transport
-  (including ICE/direct UDP and relay fallback); the WebView only decodes with
-  WebCodecs and captures input. Direct P2P is bidirectional: the host sends
-  video and the viewer sends input over the selected transport.
+- **`crates/host-core`**: session setup and transport, plus the host side: captures the screen, encodes H.264, seals and sends frames, and injects remote input.
+- **`viewer/`**: Tauri desktop app that both hosts and views. The Rust backend
+  runs crypto and transport (including ICE/direct UDP and relay fallback); the
+  WebView only decodes with WebCodecs and captures input. Direct P2P works in
+  both directions: the host sends video and the viewer sends input over the
+  selected transport.
 
-## Build & run
+## Build and run
 
 Requires a recent Rust toolchain and Node.js.
 
@@ -131,12 +133,11 @@ Requires a recent Rust toolchain and Node.js.
 # 1. relay (bind :8080; put Traefik/Caddy in front for wss:443)
 cargo run -p relay
 
-# 2. host agent  (last arg is the session password; must match the viewer)
-cargo run -p host-agent -- ws://127.0.0.1:8080/ws abc test
-
-# 3. viewer (Tauri desktop app)
+# 2. desktop app (hosts and views; run a second instance to test locally)
 cd viewer && npm install && npm run tauri dev
 ```
+
+To run two instances on one machine, see [`docs/TESTING.md`](docs/TESTING.md).
 
 ### Platform permissions (host)
 
@@ -146,16 +147,16 @@ cd viewer && npm install && npm run tauri dev
 
 ## Security model
 
-- **Two layers.** TLS protects the wire to the reverse proxy. A separate inner AEAD layer (ChaCha20-Poly1305) does the end-to-end encryption. TLS alone is not zero-knowledge; the inner layer is what makes it so.
-- **Key agreement.** A password-authenticated exchange (SPAKE2) derives a fresh per-session key. A wrong password fails key confirmation, and nothing is decrypted.
-- **Blind relay.** The relay holds no keys and parses only the routing control message. Frames and input are opaque to it.
-- **Trust the client.** The viewer is a native Tauri app with a verifiable binary, which a server-served JavaScript client cannot match.
+- **Two layers.** TLS protects the connection to the reverse proxy. A separate inner AEAD layer (ChaCha20-Poly1305) encrypts end to end. TLS alone would let the relay operator read traffic; the inner layer prevents that.
+- **Key agreement.** SPAKE2, a password-authenticated exchange, derives a fresh key for each session. With a wrong password, key confirmation fails and nothing is decrypted.
+- **Blind relay.** The relay holds no keys and parses only the routing control messages. Frames and input are opaque to it.
+- **Native client.** The viewer is a native Tauri app you can build and verify yourself, unlike a JavaScript client that a server can change on every page load.
 
 ### Checking the selected transport
 
 The host logs `INFO transport selected: direct` after successful ICE
 nomination, or `INFO transport selected: relay (ICE timeout)` when it falls
-back. The ordering is pairing → SPAKE2/key confirmation → ICE signaling over
+back. The order is pairing → SPAKE2/key confirmation → ICE signaling over
 `Control::Ice` → transport selection → media, so media never starts before key
 confirmation.
 
@@ -163,26 +164,24 @@ confirmation.
 
 Run two app instances, connect them by device ID and session password, and
 allow the incoming request on the host. Confirm that the remote screen renders
-and that mouse/keyboard input controls the host. Check both logs for
+and that mouse and keyboard input control the host. Check both logs for
 `transport selected: direct` or `transport selected: relay`.
 
 ### File transfer
 
-The file-transfer feature is live during a session. File messages use the
-reliable relay `Tag::Data` path, independently of whether media uses Direct or
-relay transport, and are sealed end-to-end with a separate HKDF-derived Data
-key (so Data and media never reuse AEAD nonces). The receiver requests consent,
-streams into a sanitized filename in the OS Downloads directory, verifies the
-SHA-256 before finalizing, and reserves unique paths for concurrent transfers.
-
-Remaining deferrals are audio and multi-monitor support.
+You can send files during a session. File messages always use the reliable
+relay `Tag::Data` path, whether media goes Direct or through the relay. They
+are sealed end to end with a separate HKDF-derived Data key, so Data and media
+never reuse AEAD nonces. The receiver asks for consent, streams into a
+sanitized filename in the OS Downloads directory, verifies the SHA-256 before
+finalizing, and reserves unique paths for concurrent transfers.
 
 ### Clipboard sync
 
-Clipboard sync shares text-only clipboard contents end-to-end encrypted over the
-session Data channel. It has a per-session toggle that is on by default, caps
-clipboard text at 1 MB (`MAX_CLIPBOARD`), and suppresses echoes when a received
-value is applied locally.
+Clipboard sync sends text-only clipboard contents, end-to-end encrypted, over
+the session Data channel. A per-session toggle controls it (on by default).
+Clipboard text is capped at 1 MB (`MAX_CLIPBOARD`), and a value received from
+the peer is not echoed back after it is applied locally.
 
 ## Roadmap
 
@@ -198,7 +197,7 @@ value is applied locally.
 
 ## Contributing
 
-Issues and PRs welcome. The codebase favors small, focused crates and test-driven changes.
+Issues and PRs are welcome. The codebase prefers small, focused crates and test-driven changes. See [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## License
 

@@ -1,6 +1,6 @@
 # Relay deployment
 
-The relay is one stateless HTTP service: a WebSocket endpoint at `/ws` and a
+The relay is a single stateless HTTP service: a WebSocket endpoint at `/ws` and a
 health check at `/health`. It does not terminate TLS itself; the Compose setup
 below puts Caddy in front for automatic HTTPS.
 
@@ -8,15 +8,15 @@ below puts Caddy in front for automatic HTTPS.
 
 - a server reachable by the clients (any VPS; amd64 or arm64);
 - a DNS name pointing at it, such as `relay.example.com`; and
-- ports 80 and 443 open (80 is only used for the certificate challenge).
+- ports 80 and 443 open (port 80 serves only the certificate challenge).
 
-Clients need no open ports. Direct UDP is attempted between clients; the
+Clients need no open ports. Clients try direct UDP between themselves; the
 relay fallback and all signaling share the one HTTPS port.
 
 ## Docker Compose (recommended)
 
-The repo's `compose.yaml` runs the relay behind Caddy, which gets and renews a
-Let's Encrypt certificate automatically.
+The repo's `compose.yaml` runs the relay behind Caddy, which obtains and renews a
+Let's Encrypt certificate.
 
 ```sh
 git clone https://github.com/treeot/opendesk.git
@@ -67,31 +67,28 @@ including `/ws`; clients try them in order. The default development value is
 ## STUN
 
 ICE uses Google Public STUN at `stun:stun.l.google.com:19302` by default to
-discover server-reflexive addresses. STUN does not relay desktop contents.
-Public STUN is the default because it requires no additional service and is
-only used for candidate discovery; the encrypted payload still uses the
-direct nominated UDP path or the OpenDesk relay fallback.
+discover server-reflexive addresses. It's the default because it needs no
+extra service and only takes part in candidate discovery. STUN never relays
+desktop contents: the encrypted payload still goes over the nominated direct
+UDP path or the OpenDesk relay fallback.
 
-Deployments that require control of candidate discovery can substitute a
-self-hosted STUN URL in the host-core `AgentConfig.urls` configuration. That
-configuration is part of the client code, not a relay environment variable.
+To control candidate discovery yourself, substitute a self-hosted STUN URL in
+the host-core `AgentConfig.urls` configuration. That setting lives in the
+client code, not in a relay environment variable.
 
 ## Operations and security
 
-Keep the relay current, restrict access to the host, and monitor connection
-logs without assuming that relay logs contain session contents. The relay can
-see routing and network metadata, but it has no session decryption keys. Use
-`wss://` in production; plain `ws://` is appropriate only for trusted local
-development or an already-protected network.
+Keep the relay up to date, restrict access to the server, and monitor the
+connection logs. Don't expect session contents in those logs: the relay sees
+routing and network metadata, but it has no session decryption keys.
 
+### Use `wss://` for remote relays
 
-## Transport security: use `wss://` for remote relays
-
-Session payloads are end-to-end encrypted regardless of transport, so the relay
-never sees plaintext. However, a plain `ws://` relay exposes connection
-**metadata** (IP addresses, timing, message sizes, the 9-digit IDs being paired)
-to any on-path observer. For any relay reachable over the network, always use a
-`wss://` URL (TLS). Coolify (or your reverse proxy) terminates TLS in front of
-the relay's single HTTP port, so point clients at `wss://your-relay-host` while
-the relay itself listens on plain HTTP behind the proxy. Plain `ws://` is
-intended only for `127.0.0.1`/LAN development.
+Session payloads are end-to-end encrypted on any transport, so the relay never
+sees plaintext. A plain `ws://` relay still exposes connection metadata (IP
+addresses, timing, message sizes, the 9-digit IDs being paired) to anyone on
+the network path. For a relay reachable over the network, use a `wss://` URL
+(TLS). Coolify or your reverse proxy terminates TLS in front of the relay's
+single HTTP port, so point clients at `wss://your-relay-host` while the relay
+itself listens on plain HTTP behind the proxy. Use plain `ws://` only for
+`127.0.0.1`/LAN development or an already-protected network.

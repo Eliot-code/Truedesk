@@ -1,15 +1,17 @@
-**Beta build for testing.** Expect rough edges, and please report what breaks.
+Beta build for testing. Expect rough edges, and please report what breaks.
 
 ## Install
 
-Pick the file for your system below. These builds are **not code-signed**, so
+Pick the file for your system below. These builds are not code-signed, so
 your OS will warn the first time you open them:
 
-- **macOS** (`.dmg`, Apple silicon, macOS 12.3+): drag OpenDesk to Applications. If macOS says it's
-  damaged or can't be verified, run
-  `xattr -dr com.apple.quarantine /Applications/OpenDesk.app`, then open it.
-  Grant **Screen Recording** and **Accessibility** when asked, then restart
-  the app.
+- **macOS** (`.dmg`, Apple silicon, macOS 12.3+): drag OpenDesk to
+  Applications. The first time, right-click it and choose **Open** (or allow
+  it in System Settings → Privacy & Security → **Open Anyway**). If macOS
+  says it's damaged, run
+  `xattr -dr com.apple.quarantine /Applications/OpenDesk.app` and open it
+  again. Grant **Screen Recording** and **Accessibility** when asked, then
+  restart the app.
 - **Windows** (`.exe` or `.msi`): on "Windows protected your PC", click
   **More info → Run anyway**.
 - **Linux** (`.AppImage`, `.deb`, or `.rpm`): for the AppImage,
@@ -27,9 +29,9 @@ port forwarding.
 The full checklist is in
 [docs/TESTING.md](https://github.com/treeot/opendesk/blob/main/docs/TESTING.md).
 
-## Especially worth testing
+## Needs testing
 
-These are new and haven't been run on real hardware yet:
+These features are new and haven't run on real hardware yet:
 
 - **Windows:** hardware video encoding (NVIDIA / Intel / AMD). Check the log
   for `video encoder:` to see which encoder was picked.
@@ -43,5 +45,5 @@ with your OS versions, what you did, and the app log
 (macOS `~/Library/Logs/com.opendesk.app/`, Windows
 `%LOCALAPPDATA%\com.opendesk.app\logs\`, Linux
 `~/.local/share/com.opendesk.app/logs/`).
-Security problems: please report privately (see
+Report security problems privately (see
 [SECURITY.md](https://github.com/treeot/opendesk/blob/main/docs/SECURITY.md)).

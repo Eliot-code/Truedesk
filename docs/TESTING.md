@@ -2,7 +2,7 @@
 
 Automated tests cover the protocol, relay, and host/viewer sessions end to end
 (`cargo test --workspace`). Screen capture, input injection, and audio need a
-real desktop session, so check them by hand before a release.
+real desktop session, so test them by hand before a release.
 
 ## One machine (two instances)
 
@@ -17,8 +17,8 @@ identity and config.
    `OPENDESK_DATA_DIR=/tmp/opendesk-b viewer/src-tauri/target/debug/viewer`
 4. In B, enter A's ID and password, then accept on A.
 
-On one machine you are viewing your own screen, so the stream mirrors itself.
-That's expected.
+On one machine you are viewing your own screen, so the stream shows itself
+recursively. That's expected.
 
 ## Two machines
 
@@ -42,8 +42,8 @@ Run the relay where both machines can reach it, then point both apps at it
 | 12 | Record session, stop | `.webm` saved and plays |
 
 macOS asks for **Screen Recording** and **Accessibility** permission the first
-time; restart the app after granting them. Note OS versions and any failing
-step number when reporting issues, and attach the app log:
+time; restart the app after granting them. When you report an issue, include
+the OS versions, the number of any failing step, and the app log:
 
 - macOS: `~/Library/Logs/com.opendesk.app/`
 - Windows: `%LOCALAPPDATA%\com.opendesk.app\logs\`

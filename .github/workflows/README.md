@@ -7,7 +7,7 @@
 - `tauri`: check and clippy for `viewer/src-tauri` (its own manifest) on macOS.
 - `viewer`: Vite build and Vitest suite on Ubuntu (Node 24).
 - `host-core-cross` / `tauri-cross`: compile checks for the Windows and Linux
-  host code, which macOS never builds.
+  host code, which the macOS jobs don't build.
 - `cargo-deny`: advisories, licenses, bans, and sources.
 
 `release.yml` runs on `v*` tags and builds unsigned bundles for macOS, Linux,
