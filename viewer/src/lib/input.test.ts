@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { attachInput, encodeInputEvent } from "./input";
+import { attachInput, containedRect, encodeInputEvent, mapPointer } from "./input";
 
 describe("encodeInputEvent", () => {
   it("matches the protocol mouse-move wire bytes exactly", () => {
@@ -10,6 +10,61 @@ describe("encodeInputEvent", () => {
       0x00, 0x00, 0x75, 0x30,
       0x00, 0x00, 0xaf, 0xc8,
     ]);
+  });
+});
+
+describe("pointer mapping with object-fit: contain", () => {
+  // A 1000x500 element showing a 1920x1080 frame: scale 500/1080, so the
+  // frame is ~888.9px wide and centred with ~55.6px pillar bars each side.
+  const element = { left: 100, top: 50, width: 1000, height: 500 };
+
+  it("computes the drawn rect inside pillarbox bars", () => {
+    const drawn = containedRect(element, 1920, 1080);
+    expect(drawn.height).toBe(500);
+    expect(drawn.width).toBeCloseTo(888.89, 1);
+    expect(drawn.left).toBeCloseTo(155.56, 1);
+    expect(drawn.top).toBe(50);
+  });
+
+  it("computes the drawn rect inside letterbox bars", () => {
+    const drawn = containedRect({ left: 0, top: 0, width: 400, height: 400 }, 800, 400);
+    expect(drawn).toEqual({ left: 0, top: 100, width: 400, height: 200 });
+  });
+
+  it("maps the drawn image corners and centre to the remote range", () => {
+    const drawn = containedRect(element, 1920, 1080);
+    expect(mapPointer(drawn.left, drawn.top, element, 1920, 1080)).toEqual({ x: 0, y: 0 });
+    expect(mapPointer(drawn.left + drawn.width, drawn.top + drawn.height, element, 1920, 1080)).toEqual({ x: 65535, y: 65535 });
+    expect(mapPointer(600, 300, element, 1920, 1080)).toEqual({ x: 32768, y: 32768 });
+  });
+
+  it("ignores positions over the bars", () => {
+    expect(mapPointer(120, 300, element, 1920, 1080)).toBeNull();
+    expect(mapPointer(1080, 300, element, 1920, 1080)).toBeNull();
+    expect(mapPointer(150, 50, { left: 0, top: 0, width: 400, height: 400 }, 800, 400)).toBeNull();
+  });
+
+  it("uses the whole element before the first frame arrives", () => {
+    expect(mapPointer(50, 25, { left: 0, top: 0, width: 100, height: 50 }, 0, 0)).toEqual({ x: 32768, y: 32768 });
+  });
+
+  it("drops canvas clicks in the bars but always sends releases", async () => {
+    const listeners = new Map<string, EventListener>();
+    const canvas = {
+      tabIndex: 0, width: 800, height: 400,
+      addEventListener: (type: string, listener: EventListener) => listeners.set(type, listener),
+      removeEventListener: () => {},
+      focus: () => {},
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 400, height: 400 }),
+    } as unknown as HTMLCanvasElement;
+    const sent: number[][] = [];
+    attachInput(canvas, (bytes) => { sent.push(Array.from(bytes)); return Promise.resolve(); });
+    listeners.get("mousedown")!({ button: 0, clientX: 200, clientY: 20 } as MouseEvent);
+    listeners.get("mousemove")!({ clientX: 200, clientY: 380 } as MouseEvent);
+    listeners.get("mouseup")!({ button: 0, clientX: 200, clientY: 20 } as MouseEvent);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sent.map((bytes) => bytes[0])).toEqual([2]);
+    expect(sent[0][10]).toBe(0);
   });
 });
 
@@ -89,7 +144,7 @@ describe("attachInput", () => {
       };
       attachInput(canvas, send);
       const move = (x: number) => listeners.get("mousemove")!({ clientX: x, clientY: 0 } as MouseEvent);
-      const down = () => listeners.get("mousedown")!({ button: 0 } as MouseEvent);
+      const down = () => listeners.get("mousedown")!({ button: 0, clientX: 0, clientY: 0 } as MouseEvent);
       const flush = async () => { release(); await new Promise((resolve) => setTimeout(resolve, 0)); };
       return { sent, move, down, flush };
     };

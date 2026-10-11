@@ -132,17 +132,20 @@ pub(crate) fn spawn_file_receiver(
             },
         )
         .await;
-        if let Err(error) = result {
-            emit(
+        match result {
+            Err(error) => emit(
                 &app,
                 "file_error",
                 FileError {
                     id: (*lock_unpoisoned(&transfer_id)).unwrap_or(0),
                     message: error.to_string(),
                 },
-            );
-        } else if let Some(id) = *lock_unpoisoned(&transfer_id) {
-            emit(&app, "file_done", FileDone { id });
+            ),
+            Ok(path) => {
+                if let Some(id) = *lock_unpoisoned(&transfer_id) {
+                    emit(&app, "file_done", FileDone { id, path: Some(path.display().to_string()) });
+                }
+            }
         }
     });
 }
@@ -201,7 +204,7 @@ pub(crate) async fn send_file(
                 },
             );
         } else if let Some(id) = *lock_unpoisoned(&transfer_id) {
-            emit(&task_app, "file_done", FileDone { id });
+            emit(&task_app, "file_done", FileDone { id, path: None });
         }
     });
     // FileSender allocates the id when it emits Offer. Returning after that

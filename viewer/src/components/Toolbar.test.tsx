@@ -27,4 +27,34 @@ describe("Toolbar", () => {
     fireEvent.click(screen.getByRole("button", { name: "Stop recording" }));
     expect(onRecordingToggle).toHaveBeenCalledTimes(2);
   });
+
+  it("exposes toggle state through aria-pressed and titles", () => {
+    const { rerender } = render(<Toolbar remoteId="123" onDisconnect={vi.fn()} clipboardSync audioMuted={false} />);
+    const clipboard = screen.getByRole("button", { name: "Sync clipboard" });
+    const audio = screen.getByRole("button", { name: "Mute audio" });
+    expect(clipboard.getAttribute("aria-pressed")).toBe("true");
+    expect(clipboard.title).toMatch(/is on/);
+    expect(audio.getAttribute("aria-pressed")).toBe("false");
+    rerender(<Toolbar remoteId="123" onDisconnect={vi.fn()} clipboardSync={false} audioMuted />);
+    expect(clipboard.getAttribute("aria-pressed")).toBe("false");
+    expect(clipboard.title).toMatch(/is off/);
+    expect(audio.getAttribute("aria-pressed")).toBe("true");
+    expect(audio.title).toMatch(/muted/);
+  });
+
+  it("hides controls that do nothing yet", () => {
+    render(<Toolbar remoteId="123" onDisconnect={vi.fn()} />);
+    expect(screen.queryByRole("button", { name: "Fit / Scale" })).toBeNull();
+    expect(screen.queryByLabelText("Quality")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Keyboard" })).toBeNull();
+  });
+
+  it("colours the connection dot by status", () => {
+    const { container, rerender } = render(<Toolbar remoteId="123" status="in_session" onDisconnect={vi.fn()} />);
+    const dot = container.querySelector(".session-toolbar__connected-dot")!;
+    expect(dot.getAttribute("data-status")).toBe("in_session");
+    rerender(<Toolbar remoteId="123" status="connecting" onDisconnect={vi.fn()} />);
+    expect(dot.getAttribute("data-status")).toBe("connecting");
+    expect(screen.getByText("Reconnecting")).toBeTruthy();
+  });
 });

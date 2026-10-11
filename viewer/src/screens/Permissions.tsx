@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import * as api from "../lib/api";
+import { friendlyError, useNotify } from "../lib/notify";
 
 export interface PermissionsProps { onContinue: () => void }
 
 export default function Permissions({ onContinue }: PermissionsProps) {
   const [permissions, setPermissions] = useState<api.PermissionStatus | null>(null);
+  const notify = useNotify();
 
   const refresh = useCallback(() => {
     let active = true;
@@ -26,19 +28,22 @@ export default function Permissions({ onContinue }: PermissionsProps) {
   const statusCard = (title: string, granted: boolean, which: "screen" | "accessibility") => (
     <section className="permission-card" key={which}>
       <div><h2>{title}</h2><p className={granted ? "permission-state granted" : "permission-state required"}><span className="permission-dot" aria-hidden="true" />{granted ? "Granted" : "Required"}</p></div>
-      {!granted && <button className="quiet-button" type="button" onClick={() => void api.openPermissionSettings(which)}>Open Settings</button>}
+      {!granted && <button className="quiet-button" type="button" onClick={() => void api.openPermissionSettings(which).catch((error: unknown) => notify(friendlyError(error)))}>Open Settings</button>}
     </section>
   );
 
   return (
     <main className="permissions-screen">
       <div className="permissions-content">
+        <button className="quiet-button permissions-back" type="button" onClick={onContinue}><span aria-hidden="true">←</span> Back</button>
         <span className="eyebrow">SETUP</span>
         <h1>Permissions</h1>
-        <p className="permissions-lead">OpenDesk needs these permissions to provide remote control.</p>
+        <p className="permissions-lead">Other devices can only see and control this computer once these are granted. You can still control other devices without them.</p>
         <div className="permission-cards">{statusCard("Screen Recording", screenGranted, "screen")}{statusCard("Accessibility", accessibilityGranted, "accessibility")}</div>
         <div className="permissions-progress"><span>{grantedCount} of 2 granted</span><div className="progress-track"><div style={{ width: `${grantedCount * 50}%` }} /></div></div>
-        <button className="primary-button permissions-continue" type="button" disabled={grantedCount !== 2} onClick={onContinue}>Continue</button>
+        {grantedCount === 2
+          ? <button className="primary-button permissions-continue" type="button" onClick={onContinue}>Continue</button>
+          : <button className="ghost-button permissions-continue" type="button" onClick={onContinue}>Skip for now</button>}
         <p className="permissions-footer">Permissions are enforced by macOS. OpenDesk cannot enable them for you.</p>
       </div>
     </main>

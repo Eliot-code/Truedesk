@@ -12,13 +12,17 @@ vi.mock("../lib/api", async () => {
 describe("Permissions", () => {
   afterEach(cleanup);
 
-  it("shows each permission state and gates Continue", async () => {
+  it("shows each permission state and offers to skip while one is missing", async () => {
     vi.mocked(api.permissionStatus).mockResolvedValue({ screen_recording: true, accessibility: false });
-    render(<Permissions onContinue={vi.fn()} />);
-    expect(screen.getByRole("button", { name: "Continue" })).toHaveProperty("disabled", true);
+    const onContinue = vi.fn();
+    render(<Permissions onContinue={onContinue} />);
     expect(await screen.findByText("Granted")).toBeTruthy();
     expect(screen.getByText("Required")).toBeTruthy();
     expect(screen.getByText("1 of 2 granted")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Continue" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Skip for now" }));
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    expect(onContinue).toHaveBeenCalledTimes(2);
   });
 
   it("enables Continue once both permissions are granted", async () => {

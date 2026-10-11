@@ -65,10 +65,38 @@ function timestampUs(): number {
   return Math.floor(Date.now() * 1000);
 }
 
-function normalizedCoordinate(value: number, start: number, size: number): number {
-  if (size <= 0) return 0;
-  const normalized = ((value - start) / size) * 65535;
-  return Math.max(0, Math.min(65535, Math.round(normalized)));
+export interface ClientRect { left: number; top: number; width: number; height: number }
+
+/**
+ * The rectangle the frame actually occupies inside an element styled with
+ * `object-fit: contain`: the frame is scaled to fit and centred, leaving bars
+ * on two sides when the aspect ratios differ. Without a frame size yet, the
+ * whole element is used.
+ */
+export function containedRect(element: ClientRect, contentWidth: number, contentHeight: number): ClientRect {
+  if (!(contentWidth > 0 && contentHeight > 0) || element.width <= 0 || element.height <= 0) return element;
+  const scale = Math.min(element.width / contentWidth, element.height / contentHeight);
+  const width = contentWidth * scale;
+  const height = contentHeight * scale;
+  return {
+    left: element.left + (element.width - width) / 2,
+    top: element.top + (element.height - height) / 2,
+    width,
+    height,
+  };
+}
+
+/**
+ * Map a client-space pointer position to the protocol's 0..65535 remote
+ * coordinates. Returns null when the pointer is over a letterbox bar.
+ */
+export function mapPointer(clientX: number, clientY: number, element: ClientRect, contentWidth: number, contentHeight: number): { x: number; y: number } | null {
+  const drawn = containedRect(element, contentWidth, contentHeight);
+  if (drawn.width <= 0 || drawn.height <= 0) return null;
+  const fx = (clientX - drawn.left) / drawn.width;
+  const fy = (clientY - drawn.top) / drawn.height;
+  if (fx < 0 || fx > 1 || fy < 0 || fy > 1) return null;
+  return { x: Math.round(fx * 65535), y: Math.round(fy * 65535) };
 }
 
 function modifiers(event: KeyboardEvent): number {
@@ -164,17 +192,18 @@ export function attachInput(
     });
   };
 
+  const pointer = (event: MouseEvent) => mapPointer(event.clientX, event.clientY, canvas.getBoundingClientRect(), canvas.width, canvas.height);
+
   const onMouseMove = (event: MouseEvent): void => {
-    const rect = canvas.getBoundingClientRect();
-    enqueueMove({
-      kind: "mouseMove",
-      x: normalizedCoordinate(event.clientX, rect.left, rect.width),
-      y: normalizedCoordinate(event.clientY, rect.top, rect.height),
-    });
+    const position = pointer(event);
+    if (position) enqueueMove({ kind: "mouseMove", ...position });
   };
 
+  // Presses over the letterbox bars are ignored; releases always go through
+  // so a drag that ends over a bar never leaves a button held remotely.
   const onMouseDown = (event: MouseEvent): void => {
     canvas.focus();
+    if (!pointer(event)) return;
     const mapped = button(event.button);
     if (mapped !== null) enqueue({ kind: "mouseButton", button: mapped, down: true });
   };
@@ -185,6 +214,7 @@ export function attachInput(
   };
 
   const onWheel = (event: WheelEvent): void => {
+    if (!pointer(event)) return;
     enqueue({ kind: "scroll", dx: Math.trunc(event.deltaX), dy: Math.trunc(event.deltaY) });
   };
 

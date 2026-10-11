@@ -50,6 +50,15 @@ pub(crate) struct SessionStarted {
 pub(crate) struct SessionEnded {
     pub(crate) reason: String,
 }
+/// A pending 2FA enrollment: shown to the user until they confirm a code.
+#[derive(Serialize)]
+pub(crate) struct TotpEnrollment {
+    pub(crate) uri: String,
+    pub(crate) secret: String,
+    /// QR modules for `uri`, row-major, `qr_width` x `qr_width`; true = dark.
+    pub(crate) qr_width: usize,
+    pub(crate) qr_modules: Vec<bool>,
+}
 #[derive(Serialize, Clone)]
 pub(crate) struct ErrorEvent {
     pub(crate) message: String,
@@ -94,6 +103,8 @@ pub(crate) struct FileProgress {
 #[derive(Serialize, Clone)]
 pub(crate) struct FileDone {
     pub(crate) id: u64,
+    /// Where a received file was saved; `None` for outgoing transfers.
+    pub(crate) path: Option<String>,
 }
 #[derive(Serialize, Clone)]
 pub(crate) struct FileError {

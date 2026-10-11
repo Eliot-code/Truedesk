@@ -341,21 +341,56 @@ fn random_base32_secret() -> String {
     output
 }
 
+/// Enabling starts an enrollment: the secret stays in memory until
+/// `confirm_unattended_2fa` checks a code from the authenticator. Asking again
+/// while one is pending returns the same secret instead of a new one.
 #[tauri::command]
-fn set_unattended_2fa(state: tauri::State<'_, AppState>, enabled: bool) -> Result<Option<String>, String> {
+fn set_unattended_2fa(
+    state: tauri::State<'_, AppState>,
+    pending: tauri::State<'_, unattended::PendingTotp>,
+    enabled: bool,
+) -> Result<Option<TotpEnrollment>, String> {
     let mut state = state.lock();
+    let mut pending = pending.lock();
     if enabled {
-        let secret = random_base32_secret();
-        unattended::set_totp_secret(&secret).map_err(|error| format!("could not store TOTP secret: {error}"))?;
-        state.config.config.unattended_twofa_enabled = true;
-        state.config.save().map_err(|error| error.to_string())?;
-        Ok(Some(format!("otpauth://totp/OpenDesk?secret={secret}&issuer=OpenDesk")))
+        if state.config.config.unattended_twofa_enabled && unattended::get_totp_secret().is_ok() {
+            return Err("two-factor is already enabled".into());
+        }
+        let secret = pending.get_or_insert_with(random_base32_secret).clone();
+        let uri = unattended::otpauth_uri(&state.config.ensure_identity(), &secret);
+        let (qr_width, qr_modules) = unattended::qr_modules(&uri)?;
+        Ok(Some(TotpEnrollment { uri, secret, qr_width, qr_modules }))
     } else {
-        unattended::delete_totp_secret().map_err(|error| format!("could not clear TOTP secret: {error}"))?;
+        *pending = None;
+        if state.config.config.unattended_twofa_enabled || unattended::get_totp_secret().is_ok() {
+            unattended::delete_totp_secret().map_err(|error| format!("could not clear TOTP secret: {error}"))?;
+        }
         state.config.config.unattended_twofa_enabled = false;
         state.config.save().map_err(|error| error.to_string())?;
         Ok(None)
     }
+}
+#[tauri::command]
+fn confirm_unattended_2fa(
+    state: tauri::State<'_, AppState>,
+    pending: tauri::State<'_, unattended::PendingTotp>,
+    code: String,
+) -> Result<(), String> {
+    let mut state = state.lock();
+    let mut pending = pending.lock();
+    let secret = pending.clone().ok_or("no two-factor setup is in progress")?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_secs();
+    if !host_core::roles::totp_is_valid(&secret, code.trim(), now) {
+        return Err("invalid 2FA code".into());
+    }
+    unattended::set_totp_secret(&secret).map_err(|error| format!("could not store TOTP secret: {error}"))?;
+    state.config.config.unattended_twofa_enabled = true;
+    state.config.save().map_err(|error| error.to_string())?;
+    *pending = None;
+    Ok(())
 }
 /// Unattended access skips the approval prompt, so its password is the only
 /// barrier against online guessing.
@@ -513,6 +548,7 @@ fn disconnect(state: tauri::State<'_, AppState>, app: AppHandle) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         // Stdout plus a rotating file in the OS log dir (macOS:
         // ~/Library/Logs/com.opendesk.app/) for bug reports.
         .plugin(
@@ -526,6 +562,7 @@ pub fn run() {
                 .build(),
         )
         .manage(Recordings::default())
+        .manage(unattended::PendingTotp::default())
         .setup(|app| {
             let app_data_dir = app
                 .path()
@@ -574,6 +611,7 @@ pub fn run() {
             get_unattended_status,
             set_unattended_access,
             set_unattended_2fa,
+            confirm_unattended_2fa,
             permission_status,
             open_permission_settings,
             respond_to_request,

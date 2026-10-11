@@ -1,12 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
 export type Status = "offline" | "online" | "connecting" | "in_session";
 export interface Identity { id: string; password: string }
 export interface AppConfig { relay_url: string; relay_urls: string[]; recent_ids: string[]; clipboard_sync: boolean }
 export interface UnattendedStatus { enabled: boolean; has_password: boolean; twofa_enabled: boolean }
 export interface PermissionStatus { screen_recording: boolean; accessibility: boolean }
-export interface IncomingRequest { peer_id: string; fingerprint: string; known?: boolean }
+export interface IncomingRequest { peer_id: string; fingerprint: string; known: boolean }
 export interface SessionStarted { role: "host" | "viewer"; remote_id: string }
 export interface SessionEnded { reason: string }
 export interface ErrorEvent { message: string }
@@ -22,9 +24,10 @@ export interface VideoFrame {
 export interface AudioFrame { sample_rate: number; channels: number; samples: string } // base64 of little-endian i16 PCM
 export interface FileOffer { id: number; name: string; size: number; from: string }
 export interface FileProgress { id: number; transferred: number; total: number; direction: "send" | "receive" | string }
-export interface FileDone { id: number }
+export interface FileDone { id: number; path?: string | null }
 export interface FileError { id: number; message: string }
 export interface Contact { id: string; alias: string; last_connected: number | null }
+export interface TotpEnrollment { uri: string; secret: string; qr_width: number; qr_modules: boolean[] }
 export interface MonitorInfo { id: number; name: string; width: number; height: number; is_primary: boolean }
 
 export const getIdentity = () => invoke<Identity>("get_identity");
@@ -42,7 +45,9 @@ export const setRelays = (urls: string[]) => invoke<void>("set_relays", { urls }
 export const listRelays = () => invoke<string[]>("list_relays");
 export const getUnattendedStatus = () => invoke<UnattendedStatus>("get_unattended_status");
 export const setUnattendedAccess = (enabled: boolean, password: string | null) => invoke<void>("set_unattended_access", { enabled, password });
-export const setUnattended2fa = (enabled: boolean) => invoke<string | null>("set_unattended_2fa", { enabled });
+/** Enabling returns a pending enrollment; 2FA is active only after confirmUnattended2fa. */
+export const setUnattended2fa = (enabled: boolean) => invoke<TotpEnrollment | null>("set_unattended_2fa", { enabled });
+export const confirmUnattended2fa = (code: string) => invoke<void>("confirm_unattended_2fa", { code });
 export const permissionStatus = () => invoke<PermissionStatus>("permission_status");
 export const openPermissionSettings = (which: "screen" | "accessibility") => invoke<void>("open_permission_settings", { which });
 // Tauri v2 exposes Rust snake_case params to JS as camelCase (peerId/targetId).
@@ -57,6 +62,18 @@ export const selectMonitor = (id: number) => invoke<void>("select_monitor", { id
 export const setClipboardSync = (enabled: boolean) => invoke<void>("set_clipboard_sync", { enabled });
 export const setAudioMuted = (muted: boolean) => invoke<void>("set_audio_muted", { muted });
 export const sendFile = (path: string) => invoke<number>("send_file", { path });
+/** Native file picker; resolves to the chosen path or null when cancelled. */
+export const pickFile = async (): Promise<string | null> => {
+  const selected = await openDialog({ multiple: false, directory: false, title: "Send file" });
+  return typeof selected === "string" ? selected : null;
+};
+/** Files dropped anywhere on the window; `over` reports drag hover state. */
+export const onFileDrop = (handler: (event: { type: "over" | "drop" | "leave"; paths: string[] }) => void): Promise<UnlistenFn> =>
+  getCurrentWebview().onDragDropEvent(({ payload }) => {
+    if (payload.type === "drop") handler({ type: "drop", paths: payload.paths });
+    else if (payload.type === "leave") handler({ type: "leave", paths: [] });
+    else handler({ type: "over", paths: [] });
+  });
 export const respondFile = (id: number, accept: boolean) => invoke<void>("respond_file", { id, accept });
 // Recordings stream to disk in chunks (base64, like frame events) so long
 // sessions are never held in memory.

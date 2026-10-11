@@ -1,73 +1,113 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Home from "./screens/Home";
+import Connecting from "./screens/Connecting";
 import IncomingRequest from "./screens/IncomingRequest";
 import Permissions from "./screens/Permissions";
 import Session from "./screens/Session";
+import Toast from "./components/Toast";
 import * as api from "./lib/api";
+import { NotifyContext, friendlyError, type Notice, type NoticeTone } from "./lib/notify";
 
-type Screen = "home" | "session" | "permissions";
+type Screen = "home" | "connecting" | "session" | "permissions";
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>("home");
+  const screenRef = useRef<Screen>("home");
   const [status, setStatus] = useState<api.Status>("offline");
   const [request, setRequest] = useState<api.IncomingRequest | null>(null);
   const [session, setSession] = useState<api.SessionStarted | null>(null);
-  const [viewerCredentials, setViewerCredentials] = useState<{ remoteId: string; password: string } | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [target, setTarget] = useState("");
+  const [notice, setNotice] = useState<Notice | null>(null);
+  const noticeId = useRef(0);
+  const permissionsChecked = useRef(false);
 
+  const go = useCallback((next: Screen) => { screenRef.current = next; setScreen(next); }, []);
+  const notify = useCallback((text: string, tone: NoticeTone = "error") => {
+    noticeId.current += 1;
+    setNotice({ id: noticeId.current, text, tone });
+  }, []);
+  const dismiss = useCallback(() => setNotice(null), []);
+
+  // connect() returns once the attempt is spawned; the session screen waits
+  // for the viewer-role session_started event, i.e. the host accepted.
   const handleConnect = async (remoteId: string, password: string, authCode?: string) => {
-    setViewerCredentials({ remoteId, password });
-    await api.connect(remoteId, password, authCode);
-    setSession({ role: "viewer", remote_id: remoteId });
-    setScreen("session");
+    setTarget(remoteId);
+    setNotice(null);
+    go("connecting");
+    try {
+      await (authCode ? api.connect(remoteId, password, authCode) : api.connect(remoteId, password));
+    } catch (error) {
+      if (screenRef.current === "connecting") go("home");
+      throw error;
+    }
   };
-  const handleDisconnect = useCallback(() => { void api.disconnect(); }, []);
+  const handleCancel = () => {
+    go("home");
+    void api.disconnect().catch((error: unknown) => notify(friendlyError(error)));
+  };
+  const handleDisconnect = useCallback(() => {
+    void api.disconnect().catch((error: unknown) => notify(friendlyError(error)));
+  }, [notify]);
 
   useEffect(() => {
     let active = true;
     const unlisten = Promise.all([
-      api.onStatusChanged(({ state }) => active && setStatus(state)),
+      api.onStatusChanged(({ state }) => {
+        if (!active) return;
+        setStatus(state);
+        if (state === "online") setNotice(null);
+      }),
       api.onIncomingRequest((payload) => {
         if (!active) return;
         setRequest(payload);
-        setError(null);
       }),
       api.onSessionStarted((payload) => {
         if (!active) return;
-        if (payload.role === "viewer") return;
+        if (payload.role === "viewer" && screenRef.current !== "connecting") return;
         setRequest(null);
         setSession(payload);
-        setScreen("session");
-        setError(null);
+        go("session");
+        setNotice(null);
       }),
       api.onSessionEnded(() => {
         if (!active) return;
         setRequest(null);
         setSession(null);
-        setViewerCredentials(null);
-        setScreen("home");
+        go("home");
       }),
-      api.onError(({ message }) => active && setError(message)),
+      api.onError(({ message }) => active && notify(friendlyError(message))),
     ]);
 
     return () => {
       active = false;
       void unlisten.then((fns) => fns.forEach((fn) => fn()));
     };
-  }, []);
+  }, [go, notify]);
+
+  // Once per launch, show the macOS permission checklist when something is
+  // missing. Other platforms always report both as granted.
+  useEffect(() => {
+    if (permissionsChecked.current) return;
+    permissionsChecked.current = true;
+    void api.permissionStatus().then((granted) => {
+      if ((!granted.screen_recording || !granted.accessibility) && screenRef.current === "home") go("permissions");
+    }).catch(() => {});
+  }, [go]);
 
   let content;
   if (screen === "permissions") {
-    content = <Permissions onContinue={() => setScreen("home")} />;
+    content = <Permissions onContinue={() => go("home")} />;
+  } else if (screen === "connecting") {
+    content = <Connecting remoteId={target} onCancel={handleCancel} />;
   } else if (screen === "session" && session) {
-    content = <Session remoteId={session.remote_id} role={session.role} password={viewerCredentials?.password} onDisconnect={handleDisconnect} />;
+    content = <Session remoteId={session.remote_id} role={session.role} status={status} onDisconnect={handleDisconnect} />;
   } else {
-    content = <Home status={status} onConnect={handleConnect} onOpenPermissions={() => setScreen("permissions")} />;
+    content = <Home status={status} initialTargetId={target} onConnect={handleConnect} onOpenPermissions={() => go("permissions")} />;
   }
 
-  return <>
+  return <NotifyContext.Provider value={notify}>
     {content}
-    {error && <p className="message" role="alert">{error}</p>}
-    {request && <IncomingRequest peerId={request.peer_id} fingerprint={request.fingerprint} onResolved={() => setRequest(null)} />}
-  </>;
+    <Toast notice={notice} onDismiss={dismiss} />
+    {request && <IncomingRequest peerId={request.peer_id} known={request.known} onResolved={() => setRequest(null)} />}
+  </NotifyContext.Provider>;
 }

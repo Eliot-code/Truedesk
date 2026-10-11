@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import * as api from "../lib/api";
 import { makeDecoder } from "../lib/decode";
 import { attachInput } from "../lib/input";
 import Toolbar from "../components/Toolbar";
 import FileTransfer from "../components/FileTransfer";
+import { friendlyError, useNotify } from "../lib/notify";
 
 /** Decode a base64 IPC payload into bytes (frames arrive as base64, not number[]). */
 function b64ToBytes(b64: string): Uint8Array {
@@ -16,12 +17,15 @@ function b64ToBytes(b64: string): Uint8Array {
 export interface SessionProps {
   remoteId: string;
   role: "host" | "viewer";
-  password?: string;
+  status?: api.Status;
   onDisconnect: () => void;
 }
 
-export default function Session({ remoteId, role, onDisconnect }: SessionProps) {
+export default function Session({ remoteId, role, status = "in_session", onDisconnect }: SessionProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const notify = useNotify();
+  const [filesOpen, setFilesOpen] = useState(false);
+  const onFilesOpenChange = useCallback((open: boolean) => setFilesOpen(open), []);
   // Off until the saved preference loads (clipboard sync defaults off).
   const [clipboardSync, setClipboardSync] = useState(false);
   const [audioMuted, setAudioMuted] = useState(false);
@@ -36,7 +40,7 @@ export default function Session({ remoteId, role, onDisconnect }: SessionProps) 
   const [selectedMonitor, setSelectedMonitor] = useState<number>();
   const toggleClipboardSync = (enabled: boolean) => {
     setClipboardSync(enabled);
-    void api.setClipboardSync(enabled).catch(() => setClipboardSync(!enabled));
+    void api.setClipboardSync(enabled).catch((error: unknown) => { setClipboardSync(!enabled); notify(friendlyError(error)); });
   };
 
   useEffect(() => {
@@ -58,12 +62,12 @@ export default function Session({ remoteId, role, onDisconnect }: SessionProps) 
 
   const chooseMonitor = (id: number) => {
     setSelectedMonitor(id);
-    void api.selectMonitor(id).catch(() => {});
+    void api.selectMonitor(id).catch((error: unknown) => notify(friendlyError(error)));
   };
 
   const toggleAudioMuted = (muted: boolean) => {
     setAudioMuted(muted);
-    void api.setAudioMuted(muted).catch(() => setAudioMuted(!muted));
+    void api.setAudioMuted(muted).catch((error: unknown) => { setAudioMuted(!muted); notify(friendlyError(error)); });
   };
 
   const stopRecording = () => {
@@ -84,12 +88,12 @@ export default function Session({ remoteId, role, onDisconnect }: SessionProps) 
     }
 
     const canvas = canvasRef.current;
-    if (!canvas?.captureStream || typeof MediaRecorder === "undefined") return;
+    if (!canvas?.captureStream || typeof MediaRecorder === "undefined") { notify("Recording isn't supported on this system."); return; }
     if (recordingStartingRef.current) return;
     recordingStartingRef.current = true;
     let id: number;
     try { id = await api.startRecording(`opendesk-session-${new Date().toISOString()}.webm`); }
-    catch { return; }
+    catch (error) { notify(`Could not start recording: ${friendlyError(error)}`); return; }
     finally { recordingStartingRef.current = false; }
     try {
       const stream = canvas.captureStream(60);
@@ -104,17 +108,23 @@ export default function Session({ remoteId, role, onDisconnect }: SessionProps) 
         writes = writes.then(() => event.data.arrayBuffer()).then((chunk) => api.appendRecording(id, chunk));
       };
       recorder.onstop = () => {
-        void writes.catch(() => {}).then(() => api.finishRecording(id)).catch(() => {});
         recorderRef.current = undefined;
+        void writes
+          .then(
+            () => api.finishRecording(id).then((path) => notify(`Recording saved to ${path}`, "info")),
+            (error: unknown) => api.finishRecording(id).finally(() => notify(`Recording may be incomplete: ${friendlyError(error)}`)),
+          )
+          .catch((error: unknown) => notify(`Could not save recording: ${friendlyError(error)}`));
       };
       recordingStartedAtRef.current = Date.now();
       setRecordingElapsed(0);
       setRecordingActive(true);
       recorder.start(1000);
-    } catch {
+    } catch (error) {
       recordingStreamRef.current?.getTracks().forEach((track) => track.stop());
       recordingStreamRef.current = undefined;
       recorderRef.current = undefined;
+      notify(`Could not start recording: ${friendlyError(error)}`);
       void api.finishRecording(id).catch(() => {});
     }
   };
@@ -186,10 +196,10 @@ export default function Session({ remoteId, role, onDisconnect }: SessionProps) 
 
   return (
     <main className={`session-screen session-screen--${role}`}>
-      <canvas ref={canvasRef} className="session-canvas" tabIndex={0} aria-label="Remote screen" />
+      {role === "viewer" && <canvas ref={canvasRef} className="session-canvas" tabIndex={0} aria-label="Remote screen" />}
       {role === "host" && <div className="session-host-overlay"><span className="eyebrow">OPENDESK · SECURE SESSION</span><h1>You are being controlled by {remoteId}</h1><p>Your screen is shared for this session.</p></div>}
-      <Toolbar remoteId={remoteId} monitors={monitors} selectedMonitor={selectedMonitor} onMonitorChange={chooseMonitor} clipboardSync={clipboardSync} onClipboardSyncChange={toggleClipboardSync} audioMuted={audioMuted} onAudioMutedChange={toggleAudioMuted} recordingActive={recordingActive} recordingElapsed={recordingElapsed} recordingDisabled={role !== "viewer"} onRecordingToggle={toggleRecording} onDisconnect={onDisconnect} />
-      <FileTransfer />
+      <Toolbar remoteId={remoteId} role={role} status={status} monitors={monitors} selectedMonitor={selectedMonitor} onMonitorChange={chooseMonitor} clipboardSync={clipboardSync} onClipboardSyncChange={toggleClipboardSync} audioMuted={audioMuted} onAudioMutedChange={toggleAudioMuted} recordingActive={recordingActive} recordingElapsed={recordingElapsed} onRecordingToggle={() => void toggleRecording()} filesOpen={filesOpen} onFilesToggle={() => setFilesOpen((open) => !open)} onDisconnect={onDisconnect} />
+      {role === "viewer" && <FileTransfer open={filesOpen} onOpenChange={onFilesOpenChange} />}
     </main>
   );
 }
