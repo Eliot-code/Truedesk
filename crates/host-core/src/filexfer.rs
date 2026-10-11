@@ -66,22 +66,124 @@ impl From<io::Error> for FileError {
 }
 
 /// Return a filename safe to append to a trusted downloads directory.
+///
+/// Besides path traversal, this rejects names that could disguise what the
+/// file is or where it lands: invisible/bidi format characters (e.g. U+202E
+/// turning "invoice\u{202E}fdp.exe" into "invoiceexe.pdf"), hidden dotfiles,
+/// trailing dots/spaces (silently stripped by Windows), ':' (Windows
+/// drive-relative paths and NTFS alternate data streams) and Windows reserved
+/// device names.
 pub fn sanitize_filename(name: &str) -> Option<String> {
     if name.is_empty()
         || name.len() > 255
-        || name == "."
-        || name == ".."
+        || name.starts_with('.')
+        || name.ends_with('.')
+        || name.ends_with(' ')
         || name.contains('/')
         || name.contains('\\')
+        || name.contains(':')
         || name.contains('\0')
-        || name.starts_with('/')
-        || name.starts_with('\\')
         || Path::new(name).is_absolute()
-        || name.chars().any(char::is_control)
+        || name.chars().any(|c| c.is_control() || is_format_char(c))
+        || is_windows_reserved_name(name)
     {
         return None;
     }
     Some(name.to_owned())
+}
+
+/// Unicode general category Cf (format) characters: invisible marks, bidi
+/// controls and tags that can make a displayed name differ from the real one.
+fn is_format_char(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x00AD
+            | 0x0600..=0x0605
+            | 0x061C
+            | 0x06DD
+            | 0x070F
+            | 0x0890..=0x0891
+            | 0x08E2
+            | 0x180E
+            | 0x200B..=0x200F
+            | 0x202A..=0x202E
+            | 0x2060..=0x2064
+            | 0x2066..=0x206F
+            | 0xFEFF
+            | 0xFFF9..=0xFFFB
+            | 0x110BD
+            | 0x110CD
+            | 0x13430..=0x1343F
+            | 0x1BCA0..=0x1BCA3
+            | 0x1D173..=0x1D17A
+            | 0xE0001
+            | 0xE0020..=0xE007F
+    )
+}
+
+/// Windows reserved device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9),
+/// case-insensitively and with any extension ("nul.txt", "Com1.tar.gz").
+fn is_windows_reserved_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name).trim_end_matches(' ');
+    let upper = stem.to_ascii_uppercase();
+    match upper.as_str() {
+        "CON" | "PRN" | "AUX" | "NUL" => true,
+        _ => {
+            let bytes = upper.as_bytes();
+            bytes.len() == 4
+                && (upper.starts_with("COM") || upper.starts_with("LPT"))
+                && (b'1'..=b'9').contains(&bytes[3])
+        }
+    }
+}
+
+/// Mark a received file as downloaded from an untrusted source so the OS
+/// applies its usual first-open checks (Gatekeeper on macOS, SmartScreen /
+/// Mark-of-the-Web on Windows). Failures are logged, never fatal.
+fn quarantine(path: &Path) {
+    if let Err(error) = apply_quarantine(path) {
+        log::warn!("could not mark received file {} as quarantined: {error}", path.display());
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn apply_quarantine(path: &Path) -> io::Result<()> {
+    use std::{ffi::CString, os::unix::ffi::OsStrExt};
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs());
+    // 0081 = downloaded, not yet user-approved; then time, agent, no UUID.
+    let value = format!("0081;{now:x};OpenDesk;");
+    let c_path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))?;
+    let c_name = c"com.apple.quarantine";
+    // SAFETY: `c_path` and `c_name` are valid NUL-terminated C strings and
+    // `value` is a live buffer of `value.len()` bytes; all outlive the call.
+    // setxattr does not retain any of the pointers.
+    let result = unsafe {
+        libc::setxattr(
+            c_path.as_ptr(),
+            c_name.as_ptr(),
+            value.as_ptr().cast(),
+            value.len(),
+            0,
+            0,
+        )
+    };
+    if result == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+}
+
+#[cfg(windows)]
+fn apply_quarantine(path: &Path) -> io::Result<()> {
+    let mut stream = path.as_os_str().to_owned();
+    stream.push(":Zone.Identifier");
+    // ZoneId=3 is the Internet zone (Mark-of-the-Web).
+    std::fs::write(stream, "[ZoneTransfer]\r\nZoneId=3\r\n")
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn apply_quarantine(_path: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 pub struct FileSender;
@@ -213,9 +315,25 @@ impl FileReceiver {
         .await;
         match result {
             Ok(()) => {
-                let final_path = unique_final_path(downloads_dir, &name).await?;
+                let final_path = match unique_final_path(downloads_dir, &name).await {
+                    Ok(path) => path,
+                    Err(error) => {
+                        let _ = tokio::fs::remove_file(&temp_path).await;
+                        return Err(error);
+                    }
+                };
+                // Defense in depth: the sanitized name must never escape the
+                // downloads directory.
+                if final_path.parent() != Some(downloads_dir) {
+                    let _ = tokio::fs::remove_file(&final_path).await;
+                    let _ = tokio::fs::remove_file(&temp_path).await;
+                    return Err(FileError::BadName);
+                }
                 match tokio::fs::rename(&temp_path, &final_path).await {
-                    Ok(()) => Ok(final_path),
+                    Ok(()) => {
+                        quarantine(&final_path);
+                        Ok(final_path)
+                    }
                     Err(error) => {
                         let _ = tokio::fs::remove_file(&final_path).await;
                         Err(error.into())
@@ -380,6 +498,72 @@ mod tests {
         assert_eq!(sanitize_filename(&"a".repeat(256)), None);
         assert_eq!(sanitize_filename("line\nfeed.txt"), None);
         assert_eq!(sanitize_filename("tab\tfile.txt"), None);
+    }
+
+    #[test]
+    fn rejects_spoofing_format_characters() {
+        for name in [
+            "invoice\u{202E}fdp.exe",
+            "a\u{200E}.txt",
+            "a\u{200F}.txt",
+            "a\u{2066}b\u{2069}.txt",
+            "\u{FEFF}report.pdf",
+            "zero\u{200B}width.txt",
+            "soft\u{00AD}hyphen.txt",
+            "tag\u{E0041}.txt",
+        ] {
+            assert_eq!(sanitize_filename(name), None, "{name:?}");
+        }
+        assert_eq!(sanitize_filename("résumé 履歴書.pdf"), Some("résumé 履歴書.pdf".into()));
+    }
+
+    #[test]
+    fn rejects_hidden_and_trailing_dot_or_space_names() {
+        for name in [".", "..", ".bashrc", ".hidden.txt", "file.", "file ", "file.txt.", "file.txt "] {
+            assert_eq!(sanitize_filename(name), None, "{name:?}");
+        }
+        assert_eq!(sanitize_filename("archive.tar.gz"), Some("archive.tar.gz".into()));
+    }
+
+    #[test]
+    fn rejects_colons_and_streams() {
+        for name in ["C:evil.exe", "a.txt:stream", "a.txt::$DATA", "c:"] {
+            assert_eq!(sanitize_filename(name), None, "{name:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_windows_reserved_device_names() {
+        for name in [
+            "CON", "con", "Prn", "aux.txt", "NUL.tar.gz", "com1", "COM9.log", "lpt1", "Lpt9.txt",
+            "nul .txt",
+        ] {
+            assert_eq!(sanitize_filename(name), None, "{name:?}");
+        }
+        for name in ["console.txt", "com0.txt", "com10", "lpt", "auxiliary.doc", "nullable.rs", "my con.txt"] {
+            assert_eq!(sanitize_filename(name), Some(name.to_owned()), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn quarantine_is_best_effort() {
+        let dir = temp_dir("quarantine");
+        let file = dir.join("received.txt");
+        fs::write(&file, b"x").unwrap();
+        // Never panics, even for a missing file.
+        quarantine(&file);
+        quarantine(&dir.join("missing.txt"));
+        #[cfg(target_os = "macos")]
+        {
+            let output = std::process::Command::new("xattr")
+                .args(["-p", "com.apple.quarantine"])
+                .arg(&file)
+                .output()
+                .unwrap();
+            let value = String::from_utf8_lossy(&output.stdout);
+            assert!(value.starts_with("0081;") && value.trim_end().ends_with(";OpenDesk;"), "{value}");
+        }
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]

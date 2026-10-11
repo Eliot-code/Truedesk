@@ -1262,6 +1262,7 @@ dependencies = [
  "cpal",
  "enigo",
  "futures-util",
+ "libc",
  "log",
  "objc2-core-foundation",
  "objc2-core-media",
