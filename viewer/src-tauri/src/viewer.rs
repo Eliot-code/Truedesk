@@ -1,6 +1,7 @@
 //! Viewer: connecting to a host, input, monitor selection, and 2FA codes.
 
 use super::*;
+use tauri::ipc::{Channel, InvokeResponseBody};
 
 pub(crate) fn can_reserve_viewer_slot(viewer_task_reserved: bool, viewer_stop_reserved: bool) -> bool {
     !viewer_task_reserved && !viewer_stop_reserved
@@ -14,6 +15,61 @@ pub(crate) fn enqueue_input(sender: Option<mpsc::Sender<Vec<u8>>>, bytes: Vec<u8
             mpsc::error::TrySendError::Full(_) => "viewer input queue is full".into(),
             mpsc::error::TrySendError::Closed(_) => "viewer session is closed".into(),
         })
+}
+
+/// Video plaintext header: seq u64, timestamp_us u32, codec u8, flags u8,
+/// width u16, height u16 (big-endian). The UI parses it (see video.ts).
+pub(crate) const VIDEO_HEADER_LEN: usize = 18;
+
+/// Frames waiting for the UI. Kept short: a stale frame is worse than a
+/// dropped one, and the UI recovers from drops by requesting a keyframe.
+pub(crate) const VIDEO_QUEUE_DEPTH: usize = 4;
+
+/// The session screen's video channel. Frames go to the webview as raw bytes
+/// (header plus access unit, exactly as received) with no JSON or base64.
+#[derive(Default)]
+pub(crate) struct VideoSink(Mutex<Option<Channel<InvokeResponseBody>>>);
+
+impl VideoSink {
+    fn slot(&self) -> std::sync::MutexGuard<'_, Option<Channel<InvokeResponseBody>>> {
+        lock_unpoisoned(&self.0)
+    }
+
+    /// Route frames to `channel`, replacing any earlier one.
+    pub(crate) fn attach(&self, channel: Channel<InvokeResponseBody>) {
+        *self.slot() = Some(channel);
+    }
+
+    /// Stop sending to channel `id`. A stale id (an unmounted screen whose
+    /// successor already attached) leaves the current channel alone.
+    pub(crate) fn detach(&self, id: u32) {
+        let mut slot = self.slot();
+        if slot.as_ref().is_some_and(|channel| channel.id() == id) {
+            *slot = None;
+        }
+    }
+
+    pub(crate) fn clear(&self) {
+        *self.slot() = None;
+    }
+
+    /// Forward one frame; dropped when no screen is listening.
+    pub(crate) fn send(&self, frame: Vec<u8>) {
+        let channel = self.slot().clone();
+        if let Some(channel) = channel {
+            let _ = channel.send(InvokeResponseBody::Raw(frame));
+        }
+    }
+}
+
+#[tauri::command]
+pub(crate) fn start_video(sink: tauri::State<'_, VideoSink>, channel: Channel<InvokeResponseBody>) {
+    sink.attach(channel);
+}
+
+#[tauri::command]
+pub(crate) fn stop_video(sink: tauri::State<'_, VideoSink>, id: u32) {
+    sink.detach(id);
 }
 
 #[tauri::command]
@@ -106,7 +162,7 @@ pub(crate) fn connect(
                 }
                 _ => return Err("invalid pairing message".into()),
             };
-            let (frame_tx, mut frame_rx) = mpsc::channel::<Vec<u8>>(64);
+            let (frame_tx, mut frame_rx) = mpsc::channel::<Vec<u8>>(VIDEO_QUEUE_DEPTH);
             let (input_tx, input_rx) = mpsc::channel::<Vec<u8>>(256);
             let (monitor_tx, mut monitor_rx) = mpsc::channel::<Vec<u8>>(16);
             let (audio_tx, mut audio_rx) = mpsc::channel::<Vec<u8>>(16);
@@ -116,28 +172,11 @@ pub(crate) fn connect(
             let frame_media_received = media_received.clone();
             let _frame_task = AbortOnDrop::new(tauri::async_runtime::spawn(async move {
                 while let Some(plaintext) = frame_rx.recv().await {
-                    if plaintext.len() < 18 {
+                    if plaintext.len() < VIDEO_HEADER_LEN {
                         continue;
                     }
                     frame_media_received.store(true, Ordering::Relaxed);
-                    let seq = u64::from_be_bytes(plaintext[0..8].try_into().unwrap());
-                    let timestamp_us = u32::from_be_bytes(plaintext[8..12].try_into().unwrap());
-                    let _codec = plaintext[12];
-                    let flags = plaintext[13];
-                    let width = u16::from_be_bytes(plaintext[14..16].try_into().unwrap());
-                    let height = u16::from_be_bytes(plaintext[16..18].try_into().unwrap());
-                    emit(
-                        &frame_app,
-                        "video_frame",
-                        VideoFrame {
-                            seq,
-                            timestamp_us,
-                            keyframe: flags & 1 != 0,
-                            width,
-                            height,
-                            data: b64(&plaintext[18..]),
-                        },
-                    );
+                    frame_app.state::<VideoSink>().send(plaintext);
                 }
             }));
 
@@ -262,6 +301,7 @@ pub(crate) fn connect(
                 },
             );
         }
+        task_app.state::<VideoSink>().clear();
         let app_state = task_app.state::<AppState>();
         let mut state = app_state.lock();
         state.viewer_input = None;
@@ -331,4 +371,71 @@ pub(crate) async fn send_auth_code(state: tauri::State<'_, AppState>, code: Stri
     let sealer = sealer.ok_or_else(|| "control channel is not ready".to_owned())?;
     let sealed = lock_unpoisoned(&sealer).seal(&[Tag::Control as u8], &Control::AuthCode { code }.to_bytes());
     sender.send_frame(Tag::Control, &sealed).await.map_err(|error| error.to_string())
+}
+
+/// Ask the host for a fresh keyframe after the UI dropped frames or its
+/// decoder failed. The UI rate-limits these.
+#[tauri::command]
+pub(crate) async fn request_keyframe(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let (sender, sealer) = { let state = state.lock(); (state.control_sender.clone(), state.control_sealer.clone()) };
+    let sender = sender.ok_or_else(|| "no active viewer session".to_owned())?;
+    let sealer = sealer.ok_or_else(|| "control channel is not ready".to_owned())?;
+    let sealed = lock_unpoisoned(&sealer).seal(&[Tag::Control as u8], &Control::RequestKeyframe.to_bytes());
+    sender.send_frame(Tag::Control, &sealed).await.map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    type Received = Arc<Mutex<Vec<Vec<u8>>>>;
+
+    fn recording_channel() -> (Channel<InvokeResponseBody>, Received) {
+        let received = Received::default();
+        let log = received.clone();
+        let channel = Channel::new(move |body| {
+            if let InvokeResponseBody::Raw(bytes) = body {
+                log.lock().unwrap().push(bytes);
+            }
+            Ok(())
+        });
+        (channel, received)
+    }
+
+    #[test]
+    fn video_sink_forwards_raw_frames_to_the_attached_channel() {
+        let sink = VideoSink::default();
+        sink.send(vec![1]);
+        let (channel, received) = recording_channel();
+        sink.attach(channel);
+        sink.send(vec![0; VIDEO_HEADER_LEN + 2]);
+        assert_eq!(*received.lock().unwrap(), vec![vec![0; VIDEO_HEADER_LEN + 2]]);
+    }
+
+    #[test]
+    fn video_sink_ignores_a_stale_detach() {
+        let sink = VideoSink::default();
+        let (old, _) = recording_channel();
+        let old_id = old.id();
+        let (new, received) = recording_channel();
+        let new_id = new.id();
+        sink.attach(old);
+        sink.attach(new);
+        sink.detach(old_id);
+        sink.send(vec![7]);
+        assert_eq!(received.lock().unwrap().len(), 1);
+        sink.detach(new_id);
+        sink.send(vec![8]);
+        assert_eq!(received.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn video_sink_clear_drops_the_channel() {
+        let sink = VideoSink::default();
+        let (channel, received) = recording_channel();
+        sink.attach(channel);
+        sink.clear();
+        sink.send(vec![1]);
+        assert!(received.lock().unwrap().is_empty());
+    }
 }

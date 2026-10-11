@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as api from "../lib/api";
-import { makeDecoder, sizeCanvas } from "../lib/decode";
+import { makeDecoder } from "../lib/decode";
 import { attachInput } from "../lib/input";
 import Toolbar from "../components/Toolbar";
 import FileTransfer from "../components/FileTransfer";
 import { friendlyError, useNotify } from "../lib/notify";
 
-/** Decode a base64 IPC payload into bytes (frames arrive as base64, not number[]). */
+/** Decode a base64 IPC payload into bytes (audio arrives as base64, not number[]). */
 function b64ToBytes(b64: string): Uint8Array {
   const binary = atob(b64);
   const bytes = new Uint8Array(binary.length);
@@ -168,28 +168,16 @@ export default function Session({ remoteId, role, status = "in_session", onDisco
     if (role !== "viewer" || !canvasRef.current) return;
 
     const canvas = canvasRef.current;
-    const { decode, close: closeDecoder } = makeDecoder(canvas);
-    let active = true;
-    let unlisten: (() => void) | undefined;
-
-    const listener = api.onVideoFrame((frame) => {
-      if (!active) return;
-      sizeCanvas(canvas, frame.width, frame.height);
-      decode(b64ToBytes(frame.data), frame.keyframe, frame.timestamp_us);
-    });
-    void listener.then((stop) => {
-      if (active) unlisten = stop;
-      else stop();
-    });
-
+    // Request failures (e.g. the control channel is still opening) are
+    // harmless: the decoder asks again on the next dropped frame.
+    const decoder = makeDecoder(canvas, { requestKeyframe: () => void api.requestKeyframe().catch(() => {}) });
+    const stopVideo = api.startVideo(decoder.push);
     const detachInput = attachInput(canvas, api.sendInput);
 
     return () => {
-      active = false;
+      stopVideo();
       detachInput();
-      closeDecoder();
-      if (unlisten) unlisten();
-      else void listener.then((stop) => stop());
+      decoder.close();
     };
   }, [role]);
 

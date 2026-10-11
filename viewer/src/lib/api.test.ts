@@ -6,7 +6,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 // multi-word args must be passed as targetId/peerId — not target_id/peer_id.
 const invoke = vi.fn(() => Promise.resolve());
 const listen = vi.fn((_event: string, _handler: unknown) => Promise.resolve(vi.fn()));
-vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+class FakeChannel {
+  id = 41;
+  constructor(public onmessage: (message: unknown) => void) {}
+}
+vi.mock("@tauri-apps/api/core", () => ({ invoke, Channel: FakeChannel }));
 vi.mock("@tauri-apps/api/event", () => ({ listen }));
 
 const api = await import("./api");
@@ -39,9 +43,25 @@ describe("api invoke payload keys (camelCase contract)", () => {
     expect(invoke).toHaveBeenCalledWith("start_recording", { suggestedName: "s.webm" });
   });
 
-  it("onVideoFrame listens to the backend event", async () => {
+  it("startVideo hands the backend a binary channel that feeds the handler", async () => {
     const handler = vi.fn();
-    await api.onVideoFrame(handler);
-    expect(listen).toHaveBeenCalledWith("video_frame", expect.any(Function));
+    const stop = api.startVideo(handler);
+    expect(invoke).toHaveBeenCalledWith("start_video", { channel: expect.any(FakeChannel) });
+    const channel = (invoke.mock.calls[0] as unknown[])[1] as { channel: FakeChannel };
+    const message = new ArrayBuffer(18);
+    channel.channel.onmessage(message);
+    expect(handler).toHaveBeenCalledWith(message);
+
+    stop();
+    stop();
+    channel.channel.onmessage(message);
+    expect(handler).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith("stop_video", { id: 41 }));
+    expect(invoke.mock.calls.filter((call) => (call as unknown[])[0] === "stop_video")).toHaveLength(1);
+  });
+
+  it("requestKeyframe invokes the backend command", async () => {
+    await api.requestKeyframe();
+    expect(invoke).toHaveBeenCalledWith("request_keyframe");
   });
 });

@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -13,14 +13,6 @@ export interface SessionStarted { role: "host" | "viewer"; remote_id: string }
 export interface SessionEnded { reason: string }
 export interface ErrorEvent { message: string }
 export interface StatusChanged { state: Status }
-export interface VideoFrame {
-  seq: number;
-  timestamp_us: number;
-  keyframe: boolean;
-  width: number;
-  height: number;
-  data: string; // base64 of the encoded frame bytes (see backend b64())
-}
 export interface AudioFrame { sample_rate: number; channels: number; samples: string } // base64 of little-endian i16 PCM
 export interface FileOffer { id: number; name: string; size: number; from: string }
 export interface FileProgress { id: number; transferred: number; total: number; direction: "send" | "receive" | string }
@@ -59,6 +51,24 @@ export const sendAuthCode = (code: string) => invoke<void>("send_auth_code", { c
 export const disconnect = () => invoke<void>("disconnect");
 export const sendInput = (bytes: Uint8Array) => invoke<void>("send_input", { bytes: Array.from(bytes) });
 export const selectMonitor = (id: number) => invoke<void>("select_monitor", { id });
+export const requestKeyframe = () => invoke<void>("request_keyframe");
+/**
+ * Stream video frame messages (raw bytes: header plus access unit, see
+ * video.ts) to `handler` over a binary channel. Call the returned function to
+ * stop; a later startVideo from a remounted screen is not affected by it.
+ */
+export function startVideo(handler: (message: ArrayBuffer) => void): () => void {
+  const channel = new Channel<ArrayBuffer>(handler);
+  const started = invoke<void>("start_video", { channel });
+  let stopped = false;
+  return () => {
+    if (stopped) return;
+    stopped = true;
+    channel.onmessage = () => {};
+    // After start resolves, so the backend never sees stop before start.
+    void started.then(() => invoke<void>("stop_video", { id: channel.id })).catch(() => {});
+  };
+}
 export const setClipboardSync = (enabled: boolean) => invoke<void>("set_clipboard_sync", { enabled });
 export const setAudioMuted = (muted: boolean) => invoke<void>("set_audio_muted", { muted });
 export const sendFile = (path: string) => invoke<number>("send_file", { path });
@@ -75,7 +85,7 @@ export const onFileDrop = (handler: (event: { type: "over" | "drop" | "leave"; p
     else handler({ type: "over", paths: [] });
   });
 export const respondFile = (id: number, accept: boolean) => invoke<void>("respond_file", { id, accept });
-// Recordings stream to disk in chunks (base64, like frame events) so long
+// Recordings stream to disk in chunks (base64, like audio events) so long
 // sessions are never held in memory.
 export const startRecording = (suggestedName: string) => invoke<number>("start_recording", { suggestedName });
 export const appendRecording = (id: number, chunk: ArrayBuffer) => invoke<void>("append_recording", { id, chunk: toBase64(new Uint8Array(chunk)) });
@@ -93,7 +103,6 @@ export const onIncomingRequest = (handler: (payload: IncomingRequest) => void) =
 export const onSessionStarted = (handler: (payload: SessionStarted) => void) => on("session_started", handler);
 export const onSessionEnded = (handler: (payload: SessionEnded) => void) => on("session_ended", handler);
 export const onError = (handler: (payload: ErrorEvent) => void) => on("error", handler);
-export const onVideoFrame = (handler: (frame: VideoFrame) => void) => on("video_frame", handler);
 export const onMonitorList = (handler: (payload: { monitors: MonitorInfo[] }) => void) => on("monitor_list", handler);
 export const onAudioFrame = (handler: (frame: AudioFrame) => void) => on("audio_frame", handler);
 export const onFileOffer = (handler: (payload: FileOffer) => void) => on("file_offer", handler);

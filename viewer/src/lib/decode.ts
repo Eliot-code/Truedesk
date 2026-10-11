@@ -1,15 +1,25 @@
 /**
- * Wires decrypted H.264 access units into a WebCodecs VideoDecoder, rendering
- * decoded frames to `canvas`. The host encodes real H.264 (openh264) and the
- * frames arrive already opened (AEAD) by the Rust backend.
+ * Wires the backend's binary frame messages into a WebCodecs VideoDecoder,
+ * rendering decoded frames to `canvas`. The host encodes H.264 and the frames
+ * arrive already opened (AEAD) by the Rust backend; see `video.ts` for the
+ * message layout and the drop policy.
  *
- * Returns a `decode` function for feeding access units and a `close` function
- * the caller MUST invoke on teardown so the VideoDecoder is released rather
- * than leaked across session unmount/remount.
+ * The caller MUST invoke `close` on teardown so the VideoDecoder is released
+ * rather than leaked across session unmount/remount.
  */
+import { codecFromSps, DEFAULT_H264_CODEC, FramePolicy, parseFrame, RateLimiter } from "./video";
+
 export interface Decoder {
-  decode: (data: Uint8Array, keyframe: boolean, timestampUs: number) => void;
+  /** Feed one frame message (header plus access unit) from the backend. */
+  push: (message: ArrayBuffer | Uint8Array) => void;
   close: () => void;
+}
+
+export interface DecoderOptions {
+  /** Ask the host for a keyframe; called at most once per 500 ms. */
+  requestKeyframe: () => void;
+  /** Clock for rate limiting, in ms. Defaults to `performance.now`. */
+  now?: () => number;
 }
 
 /** Assigning a canvas size clears it, so only touch it when the size changes. */
@@ -18,37 +28,109 @@ export function sizeCanvas(canvas: HTMLCanvasElement, width: number, height: num
   if (canvas.height !== height) canvas.height = height;
 }
 
-export function makeDecoder(canvas: HTMLCanvasElement): Decoder {
-  const ctx = canvas.getContext("2d")!;
-  const decoder = new VideoDecoder({
-    output: (frame) => {
-      sizeCanvas(canvas, frame.displayWidth, frame.displayHeight);
-      ctx.drawImage(frame, 0, 0);
-      frame.close();
-    },
-    error: (e) => {
-      // Log without crashing; a malformed/unsupported frame must not kill the app.
-      console.error("video decode error:", e);
-    },
-  });
-  decoder.configure({ codec: "avc1.42E01E" }); // H.264 baseline
+export function decoderConfig(codec: string, hardware: boolean): VideoDecoderConfig {
+  return hardware
+    ? { codec, optimizeForLatency: true, hardwareAcceleration: "prefer-hardware" }
+    : { codec, optimizeForLatency: true };
+}
+
+export function makeDecoder(canvas: HTMLCanvasElement, options: DecoderOptions): Decoder {
+  // Opaque and desynchronized: no alpha blending with the page, and frames
+  // can reach the screen without waiting on the compositor.
+  const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
+  const now = options.now ?? (() => performance.now());
+  const policy = new FramePolicy();
+  const limiter = new RateLimiter();
+  let codec = DEFAULT_H264_CODEC;
+  // Dropped if the decoder fails before producing a frame with it.
+  let hardware = true;
+  let closed = false;
+  let produced = false;
+
+  const requestKeyframe = () => {
+    if (limiter.tryAcquire(now())) options.requestKeyframe();
+  };
+
+  const configure = (target: VideoDecoder) => {
+    try {
+      target.configure(decoderConfig(codec, hardware));
+    } catch (error) {
+      if (!hardware) throw error;
+      hardware = false;
+      target.configure(decoderConfig(codec, false));
+    }
+  };
+
+  const create = (): VideoDecoder => {
+    produced = false;
+    const created: VideoDecoder = new VideoDecoder({
+      output: (frame) => {
+        if (closed || created !== decoder) { frame.close(); return; }
+        produced = true;
+        sizeCanvas(canvas, frame.displayWidth, frame.displayHeight);
+        ctx?.drawImage(frame, 0, 0);
+        frame.close();
+      },
+      error: (error) => {
+        if (closed || created !== decoder) return;
+        recover(error);
+      },
+    });
+    try {
+      configure(created);
+    } catch (error) {
+      console.error("video decoder configure failed:", error);
+    }
+    return created;
+  };
+
+  // A decode error closes the WebCodecs decoder for good. Replace it and
+  // restart from the next keyframe instead of freezing on the last image.
+  const recover = (error: unknown) => {
+    console.error("video decode error:", error);
+    if (hardware && !produced) hardware = false;
+    const failed = decoder;
+    decoder = create();
+    if (failed.state !== "closed") {
+      try { failed.close(); } catch { /* already closing */ }
+    }
+    policy.waitForKeyframe();
+    requestKeyframe();
+  };
+
+  let decoder = create();
 
   return {
-    decode: (data, keyframe, timestampUs) => {
-      if (decoder.state === "closed") return;
+    push: (message) => {
+      if (closed) return;
+      const frame = parseFrame(message);
+      if (!frame) return;
+      sizeCanvas(canvas, frame.width, frame.height);
+      const queued = decoder.state === "configured" ? decoder.decodeQueueSize : 0;
+      const action = policy.next(frame, queued);
+      if (!action.decode) {
+        if (action.requestKeyframe) requestKeyframe();
+        return;
+      }
       try {
+        const sps = frame.keyframe ? codecFromSps(frame.data) : null;
+        const codecChanged = sps !== null && sps !== codec;
+        if (sps) codec = sps;
+        if (action.flush) decoder.reset();
+        if (action.flush || codecChanged || decoder.state !== "configured") configure(decoder);
         decoder.decode(
           new EncodedVideoChunk({
-            type: keyframe ? "key" : "delta",
-            timestamp: timestampUs,
-            data,
+            type: frame.keyframe ? "key" : "delta",
+            timestamp: frame.timestampUs,
+            data: frame.data,
           }),
         );
-      } catch (e) {
-        console.error("video decode() threw:", e);
+      } catch (error) {
+        recover(error);
       }
     },
     close: () => {
+      closed = true;
       if (decoder.state !== "closed") {
         try {
           decoder.close();

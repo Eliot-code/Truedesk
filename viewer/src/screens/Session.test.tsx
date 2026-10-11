@@ -2,13 +2,15 @@
 import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { onVideoFrame, onAudioFrame, onMonitorList, onFileOffer, onFileProgress, onFileDone, onFileError, onFileDrop, pickFile, startRecording, appendRecording, finishRecording, sendFile, respondFile, sendInput, selectMonitor, setAudioMuted, setClipboardSync, getConfig, decode } = vi.hoisted(() => ({
+const { startVideo, requestKeyframe, closeDecoder, onAudioFrame, onMonitorList, onFileOffer, onFileProgress, onFileDone, onFileError, onFileDrop, pickFile, startRecording, appendRecording, finishRecording, sendFile, respondFile, sendInput, selectMonitor, setAudioMuted, setClipboardSync, getConfig, decode } = vi.hoisted(() => ({
   onFileDrop: vi.fn(() => Promise.resolve(vi.fn())),
   pickFile: vi.fn(),
   startRecording: vi.fn(() => Promise.resolve(3)),
   appendRecording: vi.fn(() => Promise.resolve()),
   finishRecording: vi.fn(() => Promise.resolve("/Users/me/Downloads/session.webm")),
-  onVideoFrame: vi.fn(),
+  startVideo: vi.fn<(handler: (message: ArrayBuffer) => void) => () => void>(() => vi.fn()),
+  requestKeyframe: vi.fn(() => Promise.resolve()),
+  closeDecoder: vi.fn(),
   onAudioFrame: vi.fn(() => Promise.resolve(vi.fn())),
   onMonitorList: vi.fn(() => Promise.resolve(vi.fn())),
   onFileOffer: vi.fn(() => Promise.resolve(vi.fn())),
@@ -25,19 +27,21 @@ const { onVideoFrame, onAudioFrame, onMonitorList, onFileOffer, onFileProgress, 
   decode: vi.fn(),
 }));
 
-vi.mock("../lib/api", () => ({ onVideoFrame, onAudioFrame, onMonitorList, onFileOffer, onFileProgress, onFileDone, onFileError, onFileDrop, pickFile, startRecording, appendRecording, finishRecording, sendFile, respondFile, sendInput, selectMonitor, setAudioMuted, setClipboardSync, getConfig }));
+vi.mock("../lib/api", () => ({ startVideo, requestKeyframe, onAudioFrame, onMonitorList, onFileOffer, onFileProgress, onFileDone, onFileError, onFileDrop, pickFile, startRecording, appendRecording, finishRecording, sendFile, respondFile, sendInput, selectMonitor, setAudioMuted, setClipboardSync, getConfig }));
 vi.mock("../lib/decode", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/decode")>()),
-  makeDecoder: vi.fn(() => ({ decode, close: vi.fn() })),
+  makeDecoder: vi.fn(() => ({ push: decode, close: closeDecoder })),
 }));
 
 import Session from "./Session";
+import { makeDecoder } from "../lib/decode";
 import { NotifyContext } from "../lib/notify";
 
 describe("Session viewer transport", () => {
   afterEach(() => {
     cleanup();
-    onVideoFrame.mockReset();
+    startVideo.mockReset().mockImplementation(() => vi.fn());
+    closeDecoder.mockClear();
     onFileOffer.mockReset().mockReturnValue(Promise.resolve(vi.fn()));
     onFileProgress.mockReset().mockReturnValue(Promise.resolve(vi.fn()));
     onFileDone.mockReset().mockReturnValue(Promise.resolve(vi.fn()));
@@ -46,23 +50,34 @@ describe("Session viewer transport", () => {
     decode.mockClear();
   });
 
-  it("feeds video_frame payloads to the decoder", async () => {
-    let frameHandler!: (frame: { seq: number; timestamp_us: number; keyframe: boolean; width: number; height: number; data: string }) => void;
-    onVideoFrame.mockImplementation((handler) => {
-      frameHandler = handler;
-      return Promise.resolve(vi.fn());
-    });
-    const { container } = render(<Session remoteId="123" role="viewer" onDisconnect={vi.fn()} />);
+  it("streams binary video messages straight to the decoder", () => {
+    render(<Session remoteId="123" role="viewer" onDisconnect={vi.fn()} />);
 
-    await waitFor(() => expect(frameHandler).toBeTypeOf("function"));
-    frameHandler({ seq: 7, timestamp_us: 99, keyframe: true, width: 640, height: 480, data: btoa(String.fromCharCode(0, 1, 2)) });
+    expect(startVideo).toHaveBeenCalledOnce();
+    const message = new ArrayBuffer(20);
+    startVideo.mock.calls[0][0](message);
+    expect(decode).toHaveBeenCalledWith(message);
+  });
 
-    expect(decode).toHaveBeenCalledWith(new Uint8Array([0, 1, 2]), true, 99);
-    expect((container.querySelector("canvas") as HTMLCanvasElement).width).toBe(640);
+  it("asks the backend for keyframes on the decoder's behalf", () => {
+    render(<Session remoteId="123" role="viewer" onDisconnect={vi.fn()} />);
+    const calls = vi.mocked(makeDecoder).mock.calls;
+    const options = calls[calls.length - 1][1];
+    options.requestKeyframe();
+    expect(requestKeyframe).toHaveBeenCalledOnce();
+  });
+
+  it("stops the stream and closes the decoder on unmount", () => {
+    const stop = vi.fn();
+    startVideo.mockImplementation(() => stop);
+    const view = render(<Session remoteId="123" role="viewer" onDisconnect={vi.fn()} />);
+    view.unmount();
+    expect(stop).toHaveBeenCalledOnce();
+    expect(closeDecoder).toHaveBeenCalledOnce();
   });
 
   it("sends canvas keyboard input through the backend", async () => {
-    onVideoFrame.mockImplementation(() => Promise.resolve(vi.fn()));
+    startVideo.mockImplementation(() => vi.fn());
     const { container } = render(<Session remoteId="123" role="viewer" onDisconnect={vi.fn()} />);
     const canvas = container.querySelector("canvas") as HTMLCanvasElement;
 
@@ -74,7 +89,7 @@ describe("Session viewer transport", () => {
   });
 
   it("keeps the file panel hidden until Files is pressed", () => {
-    onVideoFrame.mockImplementation(() => Promise.resolve(vi.fn()));
+    startVideo.mockImplementation(() => vi.fn());
     const view = render(<Session remoteId="123" role="viewer" onDisconnect={vi.fn()} />);
     const panel = view.getByLabelText("File transfer");
     expect(panel.hidden).toBe(true);
@@ -83,7 +98,7 @@ describe("Session viewer transport", () => {
   });
 
   it("reports where a finished recording was saved", async () => {
-    onVideoFrame.mockImplementation(() => Promise.resolve(vi.fn()));
+    startVideo.mockImplementation(() => vi.fn());
     class FakeRecorder {
       state = "inactive";
       ondataavailable?: (event: { data: Blob }) => void;
@@ -102,7 +117,7 @@ describe("Session viewer transport", () => {
   });
 
   it("surfaces a recording that cannot start", async () => {
-    onVideoFrame.mockImplementation(() => Promise.resolve(vi.fn()));
+    startVideo.mockImplementation(() => vi.fn());
     vi.stubGlobal("MediaRecorder", class {});
     HTMLCanvasElement.prototype.captureStream = () => ({ getTracks: () => [] }) as unknown as MediaStream;
     startRecording.mockRejectedValueOnce("recording Downloads path must be a regular directory");

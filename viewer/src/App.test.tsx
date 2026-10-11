@@ -9,7 +9,7 @@ const { listeners, mocks } = vi.hoisted(() => {
   const mocks = {
     onStatusChanged: on("status_changed"), onIncomingRequest: on("incoming_request"), onSessionStarted: on("session_started"),
     onSessionEnded: on("session_ended"), onError: on("error"),
-    onVideoFrame: on("video_frame"), onAudioFrame: on("audio_frame"), onMonitorList: on("monitor_list"),
+    startVideo: () => () => {}, requestKeyframe: vi.fn(), onAudioFrame: on("audio_frame"), onMonitorList: on("monitor_list"),
     onFileOffer: on("file_offer"), onFileProgress: on("file_progress"), onFileDone: on("file_done"), onFileError: on("file_error"),
     onFileDrop: on("drop"), onPasswordRotated: on("password_rotated"),
     permissionStatus: vi.fn(), connect: vi.fn(), disconnect: vi.fn(),
@@ -19,7 +19,7 @@ const { listeners, mocks } = vi.hoisted(() => {
   return { listeners, mocks };
 });
 vi.mock("./lib/api", () => mocks);
-vi.mock("./lib/decode", () => ({ makeDecoder: () => ({ decode: vi.fn(), close: vi.fn() }) }));
+vi.mock("./lib/decode", () => ({ makeDecoder: () => ({ push: vi.fn(), close: vi.fn() }) }));
 
 import App from "./App";
 

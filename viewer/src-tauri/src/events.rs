@@ -63,20 +63,8 @@ pub(crate) struct TotpEnrollment {
 pub(crate) struct ErrorEvent {
     pub(crate) message: String,
 }
-#[derive(Serialize, Clone)]
-pub(crate) struct VideoFrame {
-    pub(crate) seq: u64,
-    pub(crate) timestamp_us: u32,
-    pub(crate) keyframe: bool,
-    pub(crate) width: u16,
-    pub(crate) height: u16,
-    // Base64 of the encoded frame bytes. Emitting raw bytes as a JSON array
-    // (`number[]`) over the Tauri IPC costs ~4x the size and heavy parse time
-    // at video framerate; base64 keeps the event JSON but shrinks the hot path.
-    pub(crate) data: String,
-}
-
-/// Base64-encode bytes for the IPC event payload (avoids JSON `number[]`).
+/// Base64-encode bytes for an IPC event payload (avoids JSON `number[]`).
+/// Video skips events entirely and streams raw bytes (see `VideoSink`).
 pub(crate) fn b64(bytes: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(bytes)
