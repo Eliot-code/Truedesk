@@ -14,11 +14,53 @@ use std::{
     fmt::{self, Display, Formatter},
     io,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{atomic::{AtomicU64, Ordering}, OnceLock},
+    time::Duration,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub const CHUNK_SIZE: usize = 64 * 1024;
+/// The receiver acknowledges progress every this many chunks (512 KiB).
+pub const ACK_EVERY_CHUNKS: u64 = 8;
+/// Most bytes a sender keeps un-acknowledged (2 MiB). Well under the reliable
+/// channel's pending Data budget (~3.75 MiB), so a slow receiver applies
+/// backpressure instead of overflowing the channel and dropping the session.
+pub const SEND_WINDOW_BYTES: u64 = 32 * CHUNK_SIZE as u64;
+
+/// How long a sender waits for its offer to be accepted or rejected (the
+/// receiver's user is answering a prompt) and for each acknowledgement.
+#[derive(Debug, Clone, Copy)]
+pub struct FlowTimeouts {
+    pub accept: Duration,
+    pub ack: Duration,
+}
+
+impl Default for FlowTimeouts {
+    fn default() -> Self {
+        Self { accept: Duration::from_secs(120), ack: Duration::from_secs(30) }
+    }
+}
+
+/// A fresh transfer id. Ids start at a random point so the two peers'
+/// independent counters practically never collide, and stay below 2^53 so
+/// they survive a round trip through JavaScript numbers.
+pub fn next_transfer_id() -> u64 {
+    static NEXT_ID: OnceLock<AtomicU64> = OnceLock::new();
+    NEXT_ID
+        .get_or_init(|| {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos());
+            let mut hasher = Sha256::new();
+            hasher.update(nanos.to_le_bytes());
+            hasher.update(std::process::id().to_le_bytes());
+            let digest = hasher.finalize();
+            let seed = u64::from_le_bytes(digest[..8].try_into().expect("8 bytes"));
+            // 2^48 starting points leave 2^53 - 2^48 ids before overflow.
+            AtomicU64::new((seed & ((1 << 48) - 1)) | 1)
+        })
+        .fetch_add(1, Ordering::Relaxed)
+}
 
 #[async_trait]
 pub trait FileSink {
@@ -43,6 +85,10 @@ pub enum FileError {
     Rejected,
     BadName,
     Protocol(String),
+    /// The peer did not answer in time; the transfer was cancelled.
+    TimedOut(String),
+    /// The peer reported an error and abandoned the transfer.
+    Peer(String),
 }
 
 impl Display for FileError {
@@ -53,6 +99,8 @@ impl Display for FileError {
             Self::Rejected => f.write_str("file transfer rejected"),
             Self::BadName => f.write_str("invalid file name"),
             Self::Protocol(message) => write!(f, "file transfer protocol error: {message}"),
+            Self::TimedOut(message) => write!(f, "file transfer cancelled: {message}"),
+            Self::Peer(message) => write!(f, "file transfer failed on the other side: {message}"),
         }
     }
 }
@@ -189,16 +237,39 @@ fn apply_quarantine(_path: &Path) -> io::Result<()> {
 pub struct FileSender;
 
 impl FileSender {
-    pub async fn send<S, P>(
+    /// Offer `path` to the peer and stream it once accepted.
+    ///
+    /// `replies` yields the receiver's answers (Accept, Reject, Ack, Error);
+    /// messages for other transfers are ignored. Only the offer is sent
+    /// before the receiver accepts, at most [`SEND_WINDOW_BYTES`] are ever
+    /// un-acknowledged, and this returns once the receiver confirms the
+    /// verified file.
+    pub async fn send<S, R, P>(
         path: P,
         sink: &mut S,
-        mut progress: impl FnMut(u64, u64),
+        replies: &mut R,
+        progress: impl FnMut(u64, u64),
     ) -> Result<(), FileError>
     where
         S: FileSink + Send,
+        R: FileSource + Send,
         P: AsRef<Path>,
     {
-        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        Self::send_with_timeouts(path, sink, replies, progress, FlowTimeouts::default()).await
+    }
+
+    pub async fn send_with_timeouts<S, R, P>(
+        path: P,
+        sink: &mut S,
+        replies: &mut R,
+        mut progress: impl FnMut(u64, u64),
+        timeouts: FlowTimeouts,
+    ) -> Result<(), FileError>
+    where
+        S: FileSink + Send,
+        R: FileSource + Send,
+        P: AsRef<Path>,
+    {
         let path = path.as_ref();
         let name = path
             .file_name()
@@ -221,7 +292,7 @@ impl FileSender {
                 .ok_or_else(|| FileError::Protocol("file is too large".into()))?;
         }
         let hash: [u8; 32] = hasher.finalize().into();
-        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let id = next_transfer_id();
         sink.send(FileMsg::Offer {
             id,
             name,
@@ -230,13 +301,26 @@ impl FileSender {
         })
         .await;
 
+        match tokio::time::timeout(timeouts.accept, next_reply(replies, id)).await {
+            Err(_) => return Err(cancel(sink, id, "the receiver did not accept the file in time").await),
+            Ok(Reply::Accepted) => {}
+            Ok(Reply::Acked(_)) => return Err(FileError::Protocol("acknowledgement before acceptance".into())),
+            Ok(Reply::Rejected) => return Err(FileError::Rejected),
+            Ok(Reply::Failed(message)) => return Err(FileError::Peer(message)),
+            Ok(Reply::Closed) => return Err(FileError::Protocol("session closed before the receiver answered".into())),
+        }
+
         let mut file = tokio::fs::File::open(path).await?;
         let mut offset = 0u64;
+        let mut acked = 0u64;
         progress(0, size);
         loop {
             let read = file.read(&mut buffer).await?;
             if read == 0 {
                 break;
+            }
+            while offset + read as u64 - acked > SEND_WINDOW_BYTES {
+                acked = acked.max(await_ack(sink, replies, id, timeouts.ack).await?);
             }
             sink.send(FileMsg::Chunk {
                 id,
@@ -248,23 +332,71 @@ impl FileSender {
             progress(offset, size);
         }
         sink.send(FileMsg::Done { id }).await;
+        // Intermediate acks stay below `size`; the full-size ack comes only
+        // after the receiver verified the hash and stored the file.
+        while await_ack(sink, replies, id, timeouts.ack).await? < size {}
         Ok(())
     }
+}
+
+enum Reply {
+    Accepted,
+    Acked(u64),
+    Rejected,
+    Failed(String),
+    Closed,
+}
+
+/// The receiver's next answer for transfer `id`; anything else is skipped.
+async fn next_reply<R: FileSource + Send>(replies: &mut R, id: u64) -> Reply {
+    loop {
+        match replies.recv().await {
+            None => return Reply::Closed,
+            Some(FileMsg::Accept { id: reply_id }) if reply_id == id => return Reply::Accepted,
+            Some(FileMsg::Ack { id: reply_id, offset }) if reply_id == id => return Reply::Acked(offset),
+            Some(FileMsg::Reject { id: reply_id, .. }) if reply_id == id => return Reply::Rejected,
+            Some(FileMsg::Error { id: reply_id, message }) if reply_id == id => return Reply::Failed(message),
+            Some(_) => continue,
+        }
+    }
+}
+
+async fn await_ack<S, R>(sink: &mut S, replies: &mut R, id: u64, ack_timeout: Duration) -> Result<u64, FileError>
+where
+    S: FileSink + Send,
+    R: FileSource + Send,
+{
+    match tokio::time::timeout(ack_timeout, next_reply(replies, id)).await {
+        Err(_) => Err(cancel(sink, id, "the receiver stopped acknowledging data").await),
+        Ok(Reply::Acked(offset)) => Ok(offset),
+        Ok(Reply::Accepted) => Err(FileError::Protocol("duplicate acceptance".into())),
+        Ok(Reply::Rejected) => Err(FileError::Rejected),
+        Ok(Reply::Failed(message)) => Err(FileError::Peer(message)),
+        Ok(Reply::Closed) => Err(FileError::Protocol("session closed mid-transfer".into())),
+    }
+}
+
+/// Tell the receiver the transfer is abandoned and build the local error.
+async fn cancel<S: FileSink + Send>(sink: &mut S, id: u64, reason: &str) -> FileError {
+    sink.send(FileMsg::Error { id, message: reason.to_owned() }).await;
+    FileError::TimedOut(reason.to_owned())
 }
 
 pub struct FileReceiver;
 
 impl FileReceiver {
-    pub async fn receive<S>(
+    pub async fn receive<S, K>(
         source: &mut S,
+        sink: &mut K,
         downloads_dir: &Path,
         consent: impl FnOnce(&FileMsg) -> ConsentDecision,
         progress: impl FnMut(u64, u64),
     ) -> Result<PathBuf, FileError>
     where
         S: FileSource + Send,
+        K: FileSink + Send,
     {
-        Self::receive_with_async_consent(source, downloads_dir, |offer| async move {
+        Self::receive_with_async_consent(source, sink, downloads_dir, |offer| async move {
             consent(&offer)
         }, progress)
         .await
@@ -274,14 +406,20 @@ impl FileReceiver {
     ///
     /// This is the integration seam for UI consent: the offer callback may
     /// await a command or channel response before any file is created.
-    pub async fn receive_with_async_consent<S, C, ConsentFuture>(
+    ///
+    /// `sink` carries the answers back to the sender: Accept or Reject, an
+    /// `Ack` every [`ACK_EVERY_CHUNKS`] chunks, and a final full-size `Ack`
+    /// once the file is verified and stored (or an `Error` if that failed).
+    pub async fn receive_with_async_consent<S, K, C, ConsentFuture>(
         source: &mut S,
+        sink: &mut K,
         downloads_dir: &Path,
         consent: C,
         mut progress: impl FnMut(u64, u64),
     ) -> Result<PathBuf, FileError>
     where
         S: FileSource + Send,
+        K: FileSink + Send,
         C: FnOnce(FileMsg) -> ConsentFuture,
         ConsentFuture: Future<Output = ConsentDecision>,
     {
@@ -289,23 +427,47 @@ impl FileReceiver {
             .recv()
             .await
             .ok_or_else(|| FileError::Protocol("source closed before offer".into()))?;
-        let (id, name, size, expected_hash) = match &offer {
-            FileMsg::Offer {
-                id,
-                name,
-                size,
-                hash,
-            } => (*id, sanitize_filename(name).ok_or(FileError::BadName)?, *size, *hash),
-            _ => return Err(FileError::Protocol("expected offer".into())),
+        let FileMsg::Offer { id, ref name, size, hash: expected_hash } = offer else {
+            return Err(FileError::Protocol("expected offer".into()));
+        };
+        let Some(name) = sanitize_filename(name) else {
+            sink.send(FileMsg::Reject { id, reason: "invalid file name".into() }).await;
+            return Err(FileError::BadName);
         };
         if consent(offer.clone()).await == ConsentDecision::Reject {
+            sink.send(FileMsg::Reject { id, reason: "declined".into() }).await;
             return Err(FileError::Rejected);
         }
+        sink.send(FileMsg::Accept { id }).await;
+        let result = Self::store(source, sink, downloads_dir, &name, id, size, expected_hash, &mut progress).await;
+        match &result {
+            Ok(_) => sink.send(FileMsg::Ack { id, offset: size }).await,
+            Err(error) => sink.send(FileMsg::Error { id, message: error.to_string() }).await,
+        }
+        result
+    }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn store<S, K>(
+        source: &mut S,
+        sink: &mut K,
+        downloads_dir: &Path,
+        name: &str,
+        id: u64,
+        size: u64,
+        expected_hash: [u8; 32],
+        mut progress: impl FnMut(u64, u64),
+    ) -> Result<PathBuf, FileError>
+    where
+        S: FileSource + Send,
+        K: FileSink + Send,
+    {
+        let name = name.to_owned();
         tokio::fs::create_dir_all(downloads_dir).await?;
         let (temp_path, temp_file) = create_temp_path(downloads_dir, &name).await?;
         let result = Self::receive_to_temp(
             source,
+            sink,
             temp_file,
             id,
             size,
@@ -347,8 +509,9 @@ impl FileReceiver {
         }
     }
 
-    async fn receive_to_temp<S>(
+    async fn receive_to_temp<S, K>(
         source: &mut S,
+        sink: &mut K,
         mut file: tokio::fs::File,
         id: u64,
         size: u64,
@@ -357,9 +520,11 @@ impl FileReceiver {
     ) -> Result<(), FileError>
     where
         S: FileSource + Send,
+        K: FileSink + Send,
     {
         let mut hasher = Sha256::new();
         let mut expected_offset = 0u64;
+        let mut chunks = 0u64;
         progress(0, size);
         loop {
             let message = source
@@ -385,6 +550,12 @@ impl FileReceiver {
                     hasher.update(&data);
                     expected_offset = new_offset;
                     progress(expected_offset, size);
+                    chunks += 1;
+                    // Intermediate acks stay below `size`: the full-size ack
+                    // is reserved for the verified, stored file.
+                    if chunks.is_multiple_of(ACK_EVERY_CHUNKS) && expected_offset < size {
+                        sink.send(FileMsg::Ack { id, offset: expected_offset }).await;
+                    }
                 }
                 FileMsg::Done { id: done_id } if done_id == id => {
                     if expected_offset != size {
@@ -397,8 +568,8 @@ impl FileReceiver {
                     }
                     return Ok(());
                 }
-                FileMsg::Error { id: error_id, .. } if error_id == id => {
-                    return Err(FileError::Protocol("sender reported an error".into()));
+                FileMsg::Error { id: error_id, message } if error_id == id => {
+                    return Err(FileError::Peer(message));
                 }
                 _ => return Err(FileError::Protocol("unexpected file message".into())),
             }
@@ -467,13 +638,27 @@ mod tests {
     use super::*;
     use std::{fs, time::{SystemTime, UNIX_EPOCH}};
     use tokio::sync::mpsc;
+    use tokio::time::timeout;
 
     struct Sink(mpsc::Sender<FileMsg>);
     struct Source(mpsc::Receiver<FileMsg>);
 
     #[async_trait]
     impl FileSink for Sink {
-        async fn send(&mut self, msg: FileMsg) { self.0.send(msg).await.expect("receiver exists"); }
+        // A gone peer just drops messages, like a closed session.
+        async fn send(&mut self, msg: FileMsg) { let _ = self.0.send(msg).await; }
+    }
+
+    /// Both directions of one session: (sender sink, sender replies,
+    /// receiver source, receiver sink).
+    fn link() -> (Sink, Source, Source, Sink) {
+        let (data_tx, data_rx) = mpsc::channel(256);
+        let (reply_tx, reply_rx) = mpsc::channel(256);
+        (Sink(data_tx), Source(reply_rx), Source(data_rx), Sink(reply_tx))
+    }
+
+    fn payload(len: usize) -> Vec<u8> {
+        (0..len).map(|n| (n % 251) as u8).collect()
     }
 
     #[async_trait]
@@ -595,13 +780,151 @@ mod tests {
     async fn round_trip_streams_and_verifies() {
         let dir = temp_dir("roundtrip");
         let source_path = dir.join("report.pdf");
-        let bytes = (0..(CHUNK_SIZE * 2 + 17)).map(|n| (n % 251) as u8).collect::<Vec<_>>();
+        let bytes = payload(CHUNK_SIZE * 2 + 17);
         fs::write(&source_path, &bytes).unwrap();
-        let (tx, rx) = mpsc::channel(4);
-        let sender = tokio::spawn(async move { FileSender::send(source_path, &mut Sink(tx), |_, _| {}).await });
-        let received = FileReceiver::receive(&mut Source(rx), &dir, |_| ConsentDecision::Accept, |_, _| {}).await.unwrap();
+        let (mut out, mut replies, mut incoming, mut answers) = link();
+        let sender = tokio::spawn(async move { FileSender::send(source_path, &mut out, &mut replies, |_, _| {}).await });
+        let received = FileReceiver::receive(&mut incoming, &mut answers, &dir, |_| ConsentDecision::Accept, |_, _| {}).await.unwrap();
         sender.await.unwrap().unwrap();
         assert_eq!(fs::read(received).unwrap(), bytes);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn file_larger_than_the_window_streams_with_acks() {
+        let dir = temp_dir("windowed");
+        let source_path = dir.join("big.bin");
+        let bytes = payload(3 * SEND_WINDOW_BYTES as usize + 1234);
+        fs::write(&source_path, &bytes).unwrap();
+        // Channels far smaller than the file: only acks let the sender go on.
+        let (data_tx, data_rx) = mpsc::channel(4);
+        let (reply_tx, reply_rx) = mpsc::channel(4);
+        let sender = tokio::spawn(async move {
+            FileSender::send(source_path, &mut Sink(data_tx), &mut Source(reply_rx), |_, _| {}).await
+        });
+        let received = FileReceiver::receive(&mut Source(data_rx), &mut Sink(reply_tx), &dir, |_| ConsentDecision::Accept, |_, _| {})
+            .await
+            .unwrap();
+        sender.await.unwrap().unwrap();
+        assert_eq!(fs::read(received).unwrap(), bytes);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn sender_waits_for_a_delayed_accept_before_streaming() {
+        let dir = temp_dir("delayed-accept");
+        let source_path = dir.join("later.bin");
+        let bytes = payload(CHUNK_SIZE * 3);
+        fs::write(&source_path, &bytes).unwrap();
+        let (data_tx, mut data_rx) = mpsc::channel(256);
+        let (reply_tx, reply_rx) = mpsc::channel(256);
+        let sender = tokio::spawn(async move {
+            FileSender::send(source_path, &mut Sink(data_tx), &mut Source(reply_rx), |_, _| {}).await
+        });
+        let offer = data_rx.recv().await.unwrap();
+        assert!(matches!(offer, FileMsg::Offer { .. }), "expected an offer, got {offer:?}");
+        // The user takes a while to answer: nothing but the offer may arrive.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(data_rx.try_recv().is_err(), "sender streamed before the offer was accepted");
+
+        let (forward_tx, forward_rx) = mpsc::channel(256);
+        forward_tx.send(offer).await.unwrap();
+        tokio::spawn(async move {
+            while let Some(message) = data_rx.recv().await {
+                if forward_tx.send(message).await.is_err() { break; }
+            }
+        });
+        let received = FileReceiver::receive(&mut Source(forward_rx), &mut Sink(reply_tx), &dir, |_| ConsentDecision::Accept, |_, _| {})
+            .await
+            .unwrap();
+        sender.await.unwrap().unwrap();
+        assert_eq!(fs::read(received).unwrap(), bytes);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejected_offer_stops_the_sender_cleanly() {
+        let dir = temp_dir("reject-sender");
+        let downloads = dir.join("downloads");
+        let source_path = dir.join("nope.bin");
+        fs::write(&source_path, payload(CHUNK_SIZE * 4)).unwrap();
+        let (mut out, mut replies, mut incoming, mut answers) = link();
+        let sender = tokio::spawn(async move { FileSender::send(source_path, &mut out, &mut replies, |_, _| {}).await });
+        let result = FileReceiver::receive(&mut incoming, &mut answers, &downloads, |_| ConsentDecision::Reject, |_, _| {}).await;
+        assert!(matches!(result, Err(FileError::Rejected)));
+        let sent = timeout(Duration::from_secs(2), sender).await.expect("sender must stop on Reject").unwrap();
+        assert!(matches!(sent, Err(FileError::Rejected)), "{sent:?}");
+        assert!(incoming.0.try_recv().is_err(), "no chunk may follow a rejected offer");
+        assert!(!downloads.exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn unanswered_offer_times_out_and_cancels() {
+        let dir = temp_dir("accept-timeout");
+        let source_path = dir.join("ignored.bin");
+        fs::write(&source_path, payload(100)).unwrap();
+        let (mut out, mut replies, mut incoming, _answers) = link();
+        let timeouts = FlowTimeouts { accept: Duration::from_millis(200), ack: Duration::from_secs(5) };
+        let result = FileSender::send_with_timeouts(&source_path, &mut out, &mut replies, |_, _| {}, timeouts).await;
+        assert!(matches!(result, Err(FileError::TimedOut(_))), "{result:?}");
+        assert!(result.unwrap_err().to_string().contains("did not accept"));
+        let Some(FileMsg::Offer { id, .. }) = incoming.recv().await else { panic!("expected the offer") };
+        assert!(matches!(incoming.recv().await, Some(FileMsg::Error { id: error_id, .. }) if error_id == id));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn sender_never_exceeds_the_window_without_acks() {
+        let dir = temp_dir("window");
+        let source_path = dir.join("big.bin");
+        fs::write(&source_path, payload(2 * SEND_WINDOW_BYTES as usize)).unwrap();
+        let (data_tx, mut data_rx) = mpsc::channel(1024);
+        let (reply_tx, reply_rx) = mpsc::channel(16);
+        let timeouts = FlowTimeouts { accept: Duration::from_secs(5), ack: Duration::from_millis(300) };
+        let sender = tokio::spawn(async move {
+            FileSender::send_with_timeouts(&source_path, &mut Sink(data_tx), &mut Source(reply_rx), |_, _| {}, timeouts).await
+        });
+        let Some(FileMsg::Offer { id, .. }) = data_rx.recv().await else { panic!("expected the offer") };
+        reply_tx.send(FileMsg::Accept { id }).await.unwrap();
+        let result = timeout(Duration::from_secs(5), sender).await.unwrap().unwrap();
+        assert!(matches!(result, Err(FileError::TimedOut(_))), "{result:?}");
+        let mut streamed = 0u64;
+        let mut cancelled = false;
+        while let Ok(message) = data_rx.try_recv() {
+            match message {
+                FileMsg::Chunk { data, .. } => streamed += data.len() as u64,
+                FileMsg::Error { .. } => cancelled = true,
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert_eq!(streamed, SEND_WINDOW_BYTES, "exactly one window may be un-acknowledged");
+        assert!(cancelled, "a stalled transfer is cancelled with an Error");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn two_sequential_files_share_one_session() {
+        let dir = temp_dir("sequential");
+        let first_path = dir.join("one.txt");
+        let second_path = dir.join("two.txt");
+        fs::write(&first_path, b"first file").unwrap();
+        fs::write(&second_path, payload(CHUNK_SIZE * 9 + 5)).unwrap();
+        let downloads = dir.join("downloads");
+        let (mut out, mut replies, mut incoming, mut answers) = link();
+        let receive_dir = downloads.clone();
+        let receiver = tokio::spawn(async move {
+            let mut received = Vec::new();
+            for _ in 0..2 {
+                received.push(FileReceiver::receive(&mut incoming, &mut answers, &receive_dir, |_| ConsentDecision::Accept, |_, _| {}).await.unwrap());
+            }
+            received
+        });
+        FileSender::send(&first_path, &mut out, &mut replies, |_, _| {}).await.unwrap();
+        FileSender::send(&second_path, &mut out, &mut replies, |_, _| {}).await.unwrap();
+        let received = timeout(Duration::from_secs(5), receiver).await.unwrap().unwrap();
+        assert_eq!(fs::read(&received[0]).unwrap(), fs::read(&first_path).unwrap());
+        assert_eq!(fs::read(&received[1]).unwrap(), fs::read(&second_path).unwrap());
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -609,12 +932,15 @@ mod tests {
     async fn wrong_hash_discards_temp_file() {
         let dir = temp_dir("tamper");
         let (tx, rx) = mpsc::channel(4);
+        let (reply_tx, mut reply_rx) = mpsc::channel(8);
         tx.send(FileMsg::Offer { id: 1, name: "x.bin".into(), size: 3, hash: [0; 32] }).await.unwrap();
         tx.send(FileMsg::Chunk { id: 1, offset: 0, data: vec![1, 2, 4] }).await.unwrap();
         tx.send(FileMsg::Done { id: 1 }).await.unwrap();
-        let result = FileReceiver::receive(&mut Source(rx), &dir, |_| ConsentDecision::Accept, |_, _| {}).await;
+        let result = FileReceiver::receive(&mut Source(rx), &mut Sink(reply_tx), &dir, |_| ConsentDecision::Accept, |_, _| {}).await;
         assert!(matches!(result, Err(FileError::HashMismatch)));
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+        assert_eq!(reply_rx.recv().await, Some(FileMsg::Accept { id: 1 }));
+        assert!(matches!(reply_rx.recv().await, Some(FileMsg::Error { id: 1, .. })), "the sender learns the file was bad");
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -622,10 +948,20 @@ mod tests {
     async fn rejected_transfer_writes_nothing() {
         let dir = temp_dir("reject");
         let (tx, rx) = mpsc::channel(1);
+        let (reply_tx, mut reply_rx) = mpsc::channel(1);
         tx.send(FileMsg::Offer { id: 1, name: "x.bin".into(), size: 3, hash: [0; 32] }).await.unwrap();
-        let result = FileReceiver::receive(&mut Source(rx), &dir, |_| ConsentDecision::Reject, |_, _| {}).await;
+        let result = FileReceiver::receive(&mut Source(rx), &mut Sink(reply_tx), &dir, |_| ConsentDecision::Reject, |_, _| {}).await;
         assert!(matches!(result, Err(FileError::Rejected)));
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+        assert!(matches!(reply_rx.recv().await, Some(FileMsg::Reject { id: 1, .. })));
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn transfer_ids_are_unique_and_javascript_safe() {
+        let first = next_transfer_id();
+        let second = next_transfer_id();
+        assert_ne!(first, second);
+        assert!(first < (1 << 53) && second < (1 << 53));
     }
 }

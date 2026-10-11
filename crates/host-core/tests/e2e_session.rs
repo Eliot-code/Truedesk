@@ -183,16 +183,28 @@ fn test_temp_dir(label: &str) -> PathBuf {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn live_file_transfer_is_sealed_and_relayed_end_to_end() {
+    run_live_file_transfer("filexfer", 200 * 1024, Duration::ZERO).await;
+}
+
+/// Larger than the reliable channel's Data buffer and accepted only after a
+/// delay: the sender must wait for Accept and then respect the ack window, or
+/// the receiver's Data queue overflows and the session drops.
+#[tokio::test(flavor = "multi_thread")]
+async fn large_file_with_delayed_accept_keeps_the_session_alive() {
+    run_live_file_transfer("filexfer-large", 12 * 1024 * 1024, Duration::from_millis(1500)).await;
+}
+
+async fn run_live_file_transfer(label: &str, size: usize, consent_delay: Duration) {
     let addr = relay::spawn_test_server().await;
-    let root = test_temp_dir("filexfer");
+    let root = test_temp_dir(label);
     let source_dir = root.join("source");
     let downloads_dir = root.join("downloads");
     tokio::fs::create_dir_all(&source_dir).await.expect("create source dir");
     let source_path = source_dir.join("known-payload.bin");
 
-    let mut expected = Vec::with_capacity(200 * 1024);
+    let mut expected = Vec::with_capacity(size);
     let mut state = 0x1234_5678u32;
-    for _ in 0..(200 * 1024) {
+    for _ in 0..size {
         state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         expected.push((state >> 24) as u8);
     }
@@ -234,18 +246,23 @@ async fn live_file_transfer_is_sealed_and_relayed_end_to_end() {
         .await
         .expect("timed out waiting for viewer Data handle")
         .expect("viewer session closed before Data handle");
-    let DataHandle { sender, sealer, .. } = host_handle;
-    let DataHandle { receiver, opener, .. } = viewer_handle;
+    let DataHandle { sender, sealer, receiver: host_receiver, opener: host_opener, .. } = host_handle;
+    let DataHandle { receiver, opener, sender: viewer_sender, sealer: viewer_sealer, .. } = viewer_handle;
 
     let mut sink = DataFileSink { sender, sealer };
+    let mut replies = DataFileSource { receiver: host_receiver, opener: host_opener };
     let mut source = DataFileSource { receiver, opener };
+    let mut answers = DataFileSink { sender: viewer_sender, sealer: viewer_sealer };
     let receive_dir = downloads_dir.clone();
     let receive = tokio::spawn(async move {
-        FileReceiver::receive(&mut source, &receive_dir, |_| ConsentDecision::Accept, |_, _| {})
+        FileReceiver::receive_with_async_consent(&mut source, &mut answers, &receive_dir, |_| async move {
+            tokio::time::sleep(consent_delay).await;
+            ConsentDecision::Accept
+        }, |_, _| {})
             .await
     });
-    let send = FileSender::send(&source_path, &mut sink, |_, _| {});
-    timeout(Duration::from_secs(15), async {
+    let send = FileSender::send(&source_path, &mut sink, &mut replies, |_, _| {});
+    timeout(Duration::from_secs(30), async {
         let (send_result, receive_result) = tokio::join!(send, receive);
         send_result.expect("FileSender failed");
         receive_result
@@ -269,6 +286,7 @@ async fn live_file_transfer_is_sealed_and_relayed_end_to_end() {
     let received_hash: [u8; 32] = Sha256::digest(&received).into();
     assert_eq!(received_hash, expected_hash, "received file SHA-256 differs");
     assert_eq!(received_path.file_name().and_then(|name| name.to_str()), Some("known-payload.bin"));
+    assert!(!host.is_finished() && !viewer.is_finished(), "the transfer must not end the session");
 
     viewer.abort();
     host.abort();
