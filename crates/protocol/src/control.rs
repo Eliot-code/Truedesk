@@ -24,6 +24,9 @@ pub enum Control {
     /// session carries no relay traffic otherwise) and lets each side notice
     /// a vanished peer when keepalives stop arriving.
     KeepAlive,
+    /// Viewer → host: the decoder lost its reference (a gap or decode error),
+    /// so the host should send a keyframe as soon as it can.
+    RequestKeyframe,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,6 +115,13 @@ mod tests {
     fn auth_code_roundtrips() {
         let c = Control::AuthCode { code: "123456".into() };
         assert_eq!(Control::from_bytes(&c.to_bytes()), Some(c));
+    }
+
+    #[test]
+    fn request_keyframe_roundtrips() {
+        let bytes = Control::RequestKeyframe.to_bytes();
+        assert_eq!(String::from_utf8(bytes.clone()).unwrap(), r#"{"t":"request_keyframe"}"#);
+        assert_eq!(Control::from_bytes(&bytes), Some(Control::RequestKeyframe));
     }
 
     #[test]
