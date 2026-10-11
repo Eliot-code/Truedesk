@@ -11,7 +11,7 @@ mod viewer;
 use config::ConfigStore;
 use contacts::{Contact, ContactStore};
 use futures_util::StreamExt;
-use host_core::{clipboard::{ArboardBackend, ClipboardSync}, filexfer::{ConsentDecision, FileReceiver, FileSink, FileSource, FileSender}, roles::DataHandle, transport::reliable::ReliableSender};
+use host_core::{clipboard::{ArboardBackend, ClipboardSync}, datachan::{FileRouter, IncomingTransfer}, filexfer::{ConsentDecision, FileReceiver, FileSink, FileSource, FileSender}, roles::DataHandle, transport::reliable::ReliableSender};
 use protocol::{control::{Control, MonitorInfo}, crypto::{Opener, Sealer}, datamsg::DataMsg, filexfer::FileMsg, frame, Tag};
 use serde::Serialize;
 use std::{collections::HashMap, fs, fs::OpenOptions, io, path::{Path, PathBuf}, sync::{atomic::{AtomicBool, Ordering}, mpsc as std_mpsc, Arc, Mutex}, time::{Duration, Instant}};
@@ -41,6 +41,8 @@ struct RuntimeState {
     file_sealer: Option<Arc<Mutex<Sealer>>>,
     control_sender: Option<ReliableSender>,
     control_sealer: Option<Arc<Mutex<Sealer>>>,
+    /// Routes the session's inbound file messages to their transfers.
+    file_router: Option<Arc<FileRouter>>,
     clipboard_enabled: Arc<AtomicBool>,
     audio_muted: Arc<AtomicBool>,
     clipboard_thread: Option<ClipboardThread>,
@@ -151,27 +153,24 @@ fn spawn_clipboard_thread(
     Some((command_tx, join))
 }
 
+/// Dispatch the session's inbound Data channel for the whole session. It
+/// never stops on an unexpected message: ending it would drop the reliable
+/// reader's Data queue and with it the session.
 fn dispatch_data(
     incoming: mpsc::Receiver<Vec<u8>>,
     opener: Arc<Mutex<Opener>>,
     clipboard_tx: Option<std_mpsc::Sender<ClipboardCommand>>,
-) -> mpsc::Receiver<FileMsg> {
-    let (file_tx, file_rx) = mpsc::channel(64);
-    tauri::async_runtime::spawn(async move {
-        let mut incoming = incoming;
-        while let Some(message) = incoming.recv().await {
-            let Some(plaintext) = lock_unpoisoned(&opener).open(&[Tag::Data as u8], &message) else { continue };
-            match DataMsg::from_bytes(&plaintext) {
-                Some(DataMsg::FileTransfer(message)) => { if file_tx.send(message).await.is_err() { break; } }
-                Some(DataMsg::Clipboard(message)) => {
-                    if let Some(sender) = &clipboard_tx { let _ = sender.send(ClipboardCommand::Apply(message.text)); }
-                }
-                None => {}
-            }
-        }
-        drop(clipboard_tx);
-    });
-    file_rx
+) -> (Arc<FileRouter>, mpsc::Receiver<IncomingTransfer>) {
+    let (router, offers) = FileRouter::new();
+    tauri::async_runtime::spawn(host_core::datachan::dispatch_data(
+        incoming,
+        move |sealed: &[u8]| lock_unpoisoned(&opener).open(&[Tag::Data as u8], sealed),
+        Arc::clone(&router),
+        move |message| {
+            if let Some(sender) = &clipboard_tx { let _ = sender.send(ClipboardCommand::Apply(message.text)); }
+        },
+    ));
+    (router, offers)
 }
 
 fn activate_data_channel(app: &AppHandle, handle: DataHandle, from: String) {
@@ -180,16 +179,17 @@ fn activate_data_channel(app: &AppHandle, handle: DataHandle, from: String) {
     let sealer = Arc::new(Mutex::new(sealer));
     let clipboard_thread = spawn_clipboard_thread(sender.clone(), sealer.clone(), enabled);
     let clipboard_tx = clipboard_thread.as_ref().map(|(tx, _)| tx.clone());
-    let file_receiver = dispatch_data(receiver, Arc::new(Mutex::new(opener)), clipboard_tx);
+    let (file_router, offers) = dispatch_data(receiver, Arc::new(Mutex::new(opener)), clipboard_tx);
     let state = app.state::<AppState>();
     let mut state = state.lock();
     state.file_outgoing = Some(sender);
     state.file_sealer = Some(sealer);
     state.control_sender = Some(control_sender);
     state.control_sealer = Some(control_sealer);
+    state.file_router = Some(file_router);
     state.clipboard_thread = clipboard_thread.map(|(command_tx, join)| ClipboardThread { command_tx, join });
     drop(state);
-    spawn_file_receiver(app.clone(), file_receiver, from);
+    spawn_file_receiver(app.clone(), offers, from);
 }
 
 fn clear_data_channel(app: &AppHandle) {
@@ -205,6 +205,7 @@ fn clear_data_channel(app: &AppHandle) {
         state.file_sealer = None;
         state.control_sender = None;
         state.control_sealer = None;
+        state.file_router = None;
         // Back to the user's saved preference for the next session.
         let saved = state.config.config.clipboard_sync;
         state.clipboard_enabled.store(saved, Ordering::Relaxed);
@@ -593,6 +594,7 @@ pub fn run() {
                 file_sealer: None,
                 control_sender: None,
                 control_sealer: None,
+                file_router: None,
                 clipboard_enabled: Arc::new(AtomicBool::new(clipboard_sync)),
                 audio_muted: Arc::new(AtomicBool::new(false)),
                 clipboard_thread: None,
@@ -872,6 +874,7 @@ mod tests {
             file_sealer: None,
             control_sender: None,
             control_sealer: None,
+            file_router: None,
             clipboard_enabled: Arc::new(AtomicBool::new(true)),
             audio_muted: Arc::new(AtomicBool::new(false)),
             clipboard_thread: None,
