@@ -5,7 +5,7 @@
 Pick the file for your system below. These builds are **not code-signed**, so
 your OS will warn the first time you open them:
 
-- **macOS** (`.dmg`): drag OpenDesk to Applications. If macOS says it's
+- **macOS** (`.dmg`, Apple silicon, macOS 12.3+): drag OpenDesk to Applications. If macOS says it's
   damaged or can't be verified, run
   `xattr -dr com.apple.quarantine /Applications/OpenDesk.app`, then open it.
   Grant **Screen Recording** and **Accessibility** when asked, then restart

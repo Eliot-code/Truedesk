@@ -78,7 +78,15 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: opendesk-${{ runner.os }}-unsigned
-          path: viewer/src-tauri/target/release/bundle/**
+          # Installers only; the bundle dir also holds staging trees
+          # (AppDir, .app, unpacked .deb) that aren't release assets.
+          path: |
+            viewer/src-tauri/target/release/bundle/dmg/*.dmg
+            viewer/src-tauri/target/release/bundle/appimage/*.AppImage
+            viewer/src-tauri/target/release/bundle/deb/*.deb
+            viewer/src-tauri/target/release/bundle/rpm/*.rpm
+            viewer/src-tauri/target/release/bundle/nsis/*-setup.exe
+            viewer/src-tauri/target/release/bundle/msi/*.msi
           if-no-files-found: error
           retention-days: 14
 
