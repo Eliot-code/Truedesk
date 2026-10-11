@@ -22,7 +22,8 @@ export interface SessionProps {
 
 export default function Session({ remoteId, role, onDisconnect }: SessionProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [clipboardSync, setClipboardSync] = useState(true);
+  // Off until the saved preference loads (clipboard sync defaults off).
+  const [clipboardSync, setClipboardSync] = useState(false);
   const [audioMuted, setAudioMuted] = useState(false);
   const audioRef = useRef<{ context: AudioContext; nextTime: number } | undefined>(undefined);
   const recorderRef = useRef<MediaRecorder | undefined>(undefined);
@@ -37,6 +38,12 @@ export default function Session({ remoteId, role, onDisconnect }: SessionProps) 
     setClipboardSync(enabled);
     void api.setClipboardSync(enabled).catch(() => setClipboardSync(!enabled));
   };
+
+  useEffect(() => {
+    let mounted = true;
+    void api.getConfig().then((config) => { if (mounted) setClipboardSync(config.clipboard_sync); }).catch(() => {});
+    return () => { mounted = false; };
+  }, []);
 
   useEffect(() => {
     if (role !== "viewer") return;

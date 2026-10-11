@@ -3,10 +3,10 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type Status = "offline" | "online" | "connecting" | "in_session";
 export interface Identity { id: string; password: string }
-export interface AppConfig { relay_url: string; relay_urls: string[]; recent_ids: string[] }
+export interface AppConfig { relay_url: string; relay_urls: string[]; recent_ids: string[]; clipboard_sync: boolean }
 export interface UnattendedStatus { enabled: boolean; has_password: boolean; twofa_enabled: boolean }
 export interface PermissionStatus { screen_recording: boolean; accessibility: boolean }
-export interface IncomingRequest { peer_id: string; fingerprint: string }
+export interface IncomingRequest { peer_id: string; fingerprint: string; known?: boolean }
 export interface SessionStarted { role: "host" | "viewer"; remote_id: string }
 export interface SessionEnded { reason: string }
 export interface ErrorEvent { message: string }
@@ -83,3 +83,4 @@ export const onFileOffer = (handler: (payload: FileOffer) => void) => on("file_o
 export const onFileProgress = (handler: (payload: FileProgress) => void) => on("file_progress", handler);
 export const onFileDone = (handler: (payload: FileDone) => void) => on("file_done", handler);
 export const onFileError = (handler: (payload: FileError) => void) => on("file_error", handler);
+export const onPasswordRotated = (handler: (payload: { password: string }) => void) => on("password_rotated", handler);

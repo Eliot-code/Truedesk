@@ -12,7 +12,7 @@ describe("Home", () => {
   afterEach(cleanup);
   beforeEach(() => {
     vi.mocked(api.getIdentity).mockResolvedValue({ id: "123456789", password: "654321" });
-    vi.mocked(api.getConfig).mockResolvedValue({ relay_url: "wss://relay", relay_urls: ["wss://relay"], recent_ids: [] });
+    vi.mocked(api.getConfig).mockResolvedValue({ relay_url: "wss://relay", relay_urls: ["wss://relay"], recent_ids: [], clipboard_sync: false });
     vi.mocked(api.getUnattendedStatus).mockResolvedValue({ enabled: false, has_password: false, twofa_enabled: false });
     vi.mocked(api.listContacts).mockResolvedValue([]);
     vi.mocked(api.listAllowed).mockResolvedValue([]);

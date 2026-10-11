@@ -2,7 +2,7 @@
 import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { onVideoFrame, onAudioFrame, onMonitorList, onFileOffer, onFileProgress, onFileDone, onFileError, sendFile, respondFile, sendInput, selectMonitor, setAudioMuted, setClipboardSync, decode } = vi.hoisted(() => ({
+const { onVideoFrame, onAudioFrame, onMonitorList, onFileOffer, onFileProgress, onFileDone, onFileError, sendFile, respondFile, sendInput, selectMonitor, setAudioMuted, setClipboardSync, getConfig, decode } = vi.hoisted(() => ({
   onVideoFrame: vi.fn(),
   onAudioFrame: vi.fn(() => Promise.resolve(vi.fn())),
   onMonitorList: vi.fn(() => Promise.resolve(vi.fn())),
@@ -16,10 +16,11 @@ const { onVideoFrame, onAudioFrame, onMonitorList, onFileOffer, onFileProgress, 
   selectMonitor: vi.fn(() => Promise.resolve()),
   setAudioMuted: vi.fn(() => Promise.resolve()),
   setClipboardSync: vi.fn(() => Promise.resolve()),
+  getConfig: vi.fn(() => Promise.resolve({ relay_url: "", relay_urls: [], recent_ids: [], clipboard_sync: false })),
   decode: vi.fn(),
 }));
 
-vi.mock("../lib/api", () => ({ onVideoFrame, onAudioFrame, onMonitorList, onFileOffer, onFileProgress, onFileDone, onFileError, sendFile, respondFile, sendInput, selectMonitor, setAudioMuted, setClipboardSync }));
+vi.mock("../lib/api", () => ({ onVideoFrame, onAudioFrame, onMonitorList, onFileOffer, onFileProgress, onFileDone, onFileError, sendFile, respondFile, sendInput, selectMonitor, setAudioMuted, setClipboardSync, getConfig }));
 vi.mock("../lib/decode", () => ({ makeDecoder: vi.fn(() => ({ decode, close: vi.fn() })) }));
 
 import Session from "./Session";
