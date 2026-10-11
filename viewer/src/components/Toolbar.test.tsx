@@ -1,10 +1,28 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import Toolbar from "./Toolbar";
+import Toolbar, { monitorName } from "./Toolbar";
+
+describe("monitorName", () => {
+  it("turns Windows device paths into Display N", () => {
+    expect(monitorName("\\\\.\\DISPLAY2", 1)).toBe("Display 2");
+  });
+
+  it("keeps readable names and falls back to the position", () => {
+    expect(monitorName("Built-in Retina Display", 0)).toBe("Built-in Retina Display");
+    expect(monitorName("  ", 2)).toBe("Display 3");
+  });
+});
 
 describe("Toolbar", () => {
   afterEach(cleanup);
+
+  it("shows a visible text label on each viewer control", () => {
+    render(<Toolbar remoteId="123456789" onDisconnect={vi.fn()} />);
+    for (const label of ["Fullscreen", "Clipboard", "Sound", "Files", "Record"]) {
+      expect(screen.getByText(label)).toBeTruthy();
+    }
+  });
 
   it("calls onDisconnect when Disconnect is clicked", () => {
     const onDisconnect = vi.fn();
