@@ -9,7 +9,11 @@ edition = "2021"
 async-trait = "0.1"
 protocol = { path = "../protocol" }
 tokio = { workspace = true }
-tokio-tungstenite = "0.30"
+# wss:// relays: rustls with the OS trust store. tokio-tungstenite pulls in
+# rustls with no crypto backend, so pick ring (builds everywhere with a C
+# compiler) and install it in relay_client::connect.
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 futures-util = "0.3"
 openh264 = "0.9"
 scap = "0.0.8"

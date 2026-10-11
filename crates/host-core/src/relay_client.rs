@@ -41,9 +41,19 @@ where
     Err("no relay reachable".into())
 }
 
-/// Open a WebSocket connection to a relay endpoint.
+/// Open a WebSocket connection to a relay endpoint (`ws://` or `wss://`).
 pub async fn connect(url: &str) -> Result<RelayWebSocket, tokio_tungstenite::tungstenite::Error> {
+    install_crypto_provider();
     Ok(connect_async(url).await?.0)
+}
+
+/// rustls needs a process-wide crypto provider before the first TLS handshake.
+/// Errors only mean one is already installed, which is fine.
+fn install_crypto_provider() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
 }
 
 /// Register this peer ID on an already connected relay WebSocket.
@@ -121,6 +131,23 @@ pub async fn connect_to(
 #[cfg(test)]
 mod tests {
     use super::select_first_reachable;
+
+    /// Regression: release builds once shipped without TLS, so every wss://
+    /// relay failed with "TLS support not compiled in". Against a listener
+    /// that closes immediately, a TLS-capable client fails in the handshake;
+    /// a client built without TLS fails earlier with a URL error.
+    #[tokio::test]
+    async fn wss_urls_are_supported() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await { drop(socket); }
+        });
+        let error = super::connect(&format!("wss://127.0.0.1:{port}/ws")).await.unwrap_err();
+        let message = error.to_string();
+        assert!(!message.contains("TLS support not compiled"), "{message}");
+        assert!(!matches!(error, tokio_tungstenite::tungstenite::Error::Url(_)), "{message}");
+    }
 
     #[tokio::test]
     async fn selection_returns_first_reachable_url_in_order() {
