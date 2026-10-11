@@ -278,11 +278,7 @@ pub(crate) fn connect(
                 },
             },
         );
-        emit(
-            &task_app,
-            "status_changed",
-            StatusEvent { state: "offline" },
-        );
+        emit(&task_app, "status_changed", StatusEvent { state: host_status() });
     }));
     let installed = {
         let mut runtime_state = state.lock();

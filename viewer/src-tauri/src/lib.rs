@@ -545,7 +545,7 @@ fn disconnect(state: tauri::State<'_, AppState>, app: AppHandle) {
             reason: "disconnected".into(),
         },
     );
-    emit(&app, "status_changed", StatusEvent { state: "offline" });
+    emit_host_status(&app, "offline");
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

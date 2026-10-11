@@ -116,10 +116,40 @@ pub(crate) struct FileError {
 /// what happened. Media and progress events are too frequent to log.
 pub(crate) const LOGGED_EVENTS: &[&str] = &["status_changed", "session_started", "session_ended", "incoming_request", "error", "file_error"];
 
+/// Last hosting presence sent to the UI. Viewer sessions share the status
+/// badge, so when one ends it restores this instead of guessing.
+static HOST_STATUS: std::sync::Mutex<&str> = std::sync::Mutex::new("offline");
+
+pub(crate) fn emit_host_status(app: &AppHandle, state: &'static str) {
+    remember_host_status(state);
+    emit(app, "status_changed", StatusEvent { state });
+}
+
+fn remember_host_status(state: &'static str) {
+    *HOST_STATUS.lock().unwrap_or_else(|error| error.into_inner()) = state;
+}
+
+pub(crate) fn host_status() -> &'static str {
+    *HOST_STATUS.lock().unwrap_or_else(|error| error.into_inner())
+}
+
 pub(crate) fn emit<T: Serialize + Clone>(app: &AppHandle, event: &str, payload: T) {
     if LOGGED_EVENTS.contains(&event) {
         let details = serde_json::to_string(&payload).unwrap_or_default();
         if event.ends_with("error") { log::warn!("{event} {details}"); } else { log::info!("{event} {details}"); }
     }
     let _ = app.emit(event, payload);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn viewer_sessions_restore_the_last_host_status() {
+        remember_host_status("online");
+        assert_eq!(host_status(), "online");
+        remember_host_status("offline");
+        assert_eq!(host_status(), "offline");
+    }
 }

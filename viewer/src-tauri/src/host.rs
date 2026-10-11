@@ -145,7 +145,7 @@ pub(crate) async fn register_host_until_paired(
             }
             Ok(mut ws) => {
                 if !online {
-                    emit(app, "status_changed", StatusEvent { state: "online" });
+                    emit_host_status(app, "online");
                     online = true;
                 }
                 let parked_at = Instant::now();
@@ -172,7 +172,7 @@ pub(crate) async fn register_host_until_paired(
         }
         if online || backoff.consecutive_failures() == 1 {
             emit(app, "error", ErrorEvent { message: format!("{failure}; retrying host registration") });
-            emit(app, "status_changed", StatusEvent { state: "connecting" });
+            emit_host_status(app, "connecting");
         }
         online = false;
     }
@@ -204,7 +204,7 @@ pub(crate) async fn run_paired_host_session(
     let approve = move || async move {
         authenticated_flag.store(true, Ordering::Relaxed);
         if unattended_enabled {
-            emit(&approve_app, "status_changed", StatusEvent { state: "in_session" });
+            emit_host_status(&approve_app, "in_session");
             emit(&approve_app, "session_started", SessionStarted { role: "host", remote_id: peer_id.clone() });
             return true;
         }
@@ -226,7 +226,7 @@ pub(crate) async fn run_paired_host_session(
         });
         let allowed = decision_rx.await.unwrap_or(false);
         if allowed {
-            emit(&approve_app, "status_changed", StatusEvent { state: "in_session" });
+            emit_host_status(&approve_app, "in_session");
             emit(&approve_app, "session_started", SessionStarted { role: "host", remote_id: peer_id.clone() });
         }
         allowed
@@ -300,7 +300,7 @@ impl Drop for HostThreadPanicGuard {
         clear_own_host_thread(&self.app, &self.token);
         emit(&self.app, "error", ErrorEvent { message: "hosting stopped unexpectedly; start hosting again".into() });
         emit(&self.app, "session_ended", SessionEnded { reason: "host session failed".into() });
-        emit(&self.app, "status_changed", StatusEvent { state: "offline" });
+        emit_host_status(&self.app, "offline");
     }
 }
 
@@ -374,7 +374,7 @@ pub(crate) fn spawn_host_thread(
             Err(error) => {
                 emit(&app, "error", ErrorEvent { message: error.to_string() });
                 emit(&app, "session_ended", SessionEnded { reason: "runtime initialization failed".into() });
-                emit(&app, "status_changed", StatusEvent { state: "offline" });
+                emit_host_status(&app, "offline");
                 clear_own_host_thread(&app, &token);
                 return;
             }
@@ -404,7 +404,7 @@ pub(crate) fn spawn_host_thread(
                 }
                 // Ended on its own (viewer left, network drop, rejection):
                 // go straight back to waiting rather than going offline.
-                emit(&app, "status_changed", StatusEvent { state: "connecting" });
+                emit_host_status(&app, "connecting");
                 let still_hosting = || owns_host_thread(&app, &token);
                 tokio::select! {
                     paired = register_host_until_paired(&app, &registration, still_hosting) => match paired {
@@ -415,7 +415,7 @@ pub(crate) fn spawn_host_thread(
                 }
             }
         });
-        emit(&app, "status_changed", StatusEvent { state: "offline" });
+        emit_host_status(&app, "offline");
         // Leave no stale handle preventing a later start_hosting call.
         clear_own_host_thread(&app, &token);
     })
@@ -434,7 +434,7 @@ pub(crate) fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -
         s.host_starting = Some(HostReservation { token: reservation_token.clone(), task: None });
         HostRegistration { id: s.config.ensure_identity(), token: s.config.ensure_registration_token() }
     };
-    emit(&app, "status_changed", StatusEvent { state: "connecting" });
+    emit_host_status(&app, "connecting");
     let task_token = reservation_token.clone();
     let task = tauri::async_runtime::spawn(async move {
         let still_reserved = || owns_current_host_reservation(&app, &task_token);
@@ -516,6 +516,6 @@ pub(crate) fn stop_hosting(state: tauri::State<'_, AppState>, app: AppHandle) {
         let _ = host_thread.stop_tx.send(());
         let _ = host_thread.join.join();
     } else {
-        emit(&app, "status_changed", StatusEvent { state: "offline" });
+        emit_host_status(&app, "offline");
     }
 }
