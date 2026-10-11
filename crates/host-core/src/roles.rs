@@ -3,7 +3,7 @@
 use crate::{
     audio,
     capture::{ScapCapturer, ScreenCapturer},
-    encode::{self, Encoder, VideoEncoder},
+    encode::{self, stream::{self, KeyframePolicy, STREAM_FPS}, Encoder, VideoEncoder},
     inject::{EnigoInjector, InputInjector, NoopInjector},
     transport::{self, RelayIceSignaling, RelayTransport, ReliableChannel, Transport, TransportReceiver, TransportSender},
 };
@@ -16,7 +16,7 @@ use protocol::{
     Tag,
 };
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, error::Error, fmt::Display, future::Future, sync::{atomic::{AtomicU32, Ordering}, Arc, Mutex, OnceLock}, time::Duration};
+use std::{collections::HashMap, error::Error, fmt::Display, future::Future, sync::{atomic::{AtomicU32, Ordering}, Arc, Mutex, OnceLock}, time::{Duration, Instant}};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::WebSocketStream;
@@ -306,9 +306,9 @@ pub async fn run_host_session<S, C, E, F, I>(
 ) -> SessionResult<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    C: ScreenCapturer + 'static,
+    C: ScreenCapturer + Send + 'static,
     E: Encoder + Send + 'static,
-    F: Fn(u16, u16) -> Result<E, encode::EncoderInitError>,
+    F: Fn(u16, u16) -> Result<E, encode::EncoderInitError> + Send + 'static,
     I: InputInjector + Send + 'static,
 {
     run_host_session_with_data(ws, password, ice_session, capturer, encoder_factory, injector, None).await
@@ -320,9 +320,9 @@ pub async fn run_host_session_with_data<S, C, E, F, I>(
 ) -> SessionResult<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    C: ScreenCapturer + 'static,
+    C: ScreenCapturer + Send + 'static,
     E: Encoder + Send + 'static,
-    F: Fn(u16, u16) -> Result<E, encode::EncoderInitError>,
+    F: Fn(u16, u16) -> Result<E, encode::EncoderInitError> + Send + 'static,
     I: InputInjector + Send + 'static,
 {
     run_host_session_with_data_and_accept(
@@ -342,9 +342,9 @@ pub async fn run_host_session_with_data_and_accept<S, C, E, F, I, A, Fut>(
 ) -> SessionResult<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    C: ScreenCapturer + 'static,
+    C: ScreenCapturer + Send + 'static,
     E: Encoder + Send + 'static,
-    F: Fn(u16, u16) -> Result<E, encode::EncoderInitError>,
+    F: Fn(u16, u16) -> Result<E, encode::EncoderInitError> + Send + 'static,
     I: InputInjector + Send + 'static,
     A: FnOnce() -> Fut,
     Fut: Future<Output = bool>,
@@ -364,9 +364,9 @@ pub async fn run_host_session_with_data_and_accept_and_2fa<S, C, E, F, I, A, Fut
 ) -> SessionResult<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    C: ScreenCapturer + 'static,
+    C: ScreenCapturer + Send + 'static,
     E: Encoder + Send + 'static,
-    F: Fn(u16, u16) -> Result<E, encode::EncoderInitError>,
+    F: Fn(u16, u16) -> Result<E, encode::EncoderInitError> + Send + 'static,
     I: InputInjector + Send + 'static,
     A: FnOnce() -> Fut,
     Fut: Future<Output = bool>,
@@ -387,9 +387,9 @@ async fn run_host_session_with_data_and_accept_and_2fa_with_factory<S, C, E, F, 
 )-> SessionResult<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    C: ScreenCapturer + 'static,
+    C: ScreenCapturer + Send + 'static,
     E: Encoder + Send + 'static,
-    F: Fn(u16, u16) -> Result<E, encode::EncoderInitError>,
+    F: Fn(u16, u16) -> Result<E, encode::EncoderInitError> + Send + 'static,
     IF: FnOnce() -> Box<dyn InputInjector> + Send + 'static,
     A: FnOnce() -> Fut,
     Fut: Future<Output = bool>,
@@ -452,10 +452,10 @@ where
         send_rejection(&sender, &control_sealer, code).await;
         return Err(Box::new(SessionError("session rejected")));
     }
-    let mut capturer = capture_factory().ok_or(SessionError(capture_unavailable_message()))?;
+    let capturer = capture_factory().ok_or(SessionError(capture_unavailable_message()))?;
     reliable.enable_application_traffic();
     let (send_key, recv_key) = derive_keys(&shared, true);
-    let mut sealer = Sealer::new(send_key);
+    let sealer = Sealer::new(send_key);
     let opener = Opener::new(recv_key);
     // The Data channel uses a SEPARATE key (distinct HKDF label) from media, so
     // the two streams' independent nonce counters never collide under a shared
@@ -491,44 +491,28 @@ where
             control_sealer: Arc::clone(&control_sealer),
         });
     }
-    let (mut transport_tx, transport_rx) = transport.into_split();
-    let mut audio_rx = audio::spawn_capture();
+    let (transport_tx, transport_rx) = transport.into_split();
+    let audio_rx = audio::spawn_capture();
 
-    let first_frame_deadline = tokio::time::Instant::now() + FIRST_FRAME_DEADLINE;
-    let first_frame = loop {
-        if let Some(frame) = capturer.next_frame() {
-            break frame;
-        }
-        if tokio::time::Instant::now() >= first_frame_deadline {
-            return Err(Box::new(SessionError("screen capture produced no frames")));
-        }
-        tokio::time::sleep(Duration::from_millis(1_000 / 15)).await;
-    };
-    let first_frame = even_frame(first_frame).ok_or(SessionError(
-        "screen capture returned an invalid or unusable frame",
-    ))?;
-    let (width, height) = (first_frame.width, first_frame.height);
+    // Capture and encode run on their own thread, so a slow encode never
+    // stalls control, keepalives, audio or input. It publishes the input
+    // mapping dimensions once the first frame is in.
+    let dims = Arc::new(AtomicU32::new(0));
+    let video = VideoSource::start(capturer, encoder_factory, Arc::clone(&dims)).await?;
     // Input injection makes blocking OS calls, so it runs on its own thread
     // and never stalls capture/encode/send or audio. The injector is built on
     // that thread because platform injectors (Enigo) can be thread-affine.
-    let dims = Arc::new(AtomicU32::new(pack_dims(width, height)));
     let inject_tx = spawn_injection_thread(injector_factory, Arc::clone(&dims))?;
     // Aborting the forwarder on exit drops the last injection sender, which
     // ends the injection thread together with the session.
     let mut input_forwarder = AbortOnDrop(tokio::spawn(forward_input(transport_rx, opener, inject_tx)));
-    let fps: u32 = 15;
-    let mut video = VideoPipeline::new(first_frame, encoder_factory, dims)?;
-    let mut next_frame = tokio::time::Instant::now();
+    let mut media = AbortOnDrop(tokio::spawn(send_media(transport_tx, sealer, audio_rx, Arc::clone(&video.units))));
     // The viewer keepalives on the relay socket even when media is direct, so
     // silence there means the viewer is gone (a direct transport may never
     // report a dead peer on its own).
     let mut peer_deadline = tokio::time::Instant::now() + timings.dead_peer;
     loop {
         tokio::select! {
-            Some(audio_frame) = audio_rx.recv() => {
-                let sealed = sealer.seal(&[Tag::Audio as u8], &audio_frame.to_bytes());
-                let _ = transport_tx.send(Tag::Audio, &sealed).await;
-            },
             _ = tokio::time::sleep_until(peer_deadline) => {
                 log::warn!("viewer sent no control traffic for {}s; ending the session", timings.dead_peer.as_secs());
                 return Ok(());
@@ -544,7 +528,8 @@ where
                     Some(Control::Bye { .. }) => return Ok(()),
                     // The new monitor's frames arrive later; the video
                     // pipeline adapts to their size.
-                    Some(Control::SelectMonitor { id }) => { capturer.select_monitor(id); }
+                    Some(Control::SelectMonitor { id }) => video.send(VideoCommand::SelectMonitor(id)),
+                    Some(Control::RequestKeyframe) => video.send(VideoCommand::RequestKeyframe),
                     _ => {}
                 }
             },
@@ -555,37 +540,82 @@ where
                     Err(_) => Err(Box::new(SessionError("input forwarding task failed"))),
                 };
             },
-            _ = tokio::time::sleep_until(next_frame) => {
-                next_frame += Duration::from_millis(1_000 / u64::from(fps));
-                let Some(plaintext) = video.next(capturer.next_frame())? else { continue };
+            ended = &mut media.0 => {
+                return match ended {
+                    Ok(result) => result,
+                    Err(_) => Err(Box::new(SessionError("media sending task failed"))),
+                };
+            },
+        }
+    }
+}
+
+/// Sends audio and encoded video to the viewer until the transport fails or
+/// the video pipeline stops. Audio goes first; a video frame is only taken
+/// from the encoder once the transport has room for it, so on a slow link
+/// the encoder skips captures rather than queueing stale frames.
+async fn send_media(
+    mut transport_tx: Box<dyn TransportSender>,
+    mut sealer: Sealer,
+    mut audio_rx: mpsc::Receiver<protocol::audio::AudioFrame>,
+    units: Arc<UnitSlot>,
+) -> SessionResult<()> {
+    let mut video_ready = false;
+    loop {
+        tokio::select! {
+            biased;
+            Some(audio_frame) = audio_rx.recv() => {
+                let sealed = sealer.seal(&[Tag::Audio as u8], &audio_frame.to_bytes());
+                let _ = transport_tx.send(Tag::Audio, &sealed).await;
+            },
+            () = transport_tx.ready_for_video(), if !video_ready => video_ready = true,
+            unit = units.take(), if video_ready => {
+                let plaintext = unit?;
+                video_ready = false;
                 let sealed = sealer.seal(&[Tag::Video as u8], &plaintext);
                 transport_tx.send(Tag::Video, &sealed).await?;
-            }
+            },
         }
     }
 }
 
 /// How long a new session waits for the first captured frame.
 const FIRST_FRAME_DEADLINE: Duration = Duration::from_secs(10);
-/// Interval between forced keyframes, so a viewer recovers from loss.
-const KEYFRAME_INTERVAL: Duration = Duration::from_secs(2);
+/// Longest the encode thread blocks before it re-checks commands and
+/// shutdown.
+const VIDEO_POLL: Duration = Duration::from_millis(20);
+
+/// Validates and even-crops a captured frame, then scales it to the stream
+/// size. Returns the (even) capture size, which maps input, and the frame
+/// to encode.
+fn stream_frame(frame: encode::RawFrame) -> Option<((u16, u16), encode::RawFrame)> {
+    let frame = even_frame(frame)?;
+    let capture = (frame.width, frame.height);
+    let (width, height) = stream::stream_dims(frame.width, frame.height);
+    if (width, height) == capture {
+        return Some((capture, frame));
+    }
+    let data = stream::downscale_bgra(&frame.data, frame.width, frame.height, width, height)?;
+    Some((capture, encode::RawFrame { width, height, data, format: frame.format, timestamp_us: frame.timestamp_us }))
+}
 
 /// Turns captured frames into sealed-ready video plaintext (header plus
-/// access unit), one per frame tick.
+/// access unit).
 ///
-/// Capture is non-blocking and only yields a frame when the screen changed,
-/// so the last frame is re-encoded on ticks without a new one; that keeps
-/// the keyframe cadence and lets the encoder refine a static picture. A
-/// frame of a new size (display mode or monitor change) replaces the encoder,
-/// which starts with a keyframe, and updates the dimensions used to map input.
+/// Frames larger than the stream size are scaled down. A frame of a new
+/// stream size (display mode or monitor change) replaces the encoder, which
+/// starts with a keyframe; the input mapping follows the capture size.
+/// Keyframes are forced periodically and on (rate-limited) viewer request.
 struct VideoPipeline<E, F> {
     encoder_factory: F,
     encoder: E,
+    /// The last frame, already at stream size; repeated on a static screen.
     frame: encode::RawFrame,
+    capture: (u16, u16),
     dims: Arc<AtomicU32>,
     seq: u64,
-    started: std::time::Instant,
-    last_keyframe: std::time::Instant,
+    started: Instant,
+    keyframes: KeyframePolicy,
 }
 
 impl<E, F> VideoPipeline<E, F>
@@ -593,31 +623,42 @@ where
     E: Encoder,
     F: Fn(u16, u16) -> Result<E, encode::EncoderInitError>,
 {
-    /// `frame` must already be even-sized (see [`even_frame`]).
     fn new(frame: encode::RawFrame, encoder_factory: F, dims: Arc<AtomicU32>) -> SessionResult<Self> {
+        let (capture, frame) = stream_frame(frame)
+            .ok_or(SessionError("screen capture returned an invalid or unusable frame"))?;
         let encoder = encoder_factory(frame.width, frame.height)?;
-        dims.store(pack_dims(frame.width, frame.height), Ordering::Release);
-        let now = std::time::Instant::now();
-        Ok(Self { encoder_factory, encoder, frame, dims, seq: 0, started: now, last_keyframe: now })
+        dims.store(pack_dims(capture.0, capture.1), Ordering::Release);
+        let now = Instant::now();
+        Ok(Self { encoder_factory, encoder, frame, capture, dims, seq: 0, started: now, keyframes: KeyframePolicy::new(now) })
     }
 
+    /// A viewer asked for a keyframe; returns whether it was accepted.
+    fn request_keyframe(&mut self) -> bool { self.keyframes.request(Instant::now()) }
+
+    fn keyframe_due(&self) -> bool { self.keyframes.due(Instant::now()) }
+
     /// Encodes `fresh` if it is a usable frame, else the previous frame.
-    /// Returns `None` when the encoder produced no output for this tick.
+    /// Returns `None` when the encoder produced no output.
     fn next(&mut self, fresh: Option<encode::RawFrame>) -> SessionResult<Option<Vec<u8>>> {
-        if let Some(frame) = fresh.and_then(even_frame) {
+        if let Some((capture, frame)) = fresh.and_then(stream_frame) {
             if (frame.width, frame.height) != (self.frame.width, self.frame.height) {
-                log::info!("capture size changed to {}x{}", frame.width, frame.height);
+                log::info!("stream size changed to {}x{} (capture {}x{})", frame.width, frame.height, capture.0, capture.1);
                 self.encoder = (self.encoder_factory)(frame.width, frame.height)?;
-                self.dims.store(pack_dims(frame.width, frame.height), Ordering::Release);
-                self.last_keyframe = std::time::Instant::now();
+            }
+            if capture != self.capture {
+                self.dims.store(pack_dims(capture.0, capture.1), Ordering::Release);
+                self.capture = capture;
             }
             self.frame = frame;
         }
-        if self.last_keyframe.elapsed() >= KEYFRAME_INTERVAL {
+        let now = Instant::now();
+        if self.keyframes.due(now) {
             self.encoder.force_intra_frame();
-            self.last_keyframe = std::time::Instant::now();
         }
         let Some(encoded) = self.encoder.encode(&self.frame) else { return Ok(None) };
+        if encoded.keyframe {
+            self.keyframes.keyframe_sent(now);
+        }
         // Stamped at encode time: repeated frames need their own timestamps.
         // The header field is 32-bit microseconds and wraps after ~71 minutes.
         let timestamp_us = self.started.elapsed().as_micros() as u32;
@@ -627,6 +668,209 @@ where
         plaintext.extend_from_slice(&encoded.data);
         self.seq += 1;
         Ok(Some(plaintext))
+    }
+}
+
+/// Requests from the session loop to the encode thread.
+enum VideoCommand {
+    SelectMonitor(u32),
+    RequestKeyframe,
+}
+
+/// Async-side handle of the capture/encode thread. Dropping it stops the
+/// thread (which then drops the capturer and encoder) within one poll.
+struct VideoSource {
+    commands: std::sync::mpsc::Sender<VideoCommand>,
+    units: Arc<UnitSlot>,
+}
+
+impl VideoSource {
+    /// Starts the encode thread and waits until the first frame was captured
+    /// and the encoder created (or either failed).
+    async fn start<C, E, F>(capturer: C, encoder_factory: F, dims: Arc<AtomicU32>) -> SessionResult<Self>
+    where
+        C: ScreenCapturer + Send + 'static,
+        E: Encoder + 'static,
+        F: Fn(u16, u16) -> Result<E, encode::EncoderInitError> + Send + 'static,
+    {
+        let (commands, command_rx) = std::sync::mpsc::channel();
+        let units = Arc::new(UnitSlot::default());
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let thread_units = Arc::clone(&units);
+        std::thread::Builder::new()
+            .name("opendesk-video-encode".into())
+            .spawn(move || {
+                let _close = CloseOnExit(&thread_units);
+                run_video_thread(capturer, encoder_factory, dims, &command_rx, &thread_units, ready_tx);
+            })?;
+        match ready_rx.await {
+            Ok(Ok(())) => Ok(Self { commands, units }),
+            Ok(Err(message)) => Err(message.into()),
+            Err(_) => Err(Box::new(SessionError("video encode thread stopped"))),
+        }
+    }
+
+    fn send(&self, command: VideoCommand) { let _ = self.commands.send(command); }
+}
+
+impl Drop for VideoSource {
+    fn drop(&mut self) { self.units.close(); }
+}
+
+/// Closes the slot when the encode thread ends, even by panic, so the
+/// media task notices.
+struct CloseOnExit<'a>(&'a UnitSlot);
+
+impl Drop for CloseOnExit<'_> {
+    fn drop(&mut self) { self.0.close(); }
+}
+
+/// Body of the encode thread: encode each new capture as soon as it arrives
+/// and the transport has taken the previous access unit; on a static screen
+/// repeat the last frame slowly.
+fn run_video_thread<C, E, F>(
+    mut capturer: C,
+    encoder_factory: F,
+    dims: Arc<AtomicU32>,
+    commands: &std::sync::mpsc::Receiver<VideoCommand>,
+    units: &UnitSlot,
+    ready: oneshot::Sender<Result<(), String>>,
+) where
+    C: ScreenCapturer,
+    E: Encoder,
+    F: Fn(u16, u16) -> Result<E, encode::EncoderInitError>,
+{
+    let deadline = Instant::now() + FIRST_FRAME_DEADLINE;
+    let first = loop {
+        if let Some(frame) = capturer.wait_frame(VIDEO_POLL) {
+            break frame;
+        }
+        if Instant::now() >= deadline {
+            let _ = ready.send(Err("screen capture produced no frames".into()));
+            return;
+        }
+        if ready.is_closed() {
+            return;
+        }
+    };
+    let mut video = match VideoPipeline::new(first, encoder_factory, dims) {
+        Ok(video) => video,
+        Err(error) => {
+            let _ = ready.send(Err(error.to_string()));
+            return;
+        }
+    };
+    if ready.send(Ok(())).is_err() {
+        return;
+    }
+    let mut last_encode: Option<Instant> = None;
+    loop {
+        loop {
+            match commands.try_recv() {
+                Ok(VideoCommand::SelectMonitor(id)) => { capturer.select_monitor(id); }
+                Ok(VideoCommand::RequestKeyframe) => {
+                    if !video.request_keyframe() { log::debug!("keyframe request ignored: one was just sent"); }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+            }
+        }
+        // Encode only once the previous access unit is on its way: while the
+        // link is busy the capturer keeps just the newest frame.
+        match units.wait_space(VIDEO_POLL) {
+            SlotSpace::Free => {}
+            SlotSpace::Full => continue,
+            SlotSpace::Closed => return,
+        }
+        let wait = stream::capture_wait(last_encode.map(|at| at.elapsed()), VIDEO_POLL);
+        let fresh = if wait.is_zero() { capturer.next_frame() } else { capturer.wait_frame(wait) };
+        if !stream::encode_due(fresh.is_some(), video.keyframe_due(), last_encode.map(|at| at.elapsed())) {
+            continue;
+        }
+        match video.next(fresh) {
+            Ok(Some(unit)) => units.put(unit),
+            Ok(None) => {}
+            Err(error) => {
+                units.fail(error.to_string());
+                return;
+            }
+        }
+        last_encode = Some(Instant::now());
+    }
+}
+
+/// One-unit handoff from the encode thread to the media task.
+#[derive(Default)]
+struct UnitSlot {
+    state: Mutex<SlotState>,
+    /// Wakes the encode thread when the unit is taken or the slot closes.
+    space: std::sync::Condvar,
+    /// Wakes the media task when a unit arrives or the slot closes.
+    filled: tokio::sync::Notify,
+}
+
+#[derive(Default)]
+struct SlotState {
+    unit: Option<Vec<u8>>,
+    closed: bool,
+    error: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SlotSpace {
+    Free,
+    Full,
+    Closed,
+}
+
+impl UnitSlot {
+    fn lock(&self) -> std::sync::MutexGuard<'_, SlotState> {
+        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Waits up to `timeout` for the slot to be empty.
+    fn wait_space(&self, timeout: Duration) -> SlotSpace {
+        let (state, _) = self
+            .space
+            .wait_timeout_while(self.lock(), timeout, |state| state.unit.is_some() && !state.closed)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.closed { SlotSpace::Closed } else if state.unit.is_some() { SlotSpace::Full } else { SlotSpace::Free }
+    }
+
+    fn put(&self, unit: Vec<u8>) {
+        self.lock().unit = Some(unit);
+        self.filled.notify_one();
+    }
+
+    /// Closes the slot with an error for the media task.
+    fn fail(&self, error: String) {
+        self.lock().error.get_or_insert(error);
+        self.close();
+    }
+
+    fn close(&self) {
+        self.lock().closed = true;
+        self.filled.notify_one();
+        self.space.notify_all();
+    }
+
+    /// The next unit; an error once the slot closed. Cancel safe.
+    async fn take(&self) -> SessionResult<Vec<u8>> {
+        loop {
+            let filled = self.filled.notified();
+            {
+                let mut state = self.lock();
+                if let Some(unit) = state.unit.take() {
+                    drop(state);
+                    self.space.notify_all();
+                    return Ok(unit);
+                }
+                if state.closed {
+                    return Err(state.error.clone().unwrap_or_else(|| "video pipeline stopped".into()).into());
+                }
+            }
+            filled.await;
+        }
     }
 }
 
@@ -1006,6 +1250,12 @@ fn default_injector() -> Box<dyn InputInjector> {
     }
 }
 
+/// The production encoder for a stream of `width` x `height`, at the stream
+/// frame rate with a bitrate scaled to the stream size.
+fn default_encoder(width: u16, height: u16) -> Result<VideoEncoder, encode::EncoderInitError> {
+    VideoEncoder::best_available(width, height, STREAM_FPS, stream::stream_bitrate(width, height, STREAM_FPS))
+}
+
 /// Run a host session with the production capture, H.264 encoder, and Enigo injector.
 pub async fn run_default_host_session<S>(
     ws: WebSocketStream<S>,
@@ -1017,7 +1267,7 @@ where
 {
     run_host_session_with_data_and_accept_and_2fa_with_factory(
         ws, password, ice_session, ScapCapturer::new,
-        |w, h| VideoEncoder::best_available(w, h, 15, 1_000_000),
+        default_encoder,
         default_injector, false, false, None, || async { true }, None, SessionTimings::default(),
     )
     .await
@@ -1071,7 +1321,7 @@ where
         password,
         ice_session,
         ScapCapturer::new,
-        |w, h| VideoEncoder::best_available(w, h, 15, 1_000_000),
+        default_encoder,
         default_injector,
         unattended_enabled,
         twofa_enabled,
@@ -1343,6 +1593,84 @@ mod tests {
         let mut video = VideoPipeline::new(frame, factory, dims).unwrap();
         capturer.set_size(32, 32);
         assert!(video.next(capturer.next_frame()).is_err());
+    }
+
+    #[test]
+    fn video_pipeline_scales_large_captures_but_maps_input_to_the_capture() {
+        use crate::capture::{FakeCapturer, ScreenCapturer};
+        let mut capturer = FakeCapturer::new(3840, 2160);
+        let dims = Arc::new(AtomicU32::new(0));
+        let mut video = VideoPipeline::new(
+            capturer.next_frame().unwrap(),
+            |w, h| encode::H264Encoder::new(w, h, STREAM_FPS, stream::stream_bitrate(w, h, STREAM_FPS)),
+            Arc::clone(&dims),
+        ).unwrap();
+        let first = video.next(None).unwrap().expect("encodes");
+        assert_eq!(video_header_fields(&first), (0, true, 1920, 1080));
+        assert_eq!(unpack_dims(dims.load(Ordering::Acquire)), (3840, 2160));
+
+        // A smaller capture is streamed as is.
+        capturer.set_size(1280, 720);
+        let small = video.next(capturer.next_frame()).unwrap().expect("encodes");
+        assert_eq!(video_header_fields(&small), (1, true, 1280, 720));
+        assert_eq!(unpack_dims(dims.load(Ordering::Acquire)), (1280, 720));
+    }
+
+    #[test]
+    fn video_pipeline_honours_keyframe_requests_with_a_rate_limit() {
+        use crate::capture::{FakeCapturer, ScreenCapturer};
+        let mut capturer = FakeCapturer::new(64, 48);
+        let mut video = VideoPipeline::new(
+            capturer.next_frame().unwrap(),
+            |w, h| encode::H264Encoder::new(w, h, STREAM_FPS, 1_000_000),
+            Arc::new(AtomicU32::new(0)),
+        ).unwrap();
+        assert!(video_header_fields(&video.next(None).unwrap().unwrap()).1);
+        // Too soon after the first keyframe: ignored.
+        assert!(!video.request_keyframe());
+        assert!(!video_header_fields(&video.next(None).unwrap().unwrap()).1);
+        std::thread::sleep(stream::MIN_REQUESTED_KEYFRAME_SPACING);
+        assert!(video.request_keyframe());
+        assert!(video.keyframe_due());
+        assert!(video_header_fields(&video.next(None).unwrap().unwrap()).1, "requested keyframe");
+        assert!(!video.keyframe_due());
+        assert!(!video_header_fields(&video.next(None).unwrap().unwrap()).1);
+    }
+
+    #[tokio::test]
+    async fn unit_slot_hands_over_one_unit_at_a_time() {
+        let slot = Arc::new(UnitSlot::default());
+        assert_eq!(slot.wait_space(Duration::ZERO), SlotSpace::Free);
+        slot.put(vec![1]);
+        assert_eq!(slot.wait_space(Duration::from_millis(5)), SlotSpace::Full);
+        assert_eq!(slot.take().await.unwrap(), vec![1]);
+        assert_eq!(slot.wait_space(Duration::ZERO), SlotSpace::Free);
+
+        // A waiting producer wakes as soon as the unit is taken.
+        slot.put(vec![2]);
+        let producer = {
+            let slot = Arc::clone(&slot);
+            std::thread::spawn(move || slot.wait_space(Duration::from_secs(5)))
+        };
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(slot.take().await.unwrap(), vec![2]);
+        assert_eq!(producer.join().unwrap(), SlotSpace::Free);
+
+        slot.fail("encoder broke".into());
+        assert_eq!(slot.wait_space(Duration::ZERO), SlotSpace::Closed);
+        assert_eq!(slot.take().await.unwrap_err().to_string(), "encoder broke");
+    }
+
+    #[tokio::test]
+    async fn unit_slot_take_waits_for_a_unit() {
+        let slot = Arc::new(UnitSlot::default());
+        let consumer = tokio::spawn({
+            let slot = Arc::clone(&slot);
+            async move { slot.take().await.unwrap() }
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        slot.put(vec![9]);
+        assert_eq!(timeout(Duration::from_secs(1), consumer).await.unwrap().unwrap(), vec![9]);
     }
 
     mod liveness {
