@@ -9,7 +9,7 @@ fn captured_frame_roundtrips_through_e2ee() {
     let mut sealer = Sealer::new(send);
     let mut opener = Opener::new(recv);
 
-    let mut encoder = H264Encoder::new(64, 64, 15, 1_000_000);
+    let mut encoder = H264Encoder::new(64, 64, 15, 1_000_000).expect("openh264");
     let raw = RawFrame {
         width: 64,
         height: 64,

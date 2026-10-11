@@ -52,6 +52,24 @@ pub trait Encoder {
     fn force_intra_frame(&mut self) {}
 }
 
+/// An H.264 encoder could not be created.
+#[derive(Debug)]
+pub struct EncoderInitError(String);
+
+impl EncoderInitError {
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self(reason.into())
+    }
+}
+
+impl std::fmt::Display for EncoderInitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "video encoder initialization failed: {}", self.0)
+    }
+}
+
+impl std::error::Error for EncoderInitError {}
+
 pub struct H264Encoder {
     encoder: OpenH264Encoder,
     first_frame: bool,
@@ -60,19 +78,19 @@ pub struct H264Encoder {
 }
 
 impl H264Encoder {
-    pub fn new(width: u16, height: u16, fps: u32, bitrate: u32) -> Self {
+    pub fn new(width: u16, height: u16, fps: u32, bitrate: u32) -> Result<Self, EncoderInitError> {
         let config = EncoderConfig::new()
             .bitrate(BitRate::from_bps(bitrate))
             .max_frame_rate(FrameRate::from_hz(fps as f32));
         let encoder = OpenH264Encoder::with_api_config(OpenH264API::from_source(), config)
-            .expect("openh264 encoder initialization failed");
+            .map_err(|error| EncoderInitError(format!("openh264: {error}")))?;
 
-        Self {
+        Ok(Self {
             encoder,
             first_frame: true,
             width,
             height,
-        }
+        })
     }
 
     pub fn force_intra_frame(&mut self) {
@@ -327,7 +345,12 @@ pub struct VideoEncoder {
 }
 
 impl VideoEncoder {
-    pub fn best_available(width: u16, height: u16, fps: u32, bitrate: u32) -> Self {
+    pub fn best_available(
+        width: u16,
+        height: u16,
+        fps: u32,
+        bitrate: u32,
+    ) -> Result<Self, EncoderInitError> {
         let force_software = std::env::var("OPENDESK_ENCODER")
             .is_ok_and(|value| value.eq_ignore_ascii_case("software"));
         let backend = if force_software {
@@ -336,9 +359,10 @@ impl VideoEncoder {
         } else {
             Self::hardware(width, height, fps, bitrate)
         };
-        let backend = backend.unwrap_or_else(|| {
-            Backend::OpenH264(Box::new(H264Encoder::new(width, height, fps, bitrate)))
-        });
+        let backend = match backend {
+            Some(backend) => backend,
+            None => Backend::OpenH264(Box::new(H264Encoder::new(width, height, fps, bitrate)?)),
+        };
         let encoder = Self {
             backend,
             width,
@@ -350,7 +374,7 @@ impl VideoEncoder {
             "video encoder: {} {width}x{height} @ {fps} fps, {bitrate} bps",
             encoder.backend()
         );
-        encoder
+        Ok(encoder)
     }
 
     #[cfg(target_os = "macos")]
@@ -396,7 +420,14 @@ impl VideoEncoder {
     /// with it. A fresh openh264 encoder always starts with a keyframe.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn switch_to_software(&mut self, frame: &RawFrame) -> Option<EncodedFrame> {
-        let mut software = H264Encoder::new(self.width, self.height, self.fps, self.bitrate);
+        let mut software =
+            match H264Encoder::new(self.width, self.height, self.fps, self.bitrate) {
+                Ok(software) => software,
+                Err(error) => {
+                    log::warn!("{error}; dropping the frame");
+                    return None;
+                }
+            };
         let encoded = software.encode(frame);
         self.backend = Backend::OpenH264(Box::new(software));
         encoded
@@ -467,7 +498,7 @@ pub(crate) mod tests {
 
     #[test]
     fn encoder_produces_keyframe_on_first_frame() {
-        let mut enc = H264Encoder::new(64, 64, 15, 1_000_000);
+        let mut enc = H264Encoder::new(64, 64, 15, 1_000_000).expect("openh264");
         let frame = RawFrame {
             width: 64,
             height: 64,
@@ -522,7 +553,7 @@ pub(crate) mod tests {
 
     #[test]
     fn openh264_output_is_annex_b_with_parameter_sets_on_keyframes() {
-        let mut enc = H264Encoder::new(64, 64, 15, 1_000_000);
+        let mut enc = H264Encoder::new(64, 64, 15, 1_000_000).expect("openh264");
         let key = enc.encode(&synthetic_frame(64, 64, 0)).expect("encodes");
         assert_eq!(key.data[..4], START_CODE);
         let types = nal_types(&key.data);
@@ -681,7 +712,7 @@ pub(crate) mod tests {
 
     #[test]
     fn best_available_encoder_starts_with_a_keyframe() {
-        let mut enc = VideoEncoder::best_available(128, 96, 15, 1_000_000);
+        let mut enc = VideoEncoder::best_available(128, 96, 15, 1_000_000).expect("encoder");
         let output = enc.encode(&synthetic_frame(128, 96, 0)).expect("encodes");
         assert!(
             output.keyframe,

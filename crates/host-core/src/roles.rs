@@ -256,7 +256,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     C: ScreenCapturer + 'static,
     E: Encoder + Send + 'static,
-    F: Fn(u16, u16) -> E,
+    F: Fn(u16, u16) -> Result<E, encode::EncoderInitError>,
     I: InputInjector + Send + 'static,
 {
     run_host_session_with_data(ws, password, ice_session, capturer, encoder_factory, injector, None).await
@@ -270,7 +270,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     C: ScreenCapturer + 'static,
     E: Encoder + Send + 'static,
-    F: Fn(u16, u16) -> E,
+    F: Fn(u16, u16) -> Result<E, encode::EncoderInitError>,
     I: InputInjector + Send + 'static,
 {
     run_host_session_with_data_and_accept(
@@ -292,7 +292,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     C: ScreenCapturer + 'static,
     E: Encoder + Send + 'static,
-    F: Fn(u16, u16) -> E,
+    F: Fn(u16, u16) -> Result<E, encode::EncoderInitError>,
     I: InputInjector + Send + 'static,
     A: FnOnce() -> Fut,
     Fut: Future<Output = bool>,
@@ -314,7 +314,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     C: ScreenCapturer + 'static,
     E: Encoder + Send + 'static,
-    F: Fn(u16, u16) -> E,
+    F: Fn(u16, u16) -> Result<E, encode::EncoderInitError>,
     I: InputInjector + Send + 'static,
     A: FnOnce() -> Fut,
     Fut: Future<Output = bool>,
@@ -337,7 +337,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     C: ScreenCapturer + 'static,
     E: Encoder + Send + 'static,
-    F: Fn(u16, u16) -> E,
+    F: Fn(u16, u16) -> Result<E, encode::EncoderInitError>,
     IF: FnOnce() -> Box<dyn InputInjector> + Send + 'static,
     A: FnOnce() -> Fut,
     Fut: Future<Output = bool>,
@@ -458,7 +458,7 @@ where
     // ends the injection thread together with the session.
     let mut input_forwarder = AbortOnDrop(tokio::spawn(forward_input(transport_rx, opener, inject_tx)));
     let fps: u32 = 15;
-    let mut encoder = encoder_factory(width, height);
+    let mut encoder = encoder_factory(width, height)?;
     let mut pending_first_frame = Some(first_frame);
     let mut seq = 0u64;
     let mut next_frame = tokio::time::Instant::now();
@@ -483,7 +483,7 @@ where
                             width = frame.width;
                             height = frame.height;
                             dims.store(pack_dims(width, height), Ordering::Release);
-                            encoder = encoder_factory(width, height);
+                            encoder = encoder_factory(width, height)?;
                             pending_first_frame = Some(frame);
                             seq = 0;
                         }
