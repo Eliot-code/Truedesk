@@ -154,7 +154,60 @@ pub struct DataHandle {
     pub sealer: Sealer,
     pub opener: Opener,
     pub control_sender: transport::reliable::ReliableSender,
-    pub control_sealer: Sealer,
+    /// The ONE control-direction sealer of this session. The session loop
+    /// shares it (keepalives) so every control frame uses one nonce sequence;
+    /// a second `Sealer` on the same key would reuse nonces.
+    pub control_sealer: SharedSealer,
+}
+
+/// A sealer shared between the session loop and the application.
+pub type SharedSealer = Arc<Mutex<Sealer>>;
+
+/// How often each peer sends a sealed `Control::KeepAlive` on the relay
+/// socket. Well below the relay's idle timeout (~60 s).
+pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+/// A peer that sent no control traffic (keepalives included) for this long is
+/// considered gone and the session ends. Three missed keepalives.
+pub const DEAD_PEER_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// Liveness timings of a session; tests shorten them.
+#[derive(Debug, Clone, Copy)]
+struct SessionTimings {
+    keepalive: Duration,
+    dead_peer: Duration,
+}
+
+impl Default for SessionTimings {
+    fn default() -> Self { Self { keepalive: KEEPALIVE_INTERVAL, dead_peer: DEAD_PEER_TIMEOUT } }
+}
+
+fn seal_control(sealer: &SharedSealer, control: &Control) -> Vec<u8> {
+    sealer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).seal(&[Tag::Control as u8], &control.to_bytes())
+}
+
+/// Send a sealed `Control::KeepAlive` every `interval` until the writer
+/// closes or the returned guard is dropped.
+fn spawn_keepalive(sender: transport::reliable::ReliableSender, sealer: SharedSealer, interval: Duration) -> AbortOnDrop<()> {
+    AbortOnDrop(tokio::spawn(async move {
+        let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticks.tick().await;
+            let sealed = seal_control(&sealer, &Control::KeepAlive);
+            if sender.send_frame(Tag::Control, &sealed).await.is_err() { break; }
+        }
+    }))
+}
+
+/// Best-effort sealed `Control::Bye` ending the session for the peer, bounded
+/// (~200 ms) like [`send_rejection`] so a stalled writer cannot hold up the
+/// caller. The short sleep lets the writer flush before it is torn down.
+pub async fn send_bye(sender: &transport::reliable::ReliableSender, sealer: &SharedSealer) {
+    let sealed = seal_control(sealer, &Control::Bye { session: String::new() });
+    let sent = tokio::time::timeout(Duration::from_millis(150), sender.send_frame(Tag::Control, &sealed)).await;
+    if matches!(sent, Ok(Ok(()))) {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -184,9 +237,8 @@ async fn recv_control(rx: &mut mpsc::Receiver<Vec<u8>>) -> Option<Vec<u8>> { rx.
 /// rejected it after the key exchange. Bounded (~200ms total) so a stalled
 /// writer can never hold up the host; the short sleep lets the WebSocket
 /// writer flush before the session (and its writer task) is dropped.
-async fn send_rejection(sender: &transport::reliable::ReliableSender, sealer: &mut Sealer, code: &str) {
-    let body = Control::Error { code: code.to_owned() }.to_bytes();
-    let sealed = sealer.seal(&[Tag::Control as u8], &body);
+async fn send_rejection(sender: &transport::reliable::ReliableSender, sealer: &SharedSealer, code: &str) {
+    let sealed = seal_control(sealer, &Control::Error { code: code.to_owned() });
     let sent = tokio::time::timeout(Duration::from_millis(150), sender.send_frame(Tag::Control, &sealed)).await;
     if matches!(sent, Ok(Ok(()))) {
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -322,7 +374,7 @@ where
     run_host_session_with_data_and_accept_and_2fa_with_factory(
         ws, password, ice_session, || Some(capturer), encoder_factory,
         move || Box::new(injector) as Box<dyn InputInjector>,
-        unattended_enabled, twofa_enabled, totp_secret, approve, data_ready,
+        unattended_enabled, twofa_enabled, totp_secret, approve, data_ready, SessionTimings::default(),
     ).await
 }
 
@@ -331,7 +383,7 @@ async fn run_host_session_with_data_and_accept_and_2fa_with_factory<S, C, E, F, 
     ws: WebSocketStream<S>, password: &str, ice_session: &str, capture_factory: CF,
     encoder_factory: F, injector_factory: IF, unattended_enabled: bool,
     twofa_enabled: bool, totp_secret: Option<&str>, approve: A,
-    data_ready: Option<oneshot::Sender<DataHandle>>,
+    data_ready: Option<oneshot::Sender<DataHandle>>, timings: SessionTimings,
 )-> SessionResult<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -370,8 +422,12 @@ where
         }
     }
     let (control_send_key, control_recv_key) = protocol::kex::derive_control_keys(&shared, true);
-    let mut control_sealer = Sealer::new(control_send_key);
+    let control_sealer: SharedSealer = Arc::new(Mutex::new(Sealer::new(control_send_key)));
     let mut control_opener = Opener::new(control_recv_key);
+    // Keepalives start as soon as the peer is authenticated, so neither the
+    // relay nor the viewer's dead-peer timer drops a session that is waiting
+    // on the host user's approval.
+    let _keepalive = spawn_keepalive(sender.clone(), Arc::clone(&control_sealer), timings.keepalive);
     let mut code_received = false;
     let code_valid = if unattended_enabled && twofa_enabled {
         let body = tokio::time::timeout(Duration::from_secs(30), recv_control(&mut control_rx)).await.ok().flatten();
@@ -393,7 +449,7 @@ where
     if let Some(code) = rejection {
         // Tell the viewer explicitly why, so it stops retrying instead of
         // reading the close as a transient drop.
-        send_rejection(&sender, &mut control_sealer, code).await;
+        send_rejection(&sender, &control_sealer, code).await;
         return Err(Box::new(SessionError("session rejected")));
     }
     let mut capturer = capture_factory().ok_or(SessionError(capture_unavailable_message()))?;
@@ -419,12 +475,12 @@ where
         Duration::from_secs(3),
     )
     .await;
-    // Send the monitor list first, then hand the SAME control sealer to the
+    // Send the monitor list first, then share the SAME control sealer with the
     // data channel. Host->viewer control frames must share one sealer (one
     // nonce sequence) on this key: a second Sealer::new on control_send_key
     // would restart the counter at 0 and reuse a nonce with MonitorList.
     let monitor_list = Control::MonitorList { monitors: capturer.monitors() };
-    reliable.sender().send_frame(Tag::Control, &control_sealer.seal(&[Tag::Control as u8], &monitor_list.to_bytes())).await?;
+    reliable.sender().send_frame(Tag::Control, &seal_control(&control_sealer, &monitor_list)).await?;
     if let Some(ready) = data_ready {
         let _ = ready.send(DataHandle {
             sender: reliable.sender(),
@@ -432,7 +488,7 @@ where
             sealer: data_sealer,
             opener: data_opener,
             control_sender: reliable.sender(),
-            control_sealer,
+            control_sealer: Arc::clone(&control_sealer),
         });
     }
     let (mut transport_tx, transport_rx) = transport.into_split();
@@ -463,16 +519,25 @@ where
     let fps: u32 = 15;
     let mut video = VideoPipeline::new(first_frame, encoder_factory, dims)?;
     let mut next_frame = tokio::time::Instant::now();
+    // The viewer keepalives on the relay socket even when media is direct, so
+    // silence there means the viewer is gone (a direct transport may never
+    // report a dead peer on its own).
+    let mut peer_deadline = tokio::time::Instant::now() + timings.dead_peer;
     loop {
         tokio::select! {
             Some(audio_frame) = audio_rx.recv() => {
                 let sealed = sealer.seal(&[Tag::Audio as u8], &audio_frame.to_bytes());
                 let _ = transport_tx.send(Tag::Audio, &sealed).await;
             },
+            _ = tokio::time::sleep_until(peer_deadline) => {
+                log::warn!("viewer sent no control traffic for {}s; ending the session", timings.dead_peer.as_secs());
+                return Ok(());
+            },
             body = session_control_rx.recv() => {
                 // The reliable (WebSocket) channel closed: the peer is gone.
                 let Some(body) = body else { return Ok(()) };
                 let Some(plaintext) = control_opener.open(&[Tag::Control as u8], &body) else { continue };
+                peer_deadline = tokio::time::Instant::now() + timings.dead_peer;
                 match Control::from_bytes(&plaintext) {
                     // Authenticated by the per-session control key, so the
                     // session field is informational only.
@@ -715,7 +780,7 @@ pub async fn run_viewer_session_with_monitors_and_auth_code<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let result = run_viewer_session_inner(ws, password, ice_session, frame_sink, input_rx, data_ready, monitor_sink, audio_sink, auth_code).await;
+    let result = run_viewer_session_inner(ws, password, ice_session, frame_sink, input_rx, data_ready, monitor_sink, audio_sink, auth_code, SessionTimings::default()).await;
     result.map_err(viewer_session_error)
 }
 
@@ -728,6 +793,7 @@ async fn run_viewer_session_inner<S>(
     monitor_sink: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
     audio_sink: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
     auth_code: Option<String>,
+    timings: SessionTimings,
 ) -> Result<(), String>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -770,12 +836,15 @@ where
     let data_sealer = Sealer::new(data_send_key);
     let data_opener = Opener::new(data_recv_key);
     let (control_send_key, control_recv_key) = protocol::kex::derive_control_keys(&shared, false);
-    let mut control_sealer = Sealer::new(control_send_key);
+    let control_sealer: SharedSealer = Arc::new(Mutex::new(Sealer::new(control_send_key)));
     let mut control_opener = Opener::new(control_recv_key);
     // Always send one (empty = no code) so a 2FA host can answer at once
     // instead of waiting for its timeout; other hosts ignore it.
-    let body = Control::AuthCode { code: auth_code.unwrap_or_default() }.to_bytes();
-    sender.send_frame(Tag::Control, &control_sealer.seal(&[Tag::Control as u8], &body)).await.map_err(|error| error.to_string())?;
+    let auth = Control::AuthCode { code: auth_code.unwrap_or_default() };
+    sender.send_frame(Tag::Control, &seal_control(&control_sealer, &auth)).await.map_err(|error| error.to_string())?;
+    // Started after AuthCode so a 2FA host reads the code as the first
+    // control frame.
+    let _keepalive = spawn_keepalive(sender.clone(), Arc::clone(&control_sealer), timings.keepalive);
     let (ice_rx, mut session_control_rx) = split_session_control(control_rx, ice_session.to_owned());
     // Open session control frames in one place (one opener, in order) and
     // split an explicit host rejection (`Control::Error`) out of the stream so
@@ -814,12 +883,12 @@ where
             sealer: data_sealer,
             opener: data_opener,
             control_sender: reliable.sender(),
-            control_sealer,
+            control_sealer: Arc::clone(&control_sealer),
         });
     }
     let (transport_tx, transport_rx) = transport.into_split();
 
-    run_viewer_media_loop_with_control(transport_tx, transport_rx, frame_sink, input_rx, sealer, opener, control_plain_rx, rejected_rx, monitor_sink, audio_sink).await
+    run_viewer_media_loop_with_control(transport_tx, transport_rx, frame_sink, input_rx, sealer, opener, control_plain_rx, rejected_rx, monitor_sink, audio_sink, timings.dead_peer).await
 }
 
 #[allow(dead_code)]
@@ -833,7 +902,7 @@ async fn run_viewer_media_loop(
 ) -> Result<(), String> {
     let (_tx, rx) = mpsc::channel(1);
     let (_rejected_tx, rejected_rx) = mpsc::channel(1);
-    run_viewer_media_loop_with_control(transport_tx, transport_rx, frame_sink, input_rx, sealer, opener, rx, rejected_rx, None, None).await
+    run_viewer_media_loop_with_control(transport_tx, transport_rx, frame_sink, input_rx, sealer, opener, rx, rejected_rx, None, None, DEAD_PEER_TIMEOUT).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -848,15 +917,34 @@ async fn run_viewer_media_loop_with_control(
     mut rejected_rx: tokio::sync::mpsc::Receiver<String>,
     monitor_sink: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
     audio_sink: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    dead_peer: Duration,
 ) -> Result<(), String> {
+    // The host keepalives on the relay socket even when media is direct, so
+    // silence there means the host is gone: a direct transport never reports
+    // a dead peer on its own.
+    let mut peer_deadline = tokio::time::Instant::now() + dead_peer;
     loop {
         tokio::select! {
             biased;
             Some(code) = rejected_rx.recv() => return Err(rejection_error(&code)),
-            Some(plaintext) = control_rx.recv() => {
-                if let Some(Control::MonitorList { .. }) = Control::from_bytes(&plaintext) {
-                    if let Some(sink) = &monitor_sink { let _ = sink.send(plaintext).await; }
+            plaintext = control_rx.recv() => {
+                let Some(plaintext) = plaintext else {
+                    // The relay socket closed: the host is gone (or rejected
+                    // us, which the demux reports just before closing).
+                    if let Ok(code) = rejected_rx.try_recv() { return Err(rejection_error(&code)); }
+                    return Err("connection closed: the host's control channel closed".into());
+                };
+                peer_deadline = tokio::time::Instant::now() + dead_peer;
+                match Control::from_bytes(&plaintext) {
+                    Some(Control::Bye { .. }) => return Err(crate::reconnect::HOST_ENDED_MESSAGE.into()),
+                    Some(Control::MonitorList { .. }) => {
+                        if let Some(sink) = &monitor_sink { let _ = sink.send(plaintext).await; }
+                    }
+                    _ => {}
                 }
+            },
+            _ = tokio::time::sleep_until(peer_deadline) => {
+                return Err(format!("connection closed: host stopped responding for {}s", dead_peer.as_secs()));
             },
             received = transport_rx.recv() => {
                 let Some((tag, sealed)) = received else {
@@ -930,7 +1018,7 @@ where
     run_host_session_with_data_and_accept_and_2fa_with_factory(
         ws, password, ice_session, ScapCapturer::new,
         |w, h| VideoEncoder::best_available(w, h, 15, 1_000_000),
-        default_injector, false, false, None, || async { true }, None,
+        default_injector, false, false, None, || async { true }, None, SessionTimings::default(),
     )
     .await
 }
@@ -990,6 +1078,7 @@ where
         totp_secret,
         approve,
         Some(data_ready),
+        SessionTimings::default(),
     )
     .await
 }
@@ -1254,5 +1343,227 @@ mod tests {
         let mut video = VideoPipeline::new(frame, factory, dims).unwrap();
         capturer.set_size(32, 32);
         assert!(video.next(capturer.next_frame()).is_err());
+    }
+
+    mod liveness {
+        use super::*;
+        use crate::{capture::FakeCapturer, encode::H264Encoder, inject::NoopInjector};
+        use futures_util::{SinkExt, StreamExt};
+        use std::sync::atomic::AtomicBool;
+        use tokio::io::DuplexStream;
+        use tokio::task::JoinHandle;
+        use tokio_tungstenite::tungstenite::{protocol::Role, Message};
+
+        const PASSWORD: &str = "liveness-pw";
+        const SESSION: &str = "liveness";
+
+        /// In-process stand-in for the relay: forwards Binary messages between
+        /// the peers and, like the relay, drops both sockets once either side
+        /// has sent nothing for `idle`.
+        struct TestRelay {
+            idle_fired: Arc<AtomicBool>,
+            blackhole: Arc<AtomicBool>,
+            task: JoinHandle<()>,
+        }
+
+        impl TestRelay {
+            async fn start(idle: Duration) -> (Self, WebSocketStream<DuplexStream>, WebSocketStream<DuplexStream>) {
+                let (host_end, host_relay) = tokio::io::duplex(8 * 1024 * 1024);
+                let (viewer_end, viewer_relay) = tokio::io::duplex(8 * 1024 * 1024);
+                let host_ws = WebSocketStream::from_raw_socket(host_end, Role::Client, None).await;
+                let viewer_ws = WebSocketStream::from_raw_socket(viewer_end, Role::Client, None).await;
+                let (mut to_host, mut from_host) = WebSocketStream::from_raw_socket(host_relay, Role::Server, None).await.split();
+                let (mut to_viewer, mut from_viewer) = WebSocketStream::from_raw_socket(viewer_relay, Role::Server, None).await.split();
+                let idle_fired = Arc::new(AtomicBool::new(false));
+                let blackhole = Arc::new(AtomicBool::new(false));
+                let (task_idle, task_blackhole) = (Arc::clone(&idle_fired), Arc::clone(&blackhole));
+                let task = tokio::spawn(async move {
+                    let mut host_seen = tokio::time::Instant::now();
+                    let mut viewer_seen = host_seen;
+                    loop {
+                        tokio::select! {
+                            message = from_host.next() => {
+                                host_seen = tokio::time::Instant::now();
+                                let Some(Ok(message)) = message else { break };
+                                if message.is_binary() && !task_blackhole.load(Ordering::SeqCst) && to_viewer.send(message).await.is_err() { break; }
+                            }
+                            message = from_viewer.next() => {
+                                viewer_seen = tokio::time::Instant::now();
+                                let Some(Ok(message)) = message else { break };
+                                if message.is_binary() && !task_blackhole.load(Ordering::SeqCst) && to_host.send(message).await.is_err() { break; }
+                            }
+                            _ = tokio::time::sleep_until(host_seen.min(viewer_seen) + idle) => {
+                                task_idle.store(true, Ordering::SeqCst);
+                                break;
+                            }
+                        }
+                    }
+                    // Dropping the relay halves closes both peers' sockets.
+                    let _ = to_host.send(Message::Close(None)).await;
+                    let _ = to_viewer.send(Message::Close(None)).await;
+                });
+                (Self { idle_fired, blackhole, task }, host_ws, viewer_ws)
+            }
+
+            /// Close both sockets now, as the relay does when a peer leaves.
+            fn close(&self) { self.task.abort(); }
+
+            /// Keep both sockets open but stop forwarding: a silently dead peer.
+            fn blackhole(&self) { self.blackhole.store(true, Ordering::SeqCst); }
+        }
+
+        fn spawn_host(ws: WebSocketStream<DuplexStream>, timings: SessionTimings, ready: Option<oneshot::Sender<DataHandle>>) -> JoinHandle<SessionResult<()>> {
+            tokio::spawn(async move {
+                run_host_session_with_data_and_accept_and_2fa_with_factory(
+                    ws, PASSWORD, SESSION, || Some(FakeCapturer::new(64, 64)),
+                    |width, height| H264Encoder::new(width, height, 15, 1_000_000),
+                    || Box::new(NoopInjector::default()) as Box<dyn InputInjector>,
+                    false, false, None, || async { true }, ready, timings,
+                ).await
+            })
+        }
+
+        struct Viewer {
+            task: JoinHandle<Result<(), ViewerSessionError>>,
+            frames: mpsc::Receiver<Vec<u8>>,
+            _input: mpsc::Sender<Vec<u8>>,
+        }
+
+        fn spawn_viewer(ws: WebSocketStream<DuplexStream>, timings: SessionTimings) -> Viewer {
+            let (frame_tx, frames) = mpsc::channel(64);
+            let (input, input_rx) = mpsc::channel(4);
+            let task = tokio::spawn(async move {
+                run_viewer_session_inner(ws, PASSWORD, SESSION, frame_tx, input_rx, None, None, None, None, timings)
+                    .await
+                    .map_err(viewer_session_error)
+            });
+            Viewer { task, frames, _input: input }
+        }
+
+        async fn first_frame(viewer: &mut Viewer) {
+            timeout(Duration::from_secs(20), viewer.frames.recv())
+                .await
+                .expect("timed out waiting for the first video frame")
+                .expect("viewer frame sink closed");
+        }
+
+        fn drain_frames(viewer: &mut Viewer) { while viewer.frames.try_recv().is_ok() {} }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn keepalive_holds_idle_relay_sockets_open() {
+            let timings = SessionTimings { keepalive: Duration::from_millis(100), dead_peer: Duration::from_secs(5) };
+            let (relay, host_ws, viewer_ws) = TestRelay::start(Duration::from_millis(600)).await;
+            let host = spawn_host(host_ws, timings, None);
+            let mut viewer = spawn_viewer(viewer_ws, timings);
+            first_frame(&mut viewer).await;
+
+            // Several idle timeouts: the viewer sends no input at all.
+            for _ in 0..4 {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                drain_frames(&mut viewer);
+            }
+            assert!(!relay.idle_fired.load(Ordering::SeqCst), "keepalives must keep both relay sockets active");
+            assert!(!host.is_finished(), "host session ended despite keepalives");
+            assert!(!viewer.task.is_finished(), "viewer session ended despite keepalives");
+            host.abort();
+            viewer.task.abort();
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn without_keepalive_the_idle_relay_drops_the_session() {
+            // Control experiment for the test above: same relay, keepalives off.
+            let timings = SessionTimings { keepalive: Duration::from_secs(3600), dead_peer: Duration::from_secs(3600) };
+            let (relay, host_ws, viewer_ws) = TestRelay::start(Duration::from_millis(600)).await;
+            let host = spawn_host(host_ws, timings, None);
+            let mut viewer = spawn_viewer(viewer_ws, timings);
+            // Setup (ICE) alone can idle a direction past the timeout, so do
+            // not wait for video: the session must simply be dropped.
+            timeout(Duration::from_secs(10), async {
+                while !relay.idle_fired.load(Ordering::SeqCst) {
+                    drain_frames(&mut viewer);
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("the idle relay should drop a session without keepalives");
+            host.abort();
+            viewer.task.abort();
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn viewer_ends_promptly_when_host_control_channel_closes() {
+            // Liveness timers far away: only the closed channel can end it.
+            let timings = SessionTimings { keepalive: Duration::from_secs(3600), dead_peer: Duration::from_secs(3600) };
+            let (relay, host_ws, viewer_ws) = TestRelay::start(Duration::from_secs(3600)).await;
+            let host = spawn_host(host_ws, timings, None);
+            let mut viewer = spawn_viewer(viewer_ws, timings);
+            first_frame(&mut viewer).await;
+
+            relay.close();
+            let ended = timeout(Duration::from_secs(3), async {
+                loop {
+                    drain_frames(&mut viewer);
+                    if viewer.task.is_finished() { break; }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await;
+            assert!(ended.is_ok(), "viewer kept running after the host's control channel closed");
+            let error = viewer.task.await.unwrap().expect_err("a vanished host is an error");
+            assert_eq!(error.reason, DisconnectReason::Transient, "a dropped host must be reconnectable: {error}");
+            let host_result = timeout(Duration::from_secs(3), host).await.expect("host kept running after the relay closed");
+            assert!(host_result.unwrap().is_ok());
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn silent_peer_times_out_on_both_sides() {
+            let timings = SessionTimings { keepalive: Duration::from_millis(100), dead_peer: Duration::from_millis(800) };
+            let (relay, host_ws, viewer_ws) = TestRelay::start(Duration::from_secs(3600)).await;
+            let host = spawn_host(host_ws, timings, None);
+            let mut viewer = spawn_viewer(viewer_ws, timings);
+            first_frame(&mut viewer).await;
+
+            relay.blackhole();
+            let ended = timeout(Duration::from_secs(4), async {
+                loop {
+                    drain_frames(&mut viewer);
+                    if viewer.task.is_finished() { break; }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await;
+            assert!(ended.is_ok(), "viewer did not notice the silent host");
+            let error = viewer.task.await.unwrap().expect_err("a silent host is an error");
+            assert_eq!(error.reason, DisconnectReason::Transient, "a silent host must be reconnectable: {error}");
+            let host_result = timeout(Duration::from_secs(4), host).await.expect("host did not notice the silent viewer");
+            assert!(host_result.unwrap().is_ok());
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn host_bye_ends_viewer_cleanly_without_reconnect() {
+            let timings = SessionTimings::default();
+            let (_relay, host_ws, viewer_ws) = TestRelay::start(Duration::from_secs(3600)).await;
+            let (ready_tx, ready_rx) = oneshot::channel();
+            let host = spawn_host(host_ws, timings, Some(ready_tx));
+            let mut viewer = spawn_viewer(viewer_ws, timings);
+            let handle = timeout(Duration::from_secs(20), ready_rx).await.unwrap().unwrap();
+            first_frame(&mut viewer).await;
+
+            send_bye(&handle.control_sender, &handle.control_sealer).await;
+            let ended = timeout(Duration::from_secs(3), async {
+                loop {
+                    drain_frames(&mut viewer);
+                    if viewer.task.is_finished() { break; }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await;
+            assert!(ended.is_ok(), "viewer kept running after the host's Bye");
+            let error = viewer.task.await.unwrap().expect_err("Bye ends the viewer session");
+            assert_eq!(error.message, crate::reconnect::HOST_ENDED_MESSAGE);
+            assert_eq!(error.reason, DisconnectReason::CleanUserDisconnect);
+            assert!(!crate::reconnect::should_reconnect(error.reason));
+            host.abort();
+        }
     }
 }

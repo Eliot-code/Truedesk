@@ -186,7 +186,7 @@ fn activate_data_channel(app: &AppHandle, handle: DataHandle, from: String) {
     state.file_outgoing = Some(sender);
     state.file_sealer = Some(sealer);
     state.control_sender = Some(control_sender);
-    state.control_sealer = Some(Arc::new(Mutex::new(control_sealer)));
+    state.control_sealer = Some(control_sealer);
     state.clipboard_thread = clipboard_thread.map(|(command_tx, join)| ClipboardThread { command_tx, join });
     drop(state);
     spawn_file_receiver(app.clone(), file_receiver, from);

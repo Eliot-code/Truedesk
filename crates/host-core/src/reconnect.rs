@@ -65,11 +65,19 @@ pub fn rejection_code(error: &str) -> Option<&str> {
     error.strip_prefix(REJECTION_PREFIX)
 }
 
+/// Viewer error text when the host deliberately ended the session with a
+/// sealed `Control::Bye`. It is a clean end: the viewer must not reconnect.
+pub const HOST_ENDED_MESSAGE: &str = "The host ended the session.";
+
 /// Only explicit authentication signals are fatal: a failed PAKE (wrong
-/// password) or the host's explicit rejection. Everything else — including a
-/// connection that closes after the key exchange but before video — is
-/// treated as transient and retried within the reconnect window.
+/// password) or the host's explicit rejection. A host's explicit `Bye` is a
+/// clean end. Everything else — including a connection that closes after the
+/// key exchange but before video — is treated as transient and retried
+/// within the reconnect window.
 pub fn classify_viewer_error(error: &str) -> DisconnectReason {
+    if error == HOST_ENDED_MESSAGE {
+        return DisconnectReason::CleanUserDisconnect;
+    }
     let lower = error.to_ascii_lowercase();
     if lower.contains("invalid spake2") || lower.contains("key confirmation failed")
         || lower.contains("session rejected") {
@@ -216,6 +224,9 @@ mod tests {
         assert_eq!(classify_viewer_error("key confirmation failed"), DisconnectReason::AuthFailure);
         assert_eq!(classify_viewer_error("session rejected"), DisconnectReason::AuthFailure);
         assert_eq!(classify_viewer_error("user ended session"), DisconnectReason::CleanUserDisconnect);
+        assert_eq!(classify_viewer_error(HOST_ENDED_MESSAGE), DisconnectReason::CleanUserDisconnect);
+        assert!(!should_reconnect(classify_viewer_error(HOST_ENDED_MESSAGE)));
+        assert_eq!(classify_viewer_error("connection closed: host stopped responding"), DisconnectReason::Transient);
     }
 
     #[test]

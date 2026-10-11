@@ -453,7 +453,7 @@ async fn host_session_ends_cleanly_on_viewer_bye() {
         input_rx,
         Some(viewer_ready_tx),
     ));
-    let DataHandle { control_sender, mut control_sealer, .. } = timeout(Duration::from_secs(15), viewer_ready_rx)
+    let DataHandle { control_sender, control_sealer, .. } = timeout(Duration::from_secs(15), viewer_ready_rx)
         .await
         .expect("timed out waiting for viewer Data handle")
         .expect("viewer session closed before Data handle");
@@ -463,7 +463,7 @@ async fn host_session_ends_cleanly_on_viewer_bye() {
         .expect("viewer frame sink closed");
 
     let bye = protocol::control::Control::Bye { session: "e2e-bye".into() }.to_bytes();
-    let sealed = control_sealer.seal(&[Tag::Control as u8], &bye);
+    let sealed = control_sealer.lock().unwrap().seal(&[Tag::Control as u8], &bye);
     control_sender.send_frame(Tag::Control, &sealed).await.expect("send Bye");
 
     let result = timeout(Duration::from_secs(5), host)
