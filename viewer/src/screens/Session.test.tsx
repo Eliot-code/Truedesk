@@ -26,7 +26,10 @@ const { onVideoFrame, onAudioFrame, onMonitorList, onFileOffer, onFileProgress, 
 }));
 
 vi.mock("../lib/api", () => ({ onVideoFrame, onAudioFrame, onMonitorList, onFileOffer, onFileProgress, onFileDone, onFileError, onFileDrop, pickFile, startRecording, appendRecording, finishRecording, sendFile, respondFile, sendInput, selectMonitor, setAudioMuted, setClipboardSync, getConfig }));
-vi.mock("../lib/decode", () => ({ makeDecoder: vi.fn(() => ({ decode, close: vi.fn() })) }));
+vi.mock("../lib/decode", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/decode")>()),
+  makeDecoder: vi.fn(() => ({ decode, close: vi.fn() })),
+}));
 
 import Session from "./Session";
 import { NotifyContext } from "../lib/notify";

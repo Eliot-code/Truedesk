@@ -12,12 +12,17 @@ export interface Decoder {
   close: () => void;
 }
 
+/** Assigning a canvas size clears it, so only touch it when the size changes. */
+export function sizeCanvas(canvas: HTMLCanvasElement, width: number, height: number) {
+  if (canvas.width !== width) canvas.width = width;
+  if (canvas.height !== height) canvas.height = height;
+}
+
 export function makeDecoder(canvas: HTMLCanvasElement): Decoder {
   const ctx = canvas.getContext("2d")!;
   const decoder = new VideoDecoder({
     output: (frame) => {
-      canvas.width = frame.displayWidth;
-      canvas.height = frame.displayHeight;
+      sizeCanvas(canvas, frame.displayWidth, frame.displayHeight);
       ctx.drawImage(frame, 0, 0);
       frame.close();
     },

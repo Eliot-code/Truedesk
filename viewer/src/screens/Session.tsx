@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as api from "../lib/api";
-import { makeDecoder } from "../lib/decode";
+import { makeDecoder, sizeCanvas } from "../lib/decode";
 import { attachInput } from "../lib/input";
 import Toolbar from "../components/Toolbar";
 import FileTransfer from "../components/FileTransfer";
@@ -174,8 +174,7 @@ export default function Session({ remoteId, role, status = "in_session", onDisco
 
     const listener = api.onVideoFrame((frame) => {
       if (!active) return;
-      canvas.width = frame.width;
-      canvas.height = frame.height;
+      sizeCanvas(canvas, frame.width, frame.height);
       decode(b64ToBytes(frame.data), frame.keyframe, frame.timestamp_us);
     });
     void listener.then((stop) => {
