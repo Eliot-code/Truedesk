@@ -353,6 +353,9 @@ fn set_unattended_2fa(
     let mut state = state.lock();
     let mut pending = pending.lock();
     if enabled {
+        if !state.config.config.unattended_enabled {
+            return Err("turn on unattended access before adding two-factor".into());
+        }
         if state.config.config.unattended_twofa_enabled && unattended::get_totp_secret().is_ok() {
             return Err("two-factor is already enabled".into());
         }
