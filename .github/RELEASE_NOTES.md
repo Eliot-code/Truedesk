@@ -36,7 +36,7 @@ These features are new and haven't run on real hardware yet:
 - **Windows:** hardware video encoding (NVIDIA / Intel / AMD). Check the log
   for `video encoder:` to see which encoder was picked.
 - **Linux:** hearing the host's system sound (PulseAudio / PipeWire).
-- **macOS:** system sound needs macOS 14.6+; older versions send the mic.
+- **macOS:** system sound needs macOS 14.6+; older versions send no audio.
 
 ## Report a problem
 
