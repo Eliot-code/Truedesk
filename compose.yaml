@@ -12,6 +12,10 @@ services:
     restart: unless-stopped
     environment:
       RUST_LOG: ${RUST_LOG:-info}
+      # Keeps ID ownership across restarts.
+      RELAY_STATE_FILE: /data/state.json
+    volumes:
+      - relay_data:/data
     expose:
       - "8080"
 
@@ -31,5 +35,6 @@ services:
       - caddy_config:/config
 
 volumes:
+  relay_data:
   caddy_data:
   caddy_config:

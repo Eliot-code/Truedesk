@@ -1,8 +1,10 @@
 # Relay deployment
 
-The relay is a single stateless HTTP service: a WebSocket endpoint at `/ws` and a
-health check at `/health`. It does not terminate TLS itself; the Compose setup
-below puts Caddy in front for automatic HTTPS.
+The relay is a single HTTP service: a WebSocket endpoint at `/ws` and a health
+check at `/health` (it returns `{"status":"ok"}`). It does not terminate TLS
+itself; the Compose setup below puts Caddy in front for automatic HTTPS. The
+only state it keeps is which token owns each host ID (see
+[Configuration](#configuration)).
 
 ## Requirements
 
@@ -41,7 +43,9 @@ CI publishes `ghcr.io/treeot/opendesk-relay` (`latest` and version tags from
 releases, `edge` from `main`). Run it behind your own TLS proxy:
 
 ```sh
-docker run -d --restart unless-stopped -p 8080:8080 ghcr.io/treeot/opendesk-relay:latest
+docker run -d --restart unless-stopped -p 8080:8080 \
+  -v relay_data:/data -e RELAY_STATE_FILE=/data/state.json \
+  ghcr.io/treeot/opendesk-relay:latest
 ```
 
 Forward `wss://` on 443 to the container's port 8080; WebSocket upgrades pass
@@ -57,6 +61,36 @@ through unchanged.
 2. Set the domain (e.g. `relay.example.com`). Coolify provisions TLS and
    injects `PORT`, which the relay binds automatically (default 8080).
 3. Deploy, then point clients at `wss://relay.example.com/ws`.
+
+## Configuration
+
+All settings are optional environment variables.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `RELAY_TRUSTED_PROXIES` | loopback, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7` | Comma-separated CIDRs of reverse proxies. `none` trusts nothing. |
+| `RELAY_STATE_FILE` | unset | JSON file that keeps ID ownership across restarts. |
+| `RELAY_ID_LEASE_SECS` | `2592000` (30 days) | How long an offline host keeps its ID. |
+| `RELAY_MAX_ID_BINDINGS` | `100000` | Most IDs tracked at once. New IDs are refused when full. |
+| `RELAY_NEW_ID_BURST` / `RELAY_NEW_ID_REFILL_SECS` | `20` / `3600` | New IDs one IP (or IPv6 /64) may claim per window. |
+| `RELAY_MAX_RATE_ENTRIES` | `100000` | Most IPs tracked by each rate limiter. |
+| `RELAY_IDLE_TIMEOUT_SECS` | `60` | Closes a paired connection after this long without traffic. |
+| `RELAY_SESSION_CONTROL_BURST` / `RELAY_SESSION_CONTROL_PER_SEC` | `64` / `16` | Control messages allowed per paired connection. |
+| `RELAY_SWEEP_SECS` | `60` | How often expired IDs and idle rate limits are removed and the state file is saved. |
+
+**Client addresses behind a proxy.** Per-IP limits and logs use the client's
+address. When a connection comes from a trusted proxy, the relay takes the
+address from `X-Forwarded-For` (rightmost entry that isn't a trusted proxy),
+or `X-Real-IP` if that header is missing. Headers from untrusted peers are
+ignored. The defaults suit a relay on a private Docker network behind Caddy,
+Traefik or Coolify. If the relay port is reachable directly from a network
+you don't control, narrow `RELAY_TRUSTED_PROXIES` to your proxy's address.
+
+**ID ownership.** The first host to register an ID owns it until it has been
+offline for the lease period. Another device that tries to register the same
+ID gets an `id_taken` error. Without `RELAY_STATE_FILE` this ownership is lost
+when the relay restarts. The file stores a SHA-256 hash of each host token,
+not the token itself. The Compose setup stores it in the `relay_data` volume.
 
 ## Clients
 
