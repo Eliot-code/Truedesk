@@ -25,6 +25,13 @@ pub enum FileMsg {
         id: u64,
         message: String,
     },
+    /// Receiver -> sender flow control: every byte below `offset` has been
+    /// written. The sender keeps a bounded window un-acknowledged, and a
+    /// final `Ack` at the full size confirms the verified file.
+    Ack {
+        id: u64,
+        offset: u64,
+    },
 }
 
 impl FileMsg {
@@ -67,6 +74,11 @@ impl FileMsg {
                 put_u64(&mut bytes, *id);
                 put_bytes(&mut bytes, message.as_bytes());
             }
+            Self::Ack { id, offset } => {
+                bytes.push(7);
+                put_u64(&mut bytes, *id);
+                put_u64(&mut bytes, *offset);
+            }
         }
         bytes
     }
@@ -105,6 +117,10 @@ impl FileMsg {
             6 => Self::Error {
                 id: reader.take_u64()?,
                 message: reader.take_string()?,
+            },
+            7 => Self::Ack {
+                id: reader.take_u64()?,
+                offset: reader.take_u64()?,
             },
             _ => return None,
         };
@@ -221,6 +237,14 @@ mod tests {
         round_trip(FileMsg::Error {
             id: 12,
             message: "hash mismatch".into(),
+        });
+    }
+
+    #[test]
+    fn ack_roundtrips() {
+        round_trip(FileMsg::Ack {
+            id: 13,
+            offset: 2 * 1024 * 1024,
         });
     }
 

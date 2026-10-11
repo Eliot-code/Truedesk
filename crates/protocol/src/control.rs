@@ -16,6 +16,11 @@ pub enum Control {
     MonitorList { monitors: Vec<MonitorInfo> },
     SelectMonitor { id: u32 },
     AuthCode { code: String },
+    /// Sealed liveness probe both peers send periodically on the relay socket
+    /// after authentication. It keeps idle relay sockets open (a direct
+    /// session carries no relay traffic otherwise) and lets each side notice
+    /// a vanished peer when keepalives stop arriving.
+    KeepAlive,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,6 +109,13 @@ mod tests {
     fn auth_code_roundtrips() {
         let c = Control::AuthCode { code: "123456".into() };
         assert_eq!(Control::from_bytes(&c.to_bytes()), Some(c));
+    }
+
+    #[test]
+    fn keepalive_roundtrips_and_uses_t_discriminator() {
+        let bytes = Control::KeepAlive.to_bytes();
+        assert_eq!(String::from_utf8(bytes.clone()).unwrap(), r#"{"t":"keep_alive"}"#);
+        assert_eq!(Control::from_bytes(&bytes), Some(Control::KeepAlive));
     }
 
     #[test]
