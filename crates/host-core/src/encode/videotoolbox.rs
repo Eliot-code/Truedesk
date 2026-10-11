@@ -42,9 +42,9 @@ use objc2_video_toolbox::{
 
 use super::{append_parameter_sets, avcc_to_annex_b, EncodedFrame, PixelFormat, RawFrame};
 
-/// Safety-net keyframe interval in seconds; the session loop already forces
-/// a keyframe every 2 s and on request.
-const MAX_KEYFRAME_INTERVAL_SECS: i32 = 10;
+/// Safety-net keyframe interval in seconds, beyond the session loop's own
+/// periodic (10 s) and requested keyframes so the two do not coincide.
+const MAX_KEYFRAME_INTERVAL_SECS: i32 = 20;
 
 /// A VideoToolbox call failed with an `OSStatus`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

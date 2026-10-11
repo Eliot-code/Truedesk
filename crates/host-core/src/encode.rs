@@ -17,6 +17,7 @@
 mod mediafoundation;
 #[cfg(any(target_os = "windows", test))]
 mod nv12;
+pub mod stream;
 #[cfg(target_os = "macos")]
 mod videotoolbox;
 

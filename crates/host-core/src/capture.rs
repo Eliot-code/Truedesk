@@ -1,10 +1,10 @@
-use crate::encode::{PixelFormat, RawFrame};
+use crate::encode::{stream::STREAM_FPS, PixelFormat, RawFrame};
 use protocol::control::MonitorInfo;
 use scap::capturer::engine::{ChannelItem, Engine};
 use scap::capturer::Options;
 use scap::frame::{Frame, FrameType};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc as std_mpsc, Arc, Mutex};
+use std::sync::{mpsc as std_mpsc, Arc, Condvar, Mutex};
 use std::time::Duration;
 
 // Scap 0.0.8 supplies the platform engines here: ScreenCaptureKit on macOS,
@@ -24,13 +24,25 @@ fn capture_permission_available() -> bool {
     true
 }
 
-/// A source of screen frames for the host session loop.
+/// A source of screen frames for the host video pipeline.
 ///
 /// `next_frame` must not block: it returns the newest frame captured since
 /// the previous call, or `None` when nothing new arrived (a static screen),
 /// in which case the caller repeats the last frame it has.
 pub trait ScreenCapturer {
     fn next_frame(&mut self) -> Option<RawFrame>;
+
+    /// Like `next_frame`, but waits up to `timeout` for a frame to arrive so
+    /// the caller can encode as soon as the screen changes. The default
+    /// polls once more after sleeping; capturers with a frame-arrival signal
+    /// override it.
+    fn wait_frame(&mut self, timeout: Duration) -> Option<RawFrame> {
+        if let Some(frame) = self.next_frame() {
+            return Some(frame);
+        }
+        std::thread::sleep(timeout);
+        self.next_frame()
+    }
 
     fn monitors(&self) -> Vec<MonitorInfo> { Vec::new() }
 
@@ -46,6 +58,8 @@ const CAPTURE_POLL: Duration = Duration::from_millis(20);
 #[derive(Default)]
 struct LatestFrame {
     slot: Mutex<Option<(u64, RawFrame)>>,
+    /// Signalled whenever a frame is published.
+    arrived: Condvar,
     /// Bumped by every requested monitor switch; frames tagged with an older
     /// generation come from the previous monitor and are discarded.
     generation: AtomicU64,
@@ -104,6 +118,20 @@ impl ScapCapturer {
     }
 }
 
+/// Capture size requested from the platform. ScreenCaptureKit scales on the
+/// GPU, so macOS asks for a 1080p-class stream (width capped at 1920) instead
+/// of the native Retina size. Scap ignores this setting on Windows and Linux;
+/// the video pipeline scales those captures in software.
+#[cfg(target_os = "macos")]
+fn output_resolution() -> scap::capturer::Resolution {
+    scap::capturer::Resolution::_1080p
+}
+
+#[cfg(not(target_os = "macos"))]
+fn output_resolution() -> scap::capturer::Resolution {
+    scap::capturer::Resolution::Captured
+}
+
 /// A running scap engine and the channel it delivers frames on.
 ///
 /// The engine is driven directly instead of through
@@ -119,9 +147,10 @@ impl CaptureStream {
     /// `None`). Scap panics on some engine failures; those are caught.
     fn start(target: Option<scap::Target>) -> Option<Self> {
         let options = Options {
-            fps: 15,
+            fps: STREAM_FPS,
             target,
             output_type: FrameType::BGRAFrame,
+            output_resolution: output_resolution(),
             ..Default::default()
         };
         let started = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
@@ -211,6 +240,7 @@ fn capture_loop(
             Ok(Some(frame)) => {
                 *latest.slot.lock().unwrap_or_else(|poison| poison.into_inner()) =
                     Some((generation, frame));
+                latest.arrived.notify_all();
             }
             Ok(None) => {}
             Err(()) => {
@@ -326,6 +356,17 @@ impl ScreenCapturer for ScapCapturer {
         (generation == self.latest.generation.load(Ordering::Acquire)).then_some(frame)
     }
 
+    fn wait_frame(&mut self, timeout: Duration) -> Option<RawFrame> {
+        let slot = self.latest.slot.lock().unwrap_or_else(|poison| poison.into_inner());
+        let (mut slot, _) = self
+            .latest
+            .arrived
+            .wait_timeout_while(slot, timeout, |slot| slot.is_none())
+            .unwrap_or_else(|poison| poison.into_inner());
+        let (generation, frame) = slot.take()?;
+        (generation == self.latest.generation.load(Ordering::Acquire)).then_some(frame)
+    }
+
     fn monitors(&self) -> Vec<MonitorInfo> {
         scap::get_all_targets()
             .into_iter()
@@ -375,6 +416,7 @@ impl Drop for ScapCapturer {
 }
 
 /// Test capturer that always has a fresh solid frame of the current size.
+/// `wait_frame` paces it at the stream frame rate.
 pub struct FakeCapturer {
     w: u16,
     h: u16,
@@ -392,6 +434,11 @@ impl FakeCapturer {
 }
 
 impl ScreenCapturer for FakeCapturer {
+    fn wait_frame(&mut self, timeout: Duration) -> Option<RawFrame> {
+        std::thread::sleep(timeout.min(Duration::from_secs(1) / STREAM_FPS));
+        self.next_frame()
+    }
+
     fn next_frame(&mut self) -> Option<RawFrame> {
         Some(RawFrame {
             width: self.w,

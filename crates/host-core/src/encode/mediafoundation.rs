@@ -71,9 +71,9 @@ use super::{
     EncodedFrame, ParameterSets, PixelFormat, RawFrame,
 };
 
-/// Safety-net keyframe interval in seconds; the session loop already forces
-/// a keyframe every 2 s and on request.
-const MAX_KEYFRAME_INTERVAL_SECS: u32 = 10;
+/// Safety-net keyframe interval in seconds, beyond the session loop's own
+/// periodic (10 s) and requested keyframes so the two do not coincide.
+const MAX_KEYFRAME_INTERVAL_SECS: u32 = 20;
 /// How long an asynchronous MFT may take to ask for input or deliver output
 /// before it is considered broken (generous: the first frame can include
 /// driver warm-up).
