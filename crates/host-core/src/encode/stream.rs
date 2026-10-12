@@ -3,6 +3,9 @@
 //! Everything here is pure so the policy can be unit tested without a
 //! capturer or encoder.
 
+use super::Encoder;
+use crate::transport::RateControl;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Frame rate the host captures and encodes at.
@@ -95,6 +98,43 @@ impl KeyframePolicy {
     }
 }
 
+/// Bitrate changes smaller than this fraction of the current bitrate (in
+/// percent) are not worth reconfiguring the encoder for.
+const BITRATE_DEADBAND_PERCENT: u32 = 5;
+
+/// Keeps an encoder on the bitrate the transport estimates for the path.
+///
+/// Publishes the stream's bitrate as the ceiling and applies the target
+/// when it moved by more than a small dead band. A new encoder (stream size
+/// change) starts at the ceiling, so the target is reapplied to it.
+pub struct BitrateFollower {
+    rate: Arc<RateControl>,
+    /// The bitrate the encoder runs at; 0 for a new encoder.
+    applied: u32,
+}
+
+impl BitrateFollower {
+    pub fn new(rate: Arc<RateControl>) -> Self { Self { rate, applied: 0 } }
+
+    /// The encoder was replaced by one created at the stream bitrate.
+    pub fn encoder_replaced(&mut self) { self.applied = 0; }
+
+    /// Call before each encode of a `width` x `height` stream.
+    pub fn update<E: Encoder + ?Sized>(&mut self, encoder: &mut E, width: u16, height: u16) {
+        let ceiling = stream_bitrate(width, height, STREAM_FPS);
+        self.rate.set_ceiling(ceiling);
+        if self.applied == 0 {
+            self.applied = ceiling;
+        }
+        let target = self.rate.target();
+        if target.abs_diff(self.applied) > self.applied / 100 * BITRATE_DEADBAND_PERCENT {
+            log::debug!("encoder bitrate {} -> {target} bps", self.applied);
+            encoder.set_bitrate(target);
+            self.applied = target;
+        }
+    }
+}
+
 /// Whether the encode loop should encode now: on every fresh capture, when
 /// a keyframe is due, or to repeat a static frame. `since_last_encode` is
 /// `None` before the first encode.
@@ -154,6 +194,46 @@ pub fn downscale_bgra(src: &[u8], sw: u16, sh: u16, dw: u16, dh: u16) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct RecordingEncoder(Vec<u32>);
+
+    impl Encoder for RecordingEncoder {
+        fn encode(&mut self, _frame: &crate::encode::RawFrame) -> Option<crate::encode::EncodedFrame> { None }
+        fn set_bitrate(&mut self, bps: u32) { self.0.push(bps); }
+    }
+
+    #[test]
+    fn bitrate_follower_publishes_the_ceiling_and_applies_target_changes() {
+        let rate = Arc::new(RateControl::default());
+        let mut follower = BitrateFollower::new(Arc::clone(&rate));
+        let mut encoder = RecordingEncoder::default();
+        let ceiling = stream_bitrate(1920, 1080, STREAM_FPS);
+        follower.update(&mut encoder, 1920, 1080);
+        assert_eq!(rate.ceiling(), ceiling);
+        assert!(encoder.0.is_empty(), "a new encoder already runs at the ceiling");
+
+        // What a transport estimator does.
+        rate.set_target(ceiling - ceiling / 50);
+        follower.update(&mut encoder, 1920, 1080);
+        assert!(encoder.0.is_empty(), "2% is inside the dead band");
+        rate.set_target(4_000_000);
+        follower.update(&mut encoder, 1920, 1080);
+        follower.update(&mut encoder, 1920, 1080);
+        assert_eq!(encoder.0, vec![4_000_000]);
+
+        // A smaller stream gets a new encoder at its own ceiling (2 Mbps),
+        // which the 4 Mbps target is capped to: nothing to change.
+        follower.encoder_replaced();
+        let mut replaced = RecordingEncoder::default();
+        follower.update(&mut replaced, 640, 360);
+        assert_eq!(rate.ceiling(), MIN_BITRATE);
+        assert!(replaced.0.is_empty());
+        // A lower target is applied to the new encoder.
+        rate.set_target(1_500_000);
+        follower.update(&mut replaced, 640, 360);
+        assert_eq!(replaced.0, vec![1_500_000]);
+    }
 
     #[test]
     fn stream_dims_caps_the_long_side_and_keeps_aspect() {

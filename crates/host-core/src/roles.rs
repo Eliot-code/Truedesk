@@ -505,7 +505,8 @@ where
     // stalls control, keepalives, audio or input. It publishes the input
     // mapping dimensions once the first frame is in.
     let dims = Arc::new(AtomicU32::new(0));
-    let video = VideoSource::start(capturer, encoder_factory, Arc::clone(&dims)).await?;
+    let rate = transport_tx.rate_control();
+    let video = VideoSource::start(capturer, encoder_factory, Arc::clone(&dims), rate).await?;
     // Input injection makes blocking OS calls, so it runs on its own thread
     // and never stalls capture/encode/send or audio. The injector is built on
     // that thread because platform injectors (Enigo) can be thread-affine.
@@ -631,6 +632,8 @@ struct VideoPipeline<E, F> {
     seq: u64,
     started: Instant,
     keyframes: KeyframePolicy,
+    /// Follows the transport's bitrate estimate (none in tests).
+    bitrate: Option<stream::BitrateFollower>,
 }
 
 impl<E, F> VideoPipeline<E, F>
@@ -644,7 +647,12 @@ where
         let encoder = encoder_factory(frame.width, frame.height)?;
         dims.store(pack_dims(capture.0, capture.1), Ordering::Release);
         let now = Instant::now();
-        Ok(Self { encoder_factory, encoder, frame, capture, dims, seq: 0, started: now, keyframes: KeyframePolicy::new(now) })
+        Ok(Self { encoder_factory, encoder, frame, capture, dims, seq: 0, started: now, keyframes: KeyframePolicy::new(now), bitrate: None })
+    }
+
+    fn with_rate(mut self, rate: Arc<transport::RateControl>) -> Self {
+        self.bitrate = Some(stream::BitrateFollower::new(rate));
+        self
     }
 
     /// A viewer asked for a keyframe; returns whether it was accepted.
@@ -659,6 +667,7 @@ where
             if (frame.width, frame.height) != (self.frame.width, self.frame.height) {
                 log::info!("stream size changed to {}x{} (capture {}x{})", frame.width, frame.height, capture.0, capture.1);
                 self.encoder = (self.encoder_factory)(frame.width, frame.height)?;
+                if let Some(bitrate) = &mut self.bitrate { bitrate.encoder_replaced(); }
             }
             if capture != self.capture {
                 self.dims.store(pack_dims(capture.0, capture.1), Ordering::Release);
@@ -670,6 +679,7 @@ where
         if self.keyframes.due(now) {
             self.encoder.force_intra_frame();
         }
+        if let Some(bitrate) = &mut self.bitrate { bitrate.update(&mut self.encoder, self.frame.width, self.frame.height); }
         let Some(encoded) = self.encoder.encode(&self.frame) else { return Ok(None) };
         if encoded.keyframe {
             self.keyframes.keyframe_sent(now);
@@ -702,7 +712,7 @@ struct VideoSource {
 impl VideoSource {
     /// Starts the encode thread and waits until the first frame was captured
     /// and the encoder created (or either failed).
-    async fn start<C, E, F>(capturer: C, encoder_factory: F, dims: Arc<AtomicU32>) -> SessionResult<Self>
+    async fn start<C, E, F>(capturer: C, encoder_factory: F, dims: Arc<AtomicU32>, rate: Arc<transport::RateControl>) -> SessionResult<Self>
     where
         C: ScreenCapturer + Send + 'static,
         E: Encoder + 'static,
@@ -716,7 +726,7 @@ impl VideoSource {
             .name("opendesk-video-encode".into())
             .spawn(move || {
                 let _close = CloseOnExit(&thread_units);
-                run_video_thread(capturer, encoder_factory, dims, &command_rx, &thread_units, ready_tx);
+                run_video_thread(capturer, encoder_factory, dims, rate, &command_rx, &thread_units, ready_tx);
             })?;
         match ready_rx.await {
             Ok(Ok(())) => Ok(Self { commands, units }),
@@ -747,6 +757,7 @@ fn run_video_thread<C, E, F>(
     mut capturer: C,
     encoder_factory: F,
     dims: Arc<AtomicU32>,
+    rate: Arc<transport::RateControl>,
     commands: &std::sync::mpsc::Receiver<VideoCommand>,
     units: &UnitSlot,
     ready: oneshot::Sender<Result<(), String>>,
@@ -768,7 +779,7 @@ fn run_video_thread<C, E, F>(
             return;
         }
     };
-    let mut video = match VideoPipeline::new(first, encoder_factory, dims) {
+    let mut video = match VideoPipeline::new(first, encoder_factory, dims).map(|video| video.with_rate(rate)) {
         Ok(video) => video,
         Err(error) => {
             let _ = ready.send(Err(error.to_string()));
