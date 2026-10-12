@@ -47,6 +47,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "category": "Utility",
     "copyright": "Copyright © 2026 OpenDesk contributors",
     "icon": [
@@ -59,6 +60,17 @@
     "macOS": {
       "minimumSystemVersion": "12.3",
       "signingIdentity": "-"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlEMTE1NzFEQTc4QzhCQzYKUldUR2k0eW5IVmNSblMvMWpUNldTZXpwQWRPT1NkR2VzQy9WY2hlOExSZG1xN2RJYmhGcm16RGwK",
+      "endpoints": [
+        "https://github.com/treeot/opendesk/releases/download/updater/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }

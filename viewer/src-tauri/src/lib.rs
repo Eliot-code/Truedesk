@@ -553,6 +553,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        // Checks the manifest in `plugins.updater` (tauri.conf.json); the
+        // frontend decides when to install. See docs/RELEASE.md.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         // Stdout plus a rotating file in the OS log dir (macOS:
         // ~/Library/Logs/com.opendesk.app/) for bug reports.
         .plugin(
