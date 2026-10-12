@@ -5,6 +5,7 @@ import IncomingRequest from "./screens/IncomingRequest";
 import Permissions from "./screens/Permissions";
 import Session from "./screens/Session";
 import Toast from "./components/Toast";
+import UpdateBanner from "./components/UpdateBanner";
 import * as api from "./lib/api";
 import { NotifyContext, friendlyError, type Notice, type NoticeTone } from "./lib/notify";
 
@@ -108,6 +109,7 @@ export default function App() {
   return <NotifyContext.Provider value={notify}>
     {content}
     <Toast notice={notice} onDismiss={dismiss} />
+    <UpdateBanner enabled={!import.meta.env.DEV} visible={screen === "home" && !request} />
     {request && <IncomingRequest peerId={request.peer_id} known={request.known} onResolved={() => setRequest(null)} />}
   </NotifyContext.Provider>;
 }

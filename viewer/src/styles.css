@@ -88,3 +88,9 @@ button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-
 .request-known { display: inline-block; margin-left: 10px; padding: 3px 8px; color: var(--accent); background: #22d3ee14; border: 1px solid #22d3ee55; border-radius: 99px; font: 600 10px var(--mono); letter-spacing: .06em; vertical-align: middle; }
 .permissions-back { margin-bottom: 18px; }
 .quiet-button:disabled { opacity: .5; cursor: default; }.quiet-button:disabled:hover { color: var(--muted); border-color: var(--border); }
+
+/* Update banner: bottom-right so it never sits under a toast. */
+.update-banner { position: fixed; z-index: 19; right: 22px; bottom: 22px; display: flex; align-items: center; gap: 12px; max-width: min(420px, calc(100vw - 32px)); padding: 10px 10px 10px 16px; color: var(--text); background: var(--card); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 8px; box-shadow: 0 16px 40px #0009; font-size: 13px; line-height: 1.45; }
+.update-banner__text { overflow-wrap: anywhere; }
+.update-banner__action { flex-shrink: 0; padding: 6px 11px; color: #061116; background: var(--accent); border: 0; border-radius: 6px; font-weight: 600; }
+@media (max-width: 720px) { .update-banner { top: 16px; right: 16px; bottom: auto; left: 16px; max-width: none; } }
