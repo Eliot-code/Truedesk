@@ -40,6 +40,15 @@ pub fn derive_control_keys(shared_secret: &[u8], role_is_host: bool) -> ([u8; 32
     if role_is_host { (h2v, v2h) } else { (v2h, h2v) }
 }
 
+/// Returns (send_key, recv_key) for the direct UDP transport's own feedback
+/// packets (sender/receiver reports, NACKs). Another separate keyspace: the
+/// transport seals these with its own nonce counter, independent of media.
+pub fn derive_transport_keys(shared_secret: &[u8], role_is_host: bool) -> ([u8; 32], [u8; 32]) {
+    let h2v = hkdf32(shared_secret, b"opendesk transport h2v");
+    let v2h = hkdf32(shared_secret, b"opendesk transport v2h");
+    if role_is_host { (h2v, v2h) } else { (v2h, h2v) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,6 +116,22 @@ mod tests {
             hex(&ctl_v2h),
             "a7af61489ce510f282d14798649e3c4678f5b84a5b2b5310f6b51b4d31db5774"
         );
+    }
+
+    #[test]
+    fn transport_keys_agree_and_differ_from_every_other_channel() {
+        let shared = [5u8; 32];
+        let (host_send, host_recv) = derive_transport_keys(&shared, true);
+        let (viewer_send, viewer_recv) = derive_transport_keys(&shared, false);
+        assert_eq!(host_send, viewer_recv);
+        assert_eq!(viewer_send, host_recv);
+        assert_ne!(host_send, host_recv);
+        for (send, recv) in [derive_keys(&shared, true), derive_data_keys(&shared, true), derive_control_keys(&shared, true)] {
+            for key in [send, recv] {
+                assert_ne!(host_send, key);
+                assert_ne!(host_recv, key);
+            }
+        }
     }
 
     #[test]
