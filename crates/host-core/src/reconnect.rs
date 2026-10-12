@@ -65,6 +65,9 @@ pub mod reject_code {
     pub const TWOFA_REQUIRED: &str = "2fa_required";
     /// The 2FA code was wrong, expired, or already used (replay).
     pub const TWOFA_INVALID: &str = "2fa_invalid";
+    /// The host accepted the viewer but cannot capture its screen (missing
+    /// OS permission). Retrying will not help until someone fixes the host.
+    pub const CAPTURE_UNAVAILABLE: &str = "capture_unavailable";
 }
 
 const REJECTION_PREFIX: &str = "session rejected by host: ";
@@ -127,6 +130,9 @@ pub fn auth_failure_message(error: &str, after_session: bool) -> String {
         }
         Some(reject_code::TWOFA_INVALID) => {
             "The 2FA code was rejected (wrong, expired, or already used). Enter the current code and connect again.".to_owned()
+        }
+        Some(reject_code::CAPTURE_UNAVAILABLE) => {
+            "The other device can't share its screen. On that device, allow Screen Recording for OpenDesk, restart it, and connect again.".to_owned()
         }
         Some(other) => format!("The host rejected the session ({other})."),
         None => format!("{error}; authentication failed—check the password and connect again (it changes after every session)"),
@@ -233,6 +239,13 @@ mod tests {
         assert!(should_retry_viewer(reason, true));
         assert!(should_retry_viewer(DisconnectReason::Transient, false));
         assert!(!should_retry_viewer(DisconnectReason::AuthFailure, true));
+    }
+
+    #[test]
+    fn capture_failure_explains_what_to_fix_on_the_host() {
+        let error = rejection_error(reject_code::CAPTURE_UNAVAILABLE);
+        assert_eq!(classify_viewer_error(&error), DisconnectReason::AuthFailure);
+        assert!(auth_failure_message(&error, false).contains("can't share its screen"));
     }
 
     #[test]

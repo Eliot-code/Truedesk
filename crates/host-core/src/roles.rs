@@ -452,7 +452,11 @@ where
         send_rejection(&sender, &control_sealer, code).await;
         return Err(Box::new(SessionError("session rejected")));
     }
-    let capturer = capture_factory().ok_or(SessionError(capture_unavailable_message()))?;
+    let Some(capturer) = capture_factory() else {
+        // Without this the viewer reads the close as a drop and reconnects.
+        send_rejection(&sender, &control_sealer, reject_code::CAPTURE_UNAVAILABLE).await;
+        return Err(Box::new(SessionError(capture_unavailable_message())));
+    };
     reliable.enable_application_traffic();
     let (send_key, recv_key) = derive_keys(&shared, true);
     let sealer = Sealer::new(send_key);
@@ -2123,6 +2127,25 @@ mod tests {
             assert_eq!(error.reason, DisconnectReason::Transient, "a silent host must be reconnectable: {error}");
             let host_result = timeout(Duration::from_secs(4), host).await.expect("host did not notice the silent viewer");
             assert!(host_result.unwrap().is_ok());
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn host_without_capture_tells_viewer_not_to_reconnect() {
+            let timings = SessionTimings::default();
+            let (_relay, host_ws, viewer_ws) = TestRelay::start(Duration::from_secs(3600)).await;
+            let host = tokio::spawn(async move {
+                run_host_session_with_data_and_accept_and_2fa_with_factory(
+                    host_ws, PASSWORD, SESSION, || None::<FakeCapturer>,
+                    |width, height| H264Encoder::new(width, height, 15, 1_000_000),
+                    || Box::new(NoopInjector::default()) as Box<dyn InputInjector>,
+                    false, false, None, || async { true }, None, timings,
+                ).await
+            });
+            let viewer = spawn_viewer(viewer_ws, timings);
+            let error = timeout(Duration::from_secs(10), viewer.task).await.expect("viewer kept waiting").unwrap().expect_err("no capture ends the session");
+            assert_eq!(error.reason, DisconnectReason::AuthFailure, "{}", error.message);
+            assert_eq!(crate::reconnect::rejection_code(&error.message), Some(reject_code::CAPTURE_UNAVAILABLE));
+            assert!(host.await.unwrap().is_err());
         }
 
         #[tokio::test(flavor = "multi_thread")]
