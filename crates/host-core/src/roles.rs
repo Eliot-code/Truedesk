@@ -16,7 +16,7 @@ use protocol::{
     Tag,
 };
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, error::Error, fmt::Display, future::Future, sync::{atomic::{AtomicU32, Ordering}, Arc, Mutex, OnceLock}, time::{Duration, Instant}};
+use std::{collections::HashMap, error::Error, fmt::Display, future::Future, sync::{atomic::{AtomicU32, AtomicU64, Ordering}, Arc, Mutex, OnceLock}, time::{Duration, Instant}};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::WebSocketStream;
@@ -483,7 +483,9 @@ where
     // data channel. Host->viewer control frames must share one sealer (one
     // nonce sequence) on this key: a second Sealer::new on control_send_key
     // would restart the counter at 0 and reuse a nonce with MonitorList.
-    let monitor_list = Control::MonitorList { monitors: capturer.monitors() };
+    let monitors = capturer.monitors();
+    let monitor_ids: Vec<u32> = monitors.iter().map(|monitor| monitor.id).collect();
+    let monitor_list = Control::MonitorList { monitors };
     reliable.sender().send_frame(Tag::Control, &seal_control(&control_sealer, &monitor_list)).await?;
     if let Some(ready) = data_ready {
         let _ = ready.send(DataHandle {
@@ -506,7 +508,8 @@ where
     // Input injection makes blocking OS calls, so it runs on its own thread
     // and never stalls capture/encode/send or audio. The injector is built on
     // that thread because platform injectors (Enigo) can be thread-affine.
-    let inject_tx = spawn_injection_thread(injector_factory, Arc::clone(&dims))?;
+    let display = Arc::new(AtomicU64::new(pack_display(None)));
+    let inject_tx = spawn_injection_thread(injector_factory, Arc::clone(&dims), Arc::clone(&display))?;
     // Aborting the forwarder on exit drops the last injection sender, which
     // ends the injection thread together with the session.
     let mut input_forwarder = AbortOnDrop(tokio::spawn(forward_input(transport_rx, opener, inject_tx)));
@@ -532,7 +535,14 @@ where
                     Some(Control::Bye { .. }) => return Ok(()),
                     // The new monitor's frames arrive later; the video
                     // pipeline adapts to their size.
-                    Some(Control::SelectMonitor { id }) => video.send(VideoCommand::SelectMonitor(id)),
+                    Some(Control::SelectMonitor { id }) => {
+                        // Input follows the switch; the capturer ignores ids
+                        // it did not advertise, so input does too.
+                        if monitor_ids.contains(&id) {
+                            display.store(pack_display(Some(id)), Ordering::Release);
+                        }
+                        video.send(VideoCommand::SelectMonitor(id));
+                    }
                     Some(Control::RequestKeyframe) => video.send(VideoCommand::RequestKeyframe),
                     _ => {}
                 }
@@ -885,6 +895,12 @@ fn pack_dims(width: u16, height: u16) -> u32 { (u32::from(width) << 16) | u32::f
 
 fn unpack_dims(packed: u32) -> (u32, u32) { (packed >> 16, packed & 0xFFFF) }
 
+/// The shared display as an atomic value: 0 is the main display, a selected
+/// monitor id is tagged in the high half.
+fn pack_display(display: Option<u32>) -> u64 { display.map_or(0, |id| (1 << 32) | u64::from(id)) }
+
+fn unpack_display(packed: u64) -> Option<u32> { (packed >> 32 == 1).then_some(packed as u32) }
+
 struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
 
 impl<T> Drop for AbortOnDrop<T> {
@@ -893,9 +909,9 @@ impl<T> Drop for AbortOnDrop<T> {
 
 /// Start the dedicated input-injection thread. It builds the injector itself
 /// (keeping thread-affine backends on one OS thread), reads the current
-/// capture dimensions at injection time so a monitor switch applies to the
-/// next event, and exits once every sender is dropped.
-fn spawn_injection_thread<IF>(injector_factory: IF, dims: Arc<AtomicU32>) -> SessionResult<mpsc::Sender<InputEvent>>
+/// capture dimensions and shared display at injection time so a monitor
+/// switch applies to the next event, and exits once every sender is dropped.
+fn spawn_injection_thread<IF>(injector_factory: IF, dims: Arc<AtomicU32>, display: Arc<AtomicU64>) -> SessionResult<mpsc::Sender<InputEvent>>
 where
     IF: FnOnce() -> Box<dyn InputInjector> + Send + 'static,
 {
@@ -904,7 +920,13 @@ where
         .name("opendesk-input-inject".into())
         .spawn(move || {
             let mut injector = injector_factory();
+            let mut current = None;
             while let Some(event) = rx.blocking_recv() {
+                let selected = unpack_display(display.load(Ordering::Acquire));
+                if selected != current {
+                    injector.select_display(selected);
+                    current = selected;
+                }
                 let (width, height) = unpack_dims(dims.load(Ordering::Acquire));
                 injector.inject(&event, width, height);
             }
@@ -1630,7 +1652,8 @@ mod tests {
         }
         let (seen_tx, seen_rx) = std::sync::mpsc::channel();
         let dims = Arc::new(AtomicU32::new(pack_dims(640, 480)));
-        let tx = spawn_injection_thread(move || Box::new(Probe(seen_tx)) as Box<dyn InputInjector>, Arc::clone(&dims)).unwrap();
+        let display = Arc::new(AtomicU64::new(pack_display(None)));
+        let tx = spawn_injection_thread(move || Box::new(Probe(seen_tx)) as Box<dyn InputInjector>, Arc::clone(&dims), display).unwrap();
         let event = InputEvent::MouseButton { button: 1, down: true };
         tx.blocking_send(event).unwrap();
         assert_eq!(seen_rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap(), (640, 480));
@@ -1640,6 +1663,33 @@ mod tests {
         drop(tx);
         // The injector (and its probe sender) drops when the thread exits.
         assert_eq!(seen_rx.recv_timeout(std::time::Duration::from_secs(1)), Err(std::sync::mpsc::RecvTimeoutError::Disconnected));
+    }
+
+    #[test]
+    fn injection_thread_tells_the_injector_the_selected_display() {
+        struct Probe(std::sync::mpsc::Sender<Option<u32>>);
+        impl InputInjector for Probe {
+            fn inject(&mut self, _ev: &InputEvent, _w: u32, _h: u32) {}
+            fn select_display(&mut self, display: Option<u32>) { let _ = self.0.send(display); }
+        }
+        let (seen_tx, seen_rx) = std::sync::mpsc::channel();
+        let dims = Arc::new(AtomicU32::new(pack_dims(640, 480)));
+        let display = Arc::new(AtomicU64::new(pack_display(None)));
+        let tx = spawn_injection_thread(move || Box::new(Probe(seen_tx)) as Box<dyn InputInjector>, dims, Arc::clone(&display)).unwrap();
+        let event = InputEvent::MouseMove { x: 0, y: 0 };
+        let wait = std::time::Duration::from_secs(1);
+        // The main display is the injector's default: nothing to report yet.
+        tx.blocking_send(event).unwrap();
+        display.store(pack_display(Some(0)), Ordering::Release);
+        tx.blocking_send(event).unwrap();
+        tx.blocking_send(event).unwrap();
+        assert_eq!(seen_rx.recv_timeout(wait).unwrap(), Some(0));
+        display.store(pack_display(Some(u32::MAX)), Ordering::Release);
+        tx.blocking_send(event).unwrap();
+        assert_eq!(seen_rx.recv_timeout(wait).unwrap(), Some(u32::MAX));
+        drop(tx);
+        // Reported once per change, then the thread exits.
+        assert_eq!(seen_rx.recv_timeout(wait), Err(std::sync::mpsc::RecvTimeoutError::Disconnected));
     }
 
     /// (seq, keyframe, width, height) from a video plaintext header.
