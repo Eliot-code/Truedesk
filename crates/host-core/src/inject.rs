@@ -6,18 +6,53 @@ pub fn norm_to_pixel(coord: i32, screen: u32) -> i32 {
     ((i64::from(coord).clamp(0, 65_535) * max_pixel + 32_767) / 65_535) as i32
 }
 
+/// A display's rectangle in the global desktop space the pointer moves in:
+/// points on macOS (origin at the main display's top-left, negative for
+/// displays left of or above it), virtual-screen pixels on Windows.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DisplayBounds {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// Maps protocol pointer coordinates (0..=65535 across the shared display)
+/// onto `bounds`, clamped to the display's last point.
+///
+/// The viewer normalizes against the video, whose pixel size (Retina-native
+/// or scaled to the stream size) says nothing about the units the OS moves
+/// the pointer in, so only the display's own bounds give the right spot.
+pub fn map_to_bounds(x: i32, y: i32, bounds: DisplayBounds) -> (i32, i32) {
+    let axis = |coord: i32, origin: f64, size: f64| {
+        let fraction = f64::from(coord.clamp(0, 65_535)) / 65_535.0;
+        let last = (origin + size - 1.0).max(origin);
+        (origin + fraction * size).clamp(origin, last).floor() as i32
+    };
+    (axis(x, bounds.x, bounds.width), axis(y, bounds.y, bounds.height))
+}
+
 pub trait InputInjector {
     fn inject(&mut self, ev: &InputEvent, screen_w: u32, screen_h: u32);
+
+    /// The shared display changed: `Some(id)` is a monitor id from the
+    /// capturer's list, `None` the main display. Pointer moves land on it.
+    fn select_display(&mut self, _display: Option<u32>) {}
 }
 
 impl<T: InputInjector + ?Sized> InputInjector for Box<T> {
     fn inject(&mut self, ev: &InputEvent, screen_w: u32, screen_h: u32) {
         (**self).inject(ev, screen_w, screen_h);
     }
+
+    fn select_display(&mut self, display: Option<u32>) {
+        (**self).select_display(display);
+    }
 }
 
 pub struct EnigoInjector {
     enigo: Enigo,
+    display: Option<u32>,
 }
 
 impl EnigoInjector {
@@ -29,20 +64,28 @@ impl EnigoInjector {
         let settings = Settings { open_prompt_to_get_permissions: false, ..Settings::default() };
         Enigo::new(&settings)
             .ok()
-            .map(|enigo| Self { enigo })
+            .map(|enigo| Self { enigo, display: None })
     }
 }
 
 impl InputInjector for EnigoInjector {
     fn inject(&mut self, ev: &InputEvent, screen_w: u32, screen_h: u32) {
         match *ev {
-            InputEvent::MouseMove { x, y } => {
-                let _ = self.enigo.move_mouse(
-                    norm_to_pixel(x, screen_w),
-                    norm_to_pixel(y, screen_h),
-                    Coordinate::Abs,
-                );
-            }
+            InputEvent::MouseMove { x, y } => match platform::display_bounds(self.display) {
+                Some(bounds) => {
+                    let (x, y) = map_to_bounds(x, y, bounds);
+                    platform::move_pointer(&mut self.enigo, x, y);
+                }
+                // No display geometry (Linux): fall back to the capture size,
+                // which matches the pointer space for a single X11 screen.
+                None => {
+                    let _ = self.enigo.move_mouse(
+                        norm_to_pixel(x, screen_w),
+                        norm_to_pixel(y, screen_h),
+                        Coordinate::Abs,
+                    );
+                }
+            },
             InputEvent::MouseButton { button, down } => {
                 let Some(button) = map_button(button) else {
                     return;
@@ -84,6 +127,162 @@ impl InputInjector for EnigoInjector {
             }
         }
     }
+
+    fn select_display(&mut self, display: Option<u32>) {
+        self.display = display;
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod platform {
+    use super::DisplayBounds;
+    use enigo::{Coordinate, Enigo, Mouse};
+
+    #[repr(C)]
+    struct CGRect {
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+    }
+
+    // CoreGraphics is already linked through enigo and scap.
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGMainDisplayID() -> u32;
+        fn CGDisplayBounds(display: u32) -> CGRect;
+    }
+
+    /// The display's bounds in global points, the space CGEvent (and so
+    /// enigo) positions the pointer in. A display that is gone reports an
+    /// empty rect; the main display is used then.
+    pub fn display_bounds(display: Option<u32>) -> Option<DisplayBounds> {
+        let bounds = |id: u32| {
+            // SAFETY: plain CoreGraphics queries; unknown ids yield an empty
+            // rect rather than an error.
+            let rect = unsafe { CGDisplayBounds(id) };
+            (rect.width >= 1.0 && rect.height >= 1.0).then_some(DisplayBounds {
+                x: rect.x,
+                y: rect.y,
+                width: rect.width,
+                height: rect.height,
+            })
+        };
+        display.and_then(bounds).or_else(|| bounds(unsafe { CGMainDisplayID() }))
+    }
+
+    pub fn move_pointer(enigo: &mut Enigo, x: i32, y: i32) {
+        let _ = enigo.move_mouse(x, y, Coordinate::Abs);
+    }
+}
+
+#[cfg(target_os = "windows")]
+mod platform {
+    use super::DisplayBounds;
+    use enigo::{Coordinate, Enigo, Mouse};
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromPoint, HMONITOR, MONITORINFO, MONITOR_DEFAULTTOPRIMARY,
+    };
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_MOVE,
+        MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+        SM_YVIRTUALSCREEN,
+    };
+
+    /// The monitor's rectangle on the virtual screen. Monitor ids are the
+    /// capturer's HMONITOR values; a stale one falls back to the primary.
+    pub fn display_bounds(display: Option<u32>) -> Option<DisplayBounds> {
+        let bounds = |monitor: HMONITOR| {
+            let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+            // SAFETY: `info` is a valid MONITORINFO with cbSize set; an
+            // invalid handle makes the call fail.
+            if !unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
+                return None;
+            }
+            let rect = info.rcMonitor;
+            (rect.right > rect.left && rect.bottom > rect.top).then_some(DisplayBounds {
+                x: f64::from(rect.left),
+                y: f64::from(rect.top),
+                width: f64::from(rect.right - rect.left),
+                height: f64::from(rect.bottom - rect.top),
+            })
+        };
+        display
+            .and_then(|id| bounds(HMONITOR(id as usize as *mut core::ffi::c_void)))
+            // SAFETY: MonitorFromPoint has no preconditions.
+            .or_else(|| bounds(unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) }))
+    }
+
+    fn virtual_screen() -> DisplayBounds {
+        // SAFETY: GetSystemMetrics has no preconditions.
+        let metric = |index| f64::from(unsafe { GetSystemMetrics(index) });
+        DisplayBounds {
+            x: metric(SM_XVIRTUALSCREEN),
+            y: metric(SM_YVIRTUALSCREEN),
+            width: metric(SM_CXVIRTUALSCREEN),
+            height: metric(SM_CYVIRTUALSCREEN),
+        }
+    }
+
+    /// Moves the pointer to virtual-screen pixel (x, y). Enigo's absolute
+    /// moves only cover the primary monitor, so this sends the move itself
+    /// relative to the whole virtual desktop.
+    pub fn move_pointer(enigo: &mut Enigo, x: i32, y: i32) {
+        let Some((dx, dy)) = super::virtual_desk_absolute(x, y, virtual_screen()) else {
+            let _ = enigo.move_mouse(x, y, Coordinate::Abs);
+            return;
+        };
+        let input = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx,
+                    dy,
+                    mouseData: 0,
+                    dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+        // SAFETY: one fully initialized INPUT with its correct size.
+        unsafe { SendInput(&[input], size_of::<INPUT>() as i32) };
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+mod platform {
+    use super::DisplayBounds;
+    use enigo::Enigo;
+
+    /// Not available: X11 maps the whole root window and PipeWire capture
+    /// gives no monitor geometry, so the capture size is used instead.
+    pub fn display_bounds(_display: Option<u32>) -> Option<DisplayBounds> {
+        None
+    }
+
+    pub fn move_pointer(_enigo: &mut Enigo, _x: i32, _y: i32) {}
+}
+
+/// Converts virtual-screen pixel (x, y) to the 0..=65535 range that
+/// `SendInput` uses with `MOUSEEVENTF_VIRTUALDESK`. `None` if the virtual
+/// screen is empty. Windows turns the value back into a pixel by scaling
+/// with `size / 65536` and truncating, so this rounds up to land on the
+/// pixel itself rather than its left or upper neighbour.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn virtual_desk_absolute(x: i32, y: i32, screen: DisplayBounds) -> Option<(i32, i32)> {
+    if screen.width < 1.0 || screen.height < 1.0 {
+        return None;
+    }
+    let axis = |pixel: i32, origin: f64, size: f64| {
+        let offset = (f64::from(pixel) - origin).clamp(0.0, size - 1.0);
+        ((offset * 65_536.0 / size).ceil() as i32).min(65_535)
+    };
+    Some((axis(x, screen.x, screen.width), axis(y, screen.y, screen.height)))
 }
 
 fn map_button(button: u8) -> Option<Button> {
@@ -194,6 +393,67 @@ mod tests {
         assert_eq!(norm_to_pixel(0, 1920), 0);
         assert_eq!(norm_to_pixel(65535, 1920), 1919);
         assert_eq!(norm_to_pixel(32768, 1000), 500);
+    }
+
+    fn bounds(x: f64, y: f64, width: f64, height: f64) -> DisplayBounds {
+        DisplayBounds { x, y, width, height }
+    }
+
+    #[test]
+    fn map_to_bounds_uses_points_not_capture_pixels() {
+        // A Retina MacBook: 2880x1800 pixels, 1440x900 points. The video may
+        // be 2880 or 1920 wide; the pointer still moves in points.
+        let retina = bounds(0.0, 0.0, 1440.0, 900.0);
+        assert_eq!(map_to_bounds(0, 0, retina), (0, 0));
+        assert_eq!(map_to_bounds(32_768, 32_768, retina), (720, 450));
+        assert_eq!(map_to_bounds(65_535, 65_535, retina), (1439, 899));
+    }
+
+    #[test]
+    fn map_to_bounds_offsets_secondary_displays() {
+        // Right of the main display.
+        let right = bounds(1440.0, 0.0, 1920.0, 1080.0);
+        assert_eq!(map_to_bounds(0, 0, right), (1440, 0));
+        assert_eq!(map_to_bounds(65_535, 65_535, right), (3359, 1079));
+        // Left of and above the main display: negative origin.
+        let left = bounds(-1920.0, -1080.0, 1920.0, 1080.0);
+        assert_eq!(map_to_bounds(0, 0, left), (-1920, -1080));
+        assert_eq!(map_to_bounds(32_768, 32_768, left), (-960, -540));
+        assert_eq!(map_to_bounds(65_535, 65_535, left), (-1, -1));
+    }
+
+    #[test]
+    fn map_to_bounds_clamps_out_of_range_input() {
+        let left = bounds(-1280.0, 0.0, 1280.0, 800.0);
+        assert_eq!(map_to_bounds(-5, -5, left), (-1280, 0));
+        assert_eq!(map_to_bounds(70_000, i32::MAX, left), (-1, 799));
+        assert_eq!(map_to_bounds(i32::MIN, 65_535, left), (-1280, 799));
+    }
+
+    #[test]
+    fn map_to_bounds_handles_fractional_bounds() {
+        // Scaled display modes can report non-integral point sizes.
+        let scaled = bounds(0.0, 0.0, 1496.5, 967.5);
+        assert_eq!(map_to_bounds(65_535, 65_535, scaled), (1495, 966));
+        assert_eq!(map_to_bounds(0, 0, scaled), (0, 0));
+    }
+
+    #[test]
+    fn virtual_desk_absolute_round_trips_every_pixel() {
+        // Two 1920x1080 monitors, the secondary left of the primary: the
+        // virtual screen spans x -1920..1920.
+        let screen = bounds(-1920.0, 0.0, 3840.0, 1080.0);
+        for x in [-1920, -1919, -1, 0, 1, 959, 1919] {
+            let (dx, _) = virtual_desk_absolute(x, 0, screen).unwrap();
+            assert!((0..=65_535).contains(&dx));
+            // Windows: pixel = origin + trunc(dx * size / 65536).
+            let back = -1920 + (i64::from(dx) * 3840 / 65_536) as i32;
+            assert_eq!(back, x, "pixel {x} via {dx}");
+        }
+        // Off-screen pixels clamp to the edge pixels.
+        let (dx, dy) = virtual_desk_absolute(-5000, 5000, screen).unwrap();
+        assert_eq!((dx, dy * 1080 / 65_536), (0, 1079));
+        assert_eq!(virtual_desk_absolute(0, 0, bounds(0.0, 0.0, 0.0, 0.0)), None);
     }
 
     #[test]
