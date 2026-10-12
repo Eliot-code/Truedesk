@@ -58,6 +58,7 @@ jobs:
 
       # These bundles are intentionally unsigned. No signing identities,
       # certificates, notarization, or Windows signing secrets are used.
+      # The only key is the updater's minisign key (see docs/RELEASE.md).
       - name: Require a default relay
         shell: bash
         env:
@@ -68,25 +69,67 @@ jobs:
             *) echo "Set the repo variable OPENDESK_DEFAULT_RELAY (e.g. wss://relay.example.com/ws)"; exit 1 ;;
           esac
 
+      # The app version comes from the tag, so the updater can tell builds
+      # apart. MSI only takes numeric versions: v0.1.0-beta.5 -> 0.1.0.5.
+      # Without the updater key the release still builds, just without
+      # updater artifacts, and installed apps won't be offered it.
+      - name: Configure release version and updater
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+          HAS_UPDATER_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+        run: |
+          version="${TAG#v}"
+          if ! [[ "$version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(-([0-9A-Za-z.]+))?$ ]]; then
+            echo "::error::Tag $TAG is not vX.Y.Z or vX.Y.Z-pre.N"; exit 1
+          fi
+          wix="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+          if [ -n "${BASH_REMATCH[5]}" ]; then
+            build="$(grep -oE '[0-9]+$' <<<"${BASH_REMATCH[5]}" || true)"
+            wix="$wix.${build:-0}"
+          fi
+          updater=true
+          if [ "$HAS_UPDATER_KEY" != "true" ]; then
+            echo "::warning::TAURI_SIGNING_PRIVATE_KEY is not set: building without updater artifacts. Installed apps won't be offered this release."
+            updater=false
+          fi
+          config="$RUNNER_TEMP/release.conf.json"
+          printf '{"version":"%s","bundle":{"createUpdaterArtifacts":%s,"windows":{"wix":{"version":"%s"}}}}\n' \
+            "$version" "$updater" "$wix" > "$config"
+          cat "$config"
+          echo "TAURI_RELEASE_CONFIG=$config" >> "$GITHUB_ENV"
+
       - name: Build unsigned Tauri bundles
         working-directory: viewer
+        shell: bash
         env:
           OPENDESK_DEFAULT_RELAY: ${{ vars.OPENDESK_DEFAULT_RELAY }}
-        run: npm run tauri build
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npx tauri build --config "$TAURI_RELEASE_CONFIG"
 
       - name: Upload unsigned bundles
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: opendesk-${{ runner.os }}-unsigned
-          # Installers only; the bundle dir also holds staging trees
-          # (AppDir, .app, unpacked .deb) that aren't release assets.
+          # Installers and updater files only; the bundle dir also holds
+          # staging trees (AppDir, .app, unpacked .deb) that aren't release
+          # assets. The .sig files and the macOS .app.tar.gz exist only
+          # when the updater key is set.
           path: |
             viewer/src-tauri/target/release/bundle/dmg/*.dmg
+            viewer/src-tauri/target/release/bundle/macos/*.app.tar.gz
+            viewer/src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
             viewer/src-tauri/target/release/bundle/appimage/*.AppImage
+            viewer/src-tauri/target/release/bundle/appimage/*.AppImage.sig
             viewer/src-tauri/target/release/bundle/deb/*.deb
+            viewer/src-tauri/target/release/bundle/deb/*.deb.sig
             viewer/src-tauri/target/release/bundle/rpm/*.rpm
+            viewer/src-tauri/target/release/bundle/rpm/*.rpm.sig
             viewer/src-tauri/target/release/bundle/nsis/*-setup.exe
+            viewer/src-tauri/target/release/bundle/nsis/*-setup.exe.sig
             viewer/src-tauri/target/release/bundle/msi/*.msi
+            viewer/src-tauri/target/release/bundle/msi/*.msi.sig
           if-no-files-found: error
           retention-days: 14
 
@@ -100,6 +143,19 @@ jobs:
         with:
           path: release-artifacts
 
+      # Tauri names it OpenDesk.app.tar.gz; give it a versioned asset name.
+      - name: Name the macOS update archive
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          for archive in release-artifacts/*/macos/*.app.tar.gz; do
+            [ -e "$archive" ] || continue
+            target="$(dirname "$archive")/OpenDesk_${TAG#v}_aarch64.app.tar.gz"
+            mv "$archive" "$target"
+            if [ -e "$archive.sig" ]; then mv "$archive.sig" "$target.sig"; fi
+          done
+          find release-artifacts -type f | sort
+
       # Release assets remain unsigned; users may need to bypass Gatekeeper,
       # SmartScreen, or Linux desktop trust prompts when launching them.
       - name: Publish GitHub release
@@ -111,3 +167,31 @@ jobs:
           body_path: .github/RELEASE_NOTES.md
           generate_release_notes: true
           files: release-artifacts/**/*
+
+      # Installed apps poll one fixed URL:
+      #   https://github.com/<repo>/releases/download/updater/latest.json
+      # /releases/latest/download/ would skip pre-releases, and every beta is
+      # one, so the manifest lives on its own "updater" pre-release and is
+      # replaced on each publish. See docs/RELEASE.md.
+      - name: Update the updater manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          dir="$RUNNER_TEMP/updater"
+          mkdir -p "$dir"
+          if gh release view updater --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release download updater --repo "$GITHUB_REPOSITORY" --pattern latest.json --dir "$dir" || true
+            if [ -e "$dir/latest.json" ]; then mv "$dir/latest.json" "$dir/previous.json"; fi
+          else
+            gh release create updater --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --prerelease --latest=false --title "Updater manifest" \
+              --notes "Used by the OpenDesk in-app updater. Download installers from the versioned releases."
+          fi
+          node .github/scripts/updater-manifest.mjs release-artifacts "$TAG" "$GITHUB_REPOSITORY" \
+            "$dir/latest.json" "$dir/previous.json"
+          if [ -e "$dir/latest.json" ]; then
+            gh release upload updater "$dir/latest.json" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            echo "::warning::Updater manifest not updated; installed apps won't be offered $TAG."
+          fi
