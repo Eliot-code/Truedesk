@@ -475,6 +475,7 @@ where
         HOST_ICE_CONTROLLING,
         signaling,
         relay,
+        Some(transport::FeedbackKeys::derive(&shared, true)),
         transport::default_agent_config(),
         Duration::from_secs(3),
     )
@@ -1138,6 +1139,7 @@ where
         VIEWER_ICE_CONTROLLING,
         signaling,
         relay,
+        Some(transport::FeedbackKeys::derive(&shared, false)),
         transport::default_agent_config(),
         Duration::from_secs(3),
     );

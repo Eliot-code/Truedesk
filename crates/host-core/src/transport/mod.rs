@@ -1,16 +1,22 @@
 //! Transport abstractions for carrying sealed protocol frames.
 
 pub mod direct;
+mod feedback;
 pub mod ice;
+mod pacer;
+pub mod rate;
+mod recovery;
 pub mod relay;
 pub mod reliable;
 
-pub use direct::DirectTransport;
+pub use direct::{DirectTransport, FeedbackKeys};
+pub use rate::RateControl;
 pub use ice::RelayIceSignaling;
 pub use relay::RelayTransport;
 pub use reliable::{ReliableChannel, ReliableSender};
 
 use ice::{establish_ice, IceOutcome, IceSignaling};
+use std::sync::Arc;
 use std::time::Duration;
 use webrtc_ice::agent::agent_config::AgentConfig;
 
@@ -61,6 +67,11 @@ pub trait TransportSender: Send {
     /// frame, so a slow link makes it skip captures instead of building
     /// latency. Cancel safe; the default (UDP) is always ready.
     async fn ready_for_video(&mut self) {}
+
+    /// Bitrate state the host encoder follows: the encoder publishes its
+    /// ceiling and applies the target this transport estimates for the path.
+    /// The default is a detached instance that always yields the ceiling.
+    fn rate_control(&self) -> Arc<RateControl> { Arc::new(RateControl::default()) }
 }
 
 /// The independently owned receiving half of a transport.
@@ -97,6 +108,7 @@ pub async fn establish<S, R>(
     controlling: bool,
     signaling: S,
     relay_fallback: RelayTransport<R>,
+    feedback: Option<FeedbackKeys>,
     agent_config: AgentConfig,
     deadline: Duration,
 ) -> AnyTransport<R>
@@ -107,7 +119,10 @@ where
     match establish_ice(agent_config, controlling, signaling, deadline).await {
         IceOutcome::Nominated(conn) => {
             log::info!("transport selected: direct");
-            AnyTransport::Direct(DirectTransport::new(conn))
+            AnyTransport::Direct(match feedback {
+                Some(keys) => DirectTransport::with_feedback(conn, keys),
+                None => DirectTransport::new(conn),
+            })
         }
         IceOutcome::TimedOut => {
             log::info!("transport selected: relay (ICE timeout)");
@@ -143,6 +158,7 @@ mod tests {
                 let mut channel = ReliableChannel::spawn(ws);
                 RelayTransport::<tokio::io::DuplexStream>::new(channel.sender(), channel.take_media_rx().unwrap())
             },
+            None,
             AgentConfig::default(),
             Duration::from_millis(20),
         )

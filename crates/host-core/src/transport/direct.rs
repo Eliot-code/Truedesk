@@ -1,49 +1,110 @@
 //! Direct UDP transport over a nominated ICE connection.
+//!
+//! Sealed frames are split into datagrams (see [`super::recovery`]) and
+//! handed to a writer task that paces them at 1.5x the target bitrate, with
+//! audio/input and retransmissions ahead of video. A reader task reassembles
+//! incoming messages and, when the session has feedback keys, exchanges
+//! sealed feedback with the peer (see [`super::feedback`]): the media sender
+//! sends reports, the receiver answers with loss counters and NACKs missing
+//! fragments, the sender resends them from a ring of recent messages and
+//! adapts the bitrate the encoder follows.
 
+use super::feedback::{self, Feedback};
+use super::pacer::Pacer;
+use super::rate::{AimdEstimator, PathSample, RateControl};
+use super::recovery::{fragment_message, ReceiveTracker, RecvStats, RetransmitRing, FRAG_HEADER_LEN, MAX_MESSAGE_LEN};
 use super::{Transport, TransportError, TransportReceiver, TransportSender};
-use protocol::{frame, Tag};
-use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
+use protocol::{frame, Opener, Sealer, Tag};
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
+use tokio::sync::{mpsc, Notify};
+use tokio::task::JoinHandle;
 use webrtc_util::conn::Conn;
 
-const FRAG_HEADER_LEN: usize = 8;
-/// Keep UDP datagrams comfortably below the usual Internet path MTU.
-const FRAG_PAYLOAD: usize = 1100;
-const MAX_IN_FLIGHT_MESSAGES: usize = 8;
+/// Video waiting to be sent beyond which `send` waits (the host normally
+/// waits for [`TransportSender::ready_for_video`] instead).
+const MAX_QUEUED_VIDEO_BYTES: usize = 2 * 1024 * 1024;
+/// Reassembled messages waiting for the consumer; more are dropped.
+const RECEIVE_QUEUE: usize = 512;
+/// Feedback timer resolution (NACK timers, reports).
+const TICK: Duration = Duration::from_millis(5);
+/// How often the media sender sends a sender report.
+const REPORT_INTERVAL: Duration = Duration::from_millis(100);
+/// Retransmissions one NACK packet can queue.
+const MAX_RESENDS_PER_NACK: usize = 512;
+
+/// Keys for the sealed feedback channel of a direct session.
+#[derive(Clone)]
+pub struct FeedbackKeys {
+    send: [u8; 32],
+    recv: [u8; 32],
+    /// The host sends media, so it sends reports and adapts the bitrate;
+    /// the viewer answers them.
+    media_sender: bool,
+}
+
+impl FeedbackKeys {
+    /// Feedback keys for this side of the session (`shared` is the PAKE
+    /// secret).
+    pub fn derive(shared: &[u8], is_host: bool) -> Self {
+        let (send, recv) = protocol::kex::derive_transport_keys(shared, is_host);
+        Self { send, recv, media_sender: is_host }
+    }
+}
 
 /// Carries sealed protocol frames over application-level UDP fragmentation.
 pub struct DirectTransport {
     pub(crate) conn: Arc<dyn Conn + Send + Sync>,
-}
-
-pub struct DirectSender {
-    conn: Arc<dyn Conn + Send + Sync>,
-    next_msg_id: u32,
-}
-
-pub struct DirectReceiver {
-    conn: Arc<dyn Conn + Send + Sync>,
-    reassembler: Reassembler,
+    feedback: Option<FeedbackKeys>,
 }
 
 impl DirectTransport {
+    /// A transport without feedback: paced sending and beta.4-compatible
+    /// receiving, no retransmission or bitrate adaptation.
     pub(crate) fn new(conn: Arc<dyn Conn + Send + Sync>) -> Self {
-        Self { conn }
+        Self { conn, feedback: None }
     }
+
+    pub(crate) fn with_feedback(conn: Arc<dyn Conn + Send + Sync>, keys: FeedbackKeys) -> Self {
+        Self { conn, feedback: Some(keys) }
+    }
+}
+
+pub struct DirectSender {
+    shared: Arc<Shared>,
+    _writer: AbortOnDrop,
+}
+
+pub struct DirectReceiver {
+    messages: mpsc::Receiver<Vec<u8>>,
+    _reader: AbortOnDrop,
 }
 
 #[async_trait::async_trait]
 impl Transport for DirectTransport {
     fn into_split(self) -> (Box<dyn TransportSender>, Box<dyn TransportReceiver>) {
+        let shared = Arc::new(Shared {
+            queue: Mutex::new(Queue::new(Instant::now())),
+            work: Notify::new(),
+            drained: Notify::new(),
+            rate: Arc::new(RateControl::default()),
+        });
+        let (deliver, messages) = mpsc::channel(RECEIVE_QUEUE);
+        let feedback = self.feedback.map(|keys| FeedbackState {
+            sealer: Sealer::new(keys.send),
+            opener: Opener::new(keys.recv),
+            media_sender: keys.media_sender,
+            start: Instant::now(),
+            last_report: None,
+            estimator: AimdEstimator::default(),
+            last_counts: RecvStats::default(),
+        });
+        let writer = tokio::spawn(run_writer(Arc::clone(&self.conn), Arc::clone(&shared)));
+        let reader = tokio::spawn(run_reader(self.conn, Arc::clone(&shared), deliver, feedback));
         (
-            Box::new(DirectSender {
-                conn: Arc::clone(&self.conn),
-                next_msg_id: 0,
-            }),
-            Box::new(DirectReceiver {
-                conn: self.conn,
-                reassembler: Reassembler::new(MAX_IN_FLIGHT_MESSAGES),
-            }),
+            Box::new(DirectSender { shared, _writer: AbortOnDrop(writer) }),
+            Box::new(DirectReceiver { messages, _reader: AbortOnDrop(reader) }),
         )
     }
 }
@@ -52,146 +113,365 @@ impl Transport for DirectTransport {
 impl TransportSender for DirectSender {
     async fn send(&mut self, tag: Tag, sealed: &[u8]) -> Result<(), TransportError> {
         let message = frame::wrap(tag, sealed);
-        let fragments = fragment_message(&message, self.next_msg_id)
-            .map_err(|error| TransportError::Io(error.to_string()))?;
-        self.next_msg_id = self.next_msg_id.wrapping_add(1);
-
-        for datagram in fragments {
-            let sent = self
-                .conn
-                .send(&datagram)
-                .await
-                .map_err(|error| TransportError::Io(error.to_string()))?;
-            if sent != datagram.len() {
-                return Err(TransportError::Io(format!(
-                    "UDP send was incomplete: sent {sent} of {} bytes",
-                    datagram.len()
-                )));
+        if message.len() > MAX_MESSAGE_LEN {
+            return Err(TransportError::Io("message has too many fragments".into()));
+        }
+        if tag == Tag::Video {
+            self.shared.wait_until(|queue| queue.video_bytes < MAX_QUEUED_VIDEO_BYTES).await;
+        }
+        {
+            let mut queue = self.shared.lock();
+            if let Some(error) = &queue.error {
+                return Err(error.clone());
+            }
+            if tag == Tag::Video {
+                queue.video_bytes += message.len();
+                queue.pending_video.push_back(message);
+            } else {
+                queue.pending_urgent.push_back(message);
             }
         }
+        self.shared.work.notify_one();
         Ok(())
     }
+
+    async fn ready_for_video(&mut self) {
+        self.shared.wait_until(|queue| queue.video_bytes == 0).await;
+    }
+
+    fn rate_control(&self) -> Arc<RateControl> { Arc::clone(&self.shared.rate) }
 }
 
 #[async_trait::async_trait]
 impl TransportReceiver for DirectReceiver {
     async fn recv(&mut self) -> Option<(Tag, Vec<u8>)> {
-        let mut buf = vec![0u8; 65_535];
         loop {
-            let size = self.conn.recv(&mut buf).await.ok()?;
-            let Some(message) = self.reassembler.push(&buf[..size]) else {
-                continue;
-            };
-            let Some((tag, body)) = frame::unwrap(&message) else {
-                continue;
-            };
-            return Some((tag, body.to_vec()));
+            let message = self.messages.recv().await?;
+            if let Some((tag, body)) = frame::unwrap(&message) {
+                return Some((tag, body.to_vec()));
+            }
         }
     }
 }
 
-/// Fragment a complete wrapped frame. The header uses network byte order.
-fn fragment_message(message: &[u8], msg_id: u32) -> Result<Vec<Vec<u8>>, &'static str> {
-    if message.is_empty() {
-        return Err("cannot fragment an empty message");
+struct AbortOnDrop(JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) { self.0.abort(); }
+}
+
+/// State shared by the sender handle, the writer and the reader.
+struct Shared {
+    queue: Mutex<Queue>,
+    /// Wakes the writer: something was queued.
+    work: Notify,
+    /// Wakes senders: video drained, or the writer failed.
+    drained: Notify,
+    rate: Arc<RateControl>,
+}
+
+impl Shared {
+    fn lock(&self) -> MutexGuard<'_, Queue> {
+        self.queue.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
-    let frag_count = message.len().div_ceil(FRAG_PAYLOAD);
-    let frag_count = u16::try_from(frag_count).map_err(|_| "message has too many fragments")?;
-    let mut fragments = Vec::with_capacity(frag_count as usize);
 
-    for (index, chunk) in message.chunks(FRAG_PAYLOAD).enumerate() {
-        let mut datagram = Vec::with_capacity(FRAG_HEADER_LEN + chunk.len());
-        datagram.extend_from_slice(&msg_id.to_be_bytes());
-        datagram.extend_from_slice(&(index as u16).to_be_bytes());
-        datagram.extend_from_slice(&frag_count.to_be_bytes());
-        datagram.extend_from_slice(chunk);
-        fragments.push(datagram);
+    /// Waits until `ready` holds or the writer failed. Cancel safe.
+    async fn wait_until(&self, ready: impl Fn(&Queue) -> bool) {
+        loop {
+            let drained = self.drained.notified();
+            tokio::pin!(drained);
+            drained.as_mut().enable();
+            {
+                let queue = self.lock();
+                if queue.error.is_some() || ready(&queue) {
+                    return;
+                }
+            }
+            drained.await;
+        }
     }
-    Ok(fragments)
 }
 
-struct InFlightMessage {
-    frag_count: u16,
-    fragments: Vec<Option<Vec<u8>>>,
-    received: usize,
+struct Datagram {
+    bytes: Arc<[u8]>,
+    /// Message id and fragment index of a first transmission.
+    origin: Option<(u32, u16)>,
 }
 
-/// Reassembles fragments without retransmission. A missing fragment means the
-/// frame is discarded when its slot is evicted; video recovers on a keyframe.
-struct Reassembler {
-    max_in_flight: usize,
-    messages: HashMap<u32, InFlightMessage>,
-    oldest: VecDeque<u32>,
+/// Outgoing datagrams. Message ids are assigned when a message starts
+/// going out, so ids on the wire follow send order even though urgent
+/// messages overtake queued video.
+struct Queue {
+    next_msg_id: u32,
+    /// Retransmissions and fragments of started audio/input/data messages.
+    urgent: VecDeque<Datagram>,
+    pending_urgent: VecDeque<Vec<u8>>,
+    video: VecDeque<Datagram>,
+    pending_video: VecDeque<Vec<u8>>,
+    /// Unsent video payload bytes (queued and started messages).
+    video_bytes: usize,
+    ring: RetransmitRing,
+    pacer: Pacer,
+    error: Option<TransportError>,
 }
 
-impl Reassembler {
-    fn new(max_in_flight: usize) -> Self {
+impl Queue {
+    fn new(now: Instant) -> Self {
         Self {
-            max_in_flight,
-            messages: HashMap::new(),
-            oldest: VecDeque::new(),
+            next_msg_id: 0,
+            urgent: VecDeque::new(),
+            pending_urgent: VecDeque::new(),
+            video: VecDeque::new(),
+            pending_video: VecDeque::new(),
+            video_bytes: 0,
+            ring: RetransmitRing::default(),
+            pacer: Pacer::new(now),
+            error: None,
         }
     }
 
-    fn push(&mut self, datagram: &[u8]) -> Option<Vec<u8>> {
-        if datagram.len() < FRAG_HEADER_LEN || datagram.len() > FRAG_HEADER_LEN + FRAG_PAYLOAD {
-            return None;
-        }
-        let msg_id = u32::from_be_bytes(datagram[0..4].try_into().ok()?);
-        let frag_index = u16::from_be_bytes(datagram[4..6].try_into().ok()?);
-        let frag_count = u16::from_be_bytes(datagram[6..8].try_into().ok()?);
-        if frag_count == 0 || frag_index >= frag_count {
-            return None;
-        }
+    /// Fragments a message under the next id and records it for resending.
+    fn start(&mut self, message: &[u8]) -> VecDeque<Datagram> {
+        let msg_id = self.next_msg_id;
+        self.next_msg_id = msg_id.wrapping_add(1);
+        // `send` rejected messages too large to fragment.
+        let fragments = fragment_message(message, msg_id).unwrap_or_default();
+        self.ring.insert(msg_id, fragments.clone());
+        fragments
+            .into_iter()
+            .enumerate()
+            .map(|(index, bytes)| Datagram { bytes, origin: Some((msg_id, index as u16)) })
+            .collect()
+    }
 
-        if !self.messages.contains_key(&msg_id) {
-            self.evict_if_full();
-            self.messages.insert(
-                msg_id,
-                InFlightMessage {
-                    frag_count,
-                    fragments: (0..frag_count).map(|_| None).collect(),
-                    received: 0,
+    /// The length of the datagram that goes next, starting a message if
+    /// needed.
+    fn peek_len(&mut self) -> Option<usize> {
+        if self.urgent.is_empty() {
+            if let Some(message) = self.pending_urgent.pop_front() {
+                self.urgent = self.start(&message);
+            }
+        }
+        if let Some(datagram) = self.urgent.front() {
+            return Some(datagram.bytes.len());
+        }
+        if self.video.is_empty() {
+            if let Some(message) = self.pending_video.pop_front() {
+                self.video = self.start(&message);
+            }
+        }
+        self.video.front().map(|datagram| datagram.bytes.len())
+    }
+
+    /// Takes the datagram [`Self::peek_len`] described. Returns whether
+    /// that drained the video queue.
+    fn pop(&mut self) -> Option<(Arc<[u8]>, bool)> {
+        let (datagram, video) = match self.urgent.pop_front() {
+            Some(datagram) => (datagram, false),
+            None => (self.video.pop_front()?, true),
+        };
+        if let Some((msg_id, index)) = datagram.origin {
+            self.ring.mark_sent(msg_id, index);
+        }
+        let mut drained = false;
+        if video {
+            self.video_bytes = self.video_bytes.saturating_sub(datagram.bytes.len() - FRAG_HEADER_LEN);
+            if self.video.is_empty() && self.pending_video.is_empty() {
+                self.video_bytes = 0;
+                drained = true;
+            }
+        }
+        Some((datagram.bytes, drained))
+    }
+}
+
+enum Step {
+    Send(Arc<[u8]>, bool),
+    Wait(Duration),
+    Idle,
+}
+
+/// Sends queued datagrams, paced at the rate the bitrate target implies.
+async fn run_writer(conn: Arc<dyn Conn + Send + Sync>, shared: Arc<Shared>) {
+    loop {
+        let step = {
+            let mut queue = shared.lock();
+            let now = Instant::now();
+            queue.pacer.set_rate(now, shared.rate.pacing_rate());
+            match queue.peek_len() {
+                None => Step::Idle,
+                Some(len) => match queue.pacer.try_take(now, len) {
+                    Ok(()) => queue.pop().map_or(Step::Idle, |(bytes, drained)| Step::Send(bytes, drained)),
+                    Err(wait) => Step::Wait(wait),
                 },
-            );
-            self.oldest.push_back(msg_id);
+            }
+        };
+        match step {
+            Step::Idle => shared.work.notified().await,
+            Step::Wait(wait) => tokio::time::sleep(wait).await,
+            Step::Send(bytes, drained) => {
+                if drained {
+                    shared.drained.notify_waiters();
+                }
+                let error = match conn.send(&bytes).await {
+                    Ok(sent) if sent == bytes.len() => continue,
+                    Ok(sent) => format!("UDP send was incomplete: sent {sent} of {} bytes", bytes.len()),
+                    Err(error) => error.to_string(),
+                };
+                shared.lock().error = Some(TransportError::Io(error));
+                shared.drained.notify_waiters();
+                return;
+            }
         }
+    }
+}
 
-        let message = self.messages.get_mut(&msg_id)?;
-        if message.frag_count != frag_count {
-            return None;
-        }
-        let slot = &mut message.fragments[frag_index as usize];
-        if slot.is_some() {
-            return None;
-        }
-        *slot = Some(datagram[FRAG_HEADER_LEN..].to_vec());
-        message.received += 1;
-        if message.received != message.frag_count as usize {
-            return None;
-        }
+/// Feedback-channel state, owned by the reader task.
+struct FeedbackState {
+    sealer: Sealer,
+    opener: Opener,
+    media_sender: bool,
+    start: Instant,
+    last_report: Option<Instant>,
+    estimator: AimdEstimator,
+    last_counts: RecvStats,
+}
 
-        let message = self.messages.remove(&msg_id)?;
-        self.oldest.retain(|&id| id != msg_id);
-        let total_len: usize = message
-            .fragments
-            .iter()
-            .filter_map(|fragment| fragment.as_ref().map(Vec::len))
-            .sum();
-        let mut assembled = Vec::with_capacity(total_len);
-        for fragment in message.fragments {
-            assembled.extend_from_slice(&fragment?);
+impl FeedbackState {
+    fn micros(&self, now: Instant) -> u64 { now.duration_since(self.start).as_micros() as u64 }
+
+    async fn send(&mut self, conn: &(dyn Conn + Send + Sync), feedback: &Feedback) {
+        if let Err(error) = conn.send(&feedback.seal(&mut self.sealer)).await {
+            log::debug!("direct transport: feedback not sent: {error}");
         }
-        Some(assembled)
     }
 
-    fn evict_if_full(&mut self) {
-        if self.messages.len() < self.max_in_flight {
-            return;
+    async fn on_datagram(&mut self, now: Instant, datagram: &[u8], tracker: &mut ReceiveTracker, conn: &(dyn Conn + Send + Sync), shared: &Shared) {
+        let Some(feedback) = Feedback::open(&mut self.opener, datagram) else { return };
+        match feedback {
+            Feedback::SenderReport { send_time_us, rtt_us } => {
+                if !tracker.is_ordered() {
+                    log::info!("direct transport: peer retransmits; ordered delivery with NACKs enabled");
+                    tracker.enable_ordered();
+                }
+                if rtt_us > 0 {
+                    tracker.set_rtt(Duration::from_micros(u64::from(rtt_us)));
+                }
+                let stats = tracker.stats();
+                let report = Feedback::ReceiverReport {
+                    echo_send_time_us: send_time_us,
+                    hold_us: 0,
+                    received: stats.received,
+                    lost: stats.lost,
+                    recovered: stats.recovered,
+                    abandoned: stats.abandoned,
+                };
+                self.send(conn, &report).await;
+            }
+            Feedback::ReceiverReport { echo_send_time_us, hold_us, received, lost, recovered, abandoned } => {
+                let rtt = self
+                    .micros(now)
+                    .checked_sub(echo_send_time_us)
+                    .and_then(|elapsed| elapsed.checked_sub(u64::from(hold_us)))
+                    .map(Duration::from_micros)
+                    .filter(|rtt| *rtt < Duration::from_secs(10));
+                let counts = RecvStats { received, lost, recovered, abandoned };
+                let loss = loss_fraction(self.last_counts, counts);
+                self.last_counts = counts;
+                let ceiling = shared.rate.ceiling();
+                if ceiling > 0 {
+                    let before = shared.rate.target();
+                    let target = self.estimator.on_report(now, ceiling, PathSample { rtt, loss });
+                    shared.rate.set_target(target);
+                    if target.abs_diff(before) > before / 10 {
+                        log::debug!("direct transport: target bitrate {target} bps (loss {:.1}%, rtt {rtt:?})", loss * 100.0);
+                    }
+                }
+            }
+            Feedback::Nack(ranges) => {
+                let mut resend = Vec::new();
+                {
+                    let mut queue = shared.lock();
+                    for range in ranges {
+                        queue.ring.resend(range, &mut resend, MAX_RESENDS_PER_NACK);
+                    }
+                    queue.urgent.extend(resend.iter().map(|bytes| Datagram { bytes: Arc::clone(bytes), origin: None }));
+                }
+                if !resend.is_empty() {
+                    shared.work.notify_one();
+                }
+            }
         }
-        while let Some(oldest) = self.oldest.pop_front() {
-            if self.messages.remove(&oldest).is_some() {
-                break;
+    }
+
+    async fn on_tick(&mut self, now: Instant, tracker: &mut ReceiveTracker, conn: &(dyn Conn + Send + Sync), shared: &Shared) {
+        if self.media_sender && self.last_report.is_none_or(|at| now.duration_since(at) >= REPORT_INTERVAL) {
+            self.last_report = Some(now);
+            let rtt_us = self.estimator.srtt().map_or(0, |rtt| u32::try_from(rtt.as_micros()).unwrap_or(u32::MAX));
+            let report = Feedback::SenderReport { send_time_us: self.micros(now), rtt_us };
+            self.send(conn, &report).await;
+            let ceiling = shared.rate.ceiling();
+            if ceiling > 0 {
+                if let Some(target) = self.estimator.on_tick(now, ceiling) {
+                    log::debug!("direct transport: no receiver reports; target bitrate {target} bps");
+                    shared.rate.set_target(target);
+                }
+            }
+        }
+        let ranges = tracker.poll(now);
+        if !ranges.is_empty() {
+            self.send(conn, &Feedback::Nack(ranges)).await;
+        }
+    }
+}
+
+/// Fraction of first transmissions lost between two receiver reports.
+fn loss_fraction(before: RecvStats, after: RecvStats) -> f64 {
+    let received = after.received.wrapping_sub(before.received);
+    let recovered = after.recovered.wrapping_sub(before.recovered);
+    let lost = after.lost.wrapping_sub(before.lost);
+    let originals = received.saturating_sub(recovered);
+    let total = f64::from(originals) + f64::from(lost);
+    if total == 0.0 { 0.0 } else { f64::from(lost) / total }
+}
+
+/// Receives datagrams: media fragments go to reassembly, feedback to
+/// [`FeedbackState`]; complete messages go to the receiver handle.
+async fn run_reader(
+    conn: Arc<dyn Conn + Send + Sync>,
+    shared: Arc<Shared>,
+    deliver: mpsc::Sender<Vec<u8>>,
+    mut feedback: Option<FeedbackState>,
+) {
+    let mut tracker = ReceiveTracker::new();
+    let mut buf = vec![0u8; 65_535];
+    let mut tick = tokio::time::interval(TICK);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            received = conn.recv(&mut buf) => {
+                let Ok(len) = received else { return };
+                let now = Instant::now();
+                let datagram = &buf[..len];
+                if feedback::is_feedback(datagram) {
+                    if let Some(state) = feedback.as_mut() {
+                        state.on_datagram(now, datagram, &mut tracker, conn.as_ref(), &shared).await;
+                    }
+                } else {
+                    tracker.push(now, datagram);
+                }
+            }
+            _ = tick.tick(), if feedback.is_some() => {
+                if let Some(state) = feedback.as_mut() {
+                    state.on_tick(Instant::now(), &mut tracker, conn.as_ref(), &shared).await;
+                }
+            }
+        }
+        while let Some(message) = tracker.pop_ready() {
+            // A consumer this far behind loses messages, as a full socket
+            // buffer would; video then recovers on a keyframe.
+            if let Err(mpsc::error::TrySendError::Closed(_)) = deliver.try_send(message) {
+                return;
             }
         }
     }
@@ -227,31 +507,189 @@ mod tests {
     }
 
     #[test]
-    fn reversed_fragments_reassemble() {
-        let message = frame::wrap(Tag::Data, &[7u8; 5_000]);
-        let mut fragments = fragment_message(&message, 42).unwrap();
-        fragments.reverse();
-        let mut reassembler = Reassembler::new(MAX_IN_FLIGHT_MESSAGES);
-        let mut result = None;
-        for fragment in fragments {
-            result = reassembler.push(&fragment).or(result);
-        }
-        assert_eq!(result, Some(message));
+    fn loss_fraction_counts_first_transmissions_only() {
+        let before = RecvStats { received: 100, lost: 0, recovered: 0, abandoned: 0 };
+        // 90 originals + 10 retransmissions arrived, 10 were found missing.
+        let after = RecvStats { received: 200, lost: 10, recovered: 10, abandoned: 0 };
+        assert!((loss_fraction(before, after) - 0.1).abs() < 1e-9);
+        assert_eq!(loss_fraction(after, after), 0.0);
+        let wrapped = RecvStats { received: u32::MAX, ..RecvStats::default() };
+        let next = RecvStats { received: 9, lost: 0, ..RecvStats::default() };
+        assert_eq!(loss_fraction(wrapped, next), 0.0);
     }
 
-    #[test]
-    fn evicts_oldest_incomplete_message_at_bound() {
-        let mut reassembler = Reassembler::new(2);
-        for msg_id in 0..3 {
-            let mut message = vec![msg_id as u8; 1_101];
-            message[0] = Tag::Video as u8;
-            let fragments = fragment_message(&message, msg_id);
-            let first_fragment = fragments.unwrap().into_iter().next().unwrap();
-            assert!(reassembler.push(&first_fragment).is_none());
+    #[tokio::test]
+    async fn pacing_spreads_a_frame_over_time() {
+        let (left, right) = pipe();
+        let (mut sender, _) = DirectTransport::new(Arc::new(left)).into_split();
+        let (_, mut receiver) = DirectTransport::new(Arc::new(right)).into_split();
+        // 1 Mbps target -> paced at the 3 Mbps floor: 60 kB takes ~150 ms.
+        sender.rate_control().set_ceiling(1_000_000);
+        let frame = vec![7u8; 60_000];
+        let started = Instant::now();
+        sender.send(Tag::Video, &frame).await.unwrap();
+        assert!(started.elapsed() < Duration::from_millis(20), "send only queues");
+        assert_eq!(receiver.recv().await, Some((Tag::Video, frame)));
+        let took = started.elapsed();
+        assert!(took >= Duration::from_millis(120), "not paced: {took:?}");
+        assert!(took < Duration::from_millis(500), "paced too slowly: {took:?}");
+    }
+
+    #[tokio::test]
+    async fn ready_for_video_waits_for_the_previous_frame_and_audio_overtakes_it() {
+        let (left, right) = pipe();
+        let (mut sender, _) = DirectTransport::new(Arc::new(left)).into_split();
+        let (_, mut receiver) = DirectTransport::new(Arc::new(right)).into_split();
+        sender.rate_control().set_ceiling(1_000_000);
+        sender.send(Tag::Video, &[1u8; 30_000]).await.unwrap();
+        sender.send(Tag::Audio, b"audio").await.unwrap();
+        let ready = tokio::time::timeout(Duration::from_millis(20), sender.ready_for_video()).await;
+        assert!(ready.is_err(), "video is still being paced out");
+        assert_eq!(receiver.recv().await, Some((Tag::Audio, b"audio".to_vec())));
+        assert_eq!(receiver.recv().await.map(|(tag, _)| tag), Some(Tag::Video));
+        tokio::time::timeout(Duration::from_secs(1), sender.ready_for_video()).await.unwrap();
+    }
+
+    /// A UDP socket that silently drops a share of the datagrams it sends.
+    struct LossyConn {
+        socket: tokio::net::UdpSocket,
+        drop_per_mille: u64,
+        rng: std::sync::atomic::AtomicU64,
+    }
+
+    impl LossyConn {
+        fn drops(&self) -> bool {
+            use std::sync::atomic::Ordering;
+            // xorshift64: deterministic per seed.
+            let mut x = self.rng.load(Ordering::Relaxed);
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.rng.store(x, Ordering::Relaxed);
+            x % 1_000 < self.drop_per_mille
         }
-        assert_eq!(reassembler.messages.len(), 2);
-        assert!(!reassembler.messages.contains_key(&0));
-        assert!(reassembler.messages.contains_key(&1));
-        assert!(reassembler.messages.contains_key(&2));
+    }
+
+    #[async_trait::async_trait]
+    impl Conn for LossyConn {
+        async fn connect(&self, addr: std::net::SocketAddr) -> webrtc_util::Result<()> { Conn::connect(&self.socket, addr).await }
+        async fn recv(&self, buf: &mut [u8]) -> webrtc_util::Result<usize> { Conn::recv(&self.socket, buf).await }
+        async fn recv_from(&self, buf: &mut [u8]) -> webrtc_util::Result<(usize, std::net::SocketAddr)> { Conn::recv_from(&self.socket, buf).await }
+        async fn send(&self, buf: &[u8]) -> webrtc_util::Result<usize> {
+            if self.drops() { Ok(buf.len()) } else { Conn::send(&self.socket, buf).await }
+        }
+        async fn send_to(&self, buf: &[u8], target: std::net::SocketAddr) -> webrtc_util::Result<usize> { Conn::send_to(&self.socket, buf, target).await }
+        fn local_addr(&self) -> webrtc_util::Result<std::net::SocketAddr> { Conn::local_addr(&self.socket) }
+        fn remote_addr(&self) -> Option<std::net::SocketAddr> { Conn::remote_addr(&self.socket) }
+        async fn close(&self) -> webrtc_util::Result<()> { Ok(()) }
+        fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) { self }
+    }
+
+    /// Two connected loopback UDP sockets that each drop `drop_per_mille`
+    /// of what they send.
+    async fn lossy_pair(drop_per_mille: u64) -> (Arc<LossyConn>, Arc<LossyConn>) {
+        let host = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let viewer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        host.connect(viewer.local_addr().unwrap()).await.unwrap();
+        viewer.connect(host.local_addr().unwrap()).await.unwrap();
+        let wrap = |socket, seed| Arc::new(LossyConn { socket, drop_per_mille, rng: std::sync::atomic::AtomicU64::new(seed) });
+        (wrap(host, 0x9E37_79B9_7F4A_7C15), wrap(viewer, 0xD1B5_4A32_D192_ED03))
+    }
+
+    fn transport(conn: Arc<LossyConn>, keys: Option<FeedbackKeys>) -> DirectTransport {
+        match keys {
+            Some(keys) => DirectTransport::with_feedback(conn, keys),
+            None => DirectTransport::new(conn),
+        }
+    }
+
+    struct LinkRun {
+        /// Sequence numbers of the frames that arrived, in arrival order.
+        received: Vec<u32>,
+        target: u32,
+    }
+
+    const CEILING: u32 = 8_000_000;
+
+    /// Streams `frames` 20 kB video frames at 60 fps from host to viewer.
+    async fn run_link(drop_per_mille: u64, host_feedback: bool, viewer_feedback: bool, frames: u32) -> LinkRun {
+        let shared = [11u8; 32];
+        let (host_conn, viewer_conn) = lossy_pair(drop_per_mille).await;
+        let (mut host_tx, _host_rx) =
+            transport(host_conn, host_feedback.then(|| FeedbackKeys::derive(&shared, true))).into_split();
+        let (_viewer_tx, mut viewer_rx) =
+            transport(viewer_conn, viewer_feedback.then(|| FeedbackKeys::derive(&shared, false))).into_split();
+        let rate = host_tx.rate_control();
+        rate.set_ceiling(CEILING);
+        // Let a sender report switch the viewer to ordered delivery.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        let sending = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(16));
+            for seq in 0..frames {
+                interval.tick().await;
+                host_tx.ready_for_video().await;
+                let mut frame = vec![(seq % 251) as u8; 20_000];
+                frame[..4].copy_from_slice(&seq.to_be_bytes());
+                host_tx.send(Tag::Video, &frame).await.unwrap();
+            }
+            host_tx
+        });
+        let mut received = Vec::new();
+        while let Ok(Some((tag, frame))) = tokio::time::timeout(Duration::from_millis(600), viewer_rx.recv()).await {
+            assert_eq!(tag, Tag::Video);
+            let seq = u32::from_be_bytes(frame[..4].try_into().unwrap());
+            assert_eq!(frame.len(), 20_000);
+            assert!(frame[4..].iter().all(|&byte| byte == (seq % 251) as u8), "frame {seq} corrupted");
+            received.push(seq);
+            if seq + 1 == frames {
+                break;
+            }
+        }
+        let _host_tx = sending.await.unwrap();
+        LinkRun { received, target: rate.target() }
+    }
+
+    fn assert_in_order(received: &[u32]) {
+        assert!(received.windows(2).all(|pair| pair[0] < pair[1]), "out of order: {received:?}");
+    }
+
+    #[tokio::test]
+    async fn lossy_link_recovers_frames_in_order() {
+        // 5% loss in both directions: without retransmission only ~38% of
+        // 19-fragment frames would arrive whole (about 42 of 120 here).
+        let run = run_link(50, true, true, 120).await;
+        assert_in_order(&run.received);
+        assert!(run.received.len() >= 114, "only {} of 120 frames arrived", run.received.len());
+        // Random loss this low is repaired, not a reason to drop quality.
+        assert!(run.target > CEILING / 2, "bitrate collapsed: {}", run.target);
+    }
+
+    #[tokio::test]
+    async fn heavy_loss_lowers_the_bitrate_and_most_frames_still_arrive() {
+        let run = run_link(150, true, true, 120).await;
+        assert_in_order(&run.received);
+        assert!(run.received.len() >= 100, "only {} of 120 frames arrived", run.received.len());
+        assert!(run.target < CEILING / 2, "bitrate did not adapt: {}", run.target);
+    }
+
+    #[tokio::test]
+    async fn clean_link_keeps_the_ceiling() {
+        let run = run_link(0, true, true, 60).await;
+        assert_eq!(run.received, (0..60).collect::<Vec<_>>());
+        assert_eq!(run.target, CEILING);
+    }
+
+    #[tokio::test]
+    async fn interoperates_with_peers_without_feedback() {
+        // An old viewer drops the sender reports: frames still arrive and
+        // the host, hearing no reports, keeps the ceiling.
+        let run = run_link(0, true, false, 30).await;
+        assert_eq!(run.received, (0..30).collect::<Vec<_>>());
+        assert_eq!(run.target, CEILING);
+        // A new viewer of an old host stays in legacy (unordered, no NACK)
+        // mode and still gets every frame.
+        let run = run_link(0, false, true, 30).await;
+        assert_eq!(run.received, (0..30).collect::<Vec<_>>());
     }
 }
