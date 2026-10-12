@@ -2,15 +2,18 @@ Beta build for testing. Expect rough edges, and please report what breaks.
 
 ## What's new
 
-- Smoother video: 60 fps instead of 15, sharper picture, no flicker.
-- Mouse and keyboard stay responsive while video is busy.
-- Video recovers by itself after a dropped frame instead of freezing.
-- Reconnecting after a network drop works again.
+- The app now updates itself. Install this version by hand once; after that,
+  new versions show an "Update available" banner on the home screen.
+- Clicks land in the right place on Retina Macs and on secondary monitors.
+- Video holds up better on Wi-Fi and slow links: lost packets are resent and
+  the bitrate drops when the connection struggles.
+- Smoother video: 60 fps, sharper picture, no flicker.
 - Clearer messages when the other device is busy, offline, or can't share
-  its screen.
-- Labeled toolbar buttons.
+  its screen. Reconnecting after a network drop works again.
 
 Update both computers: most of the speed-up is on the computer being viewed.
+On macOS, you may need to grant Screen Recording and Accessibility again
+after installing or updating.
 
 ## Install
 
