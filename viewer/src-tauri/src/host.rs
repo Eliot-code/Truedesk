@@ -234,10 +234,12 @@ pub(crate) async fn run_paired_host_session(
     let mut session = Box::pin(host_core::roles::run_default_host_session_with_data_and_accept_and_2fa(
         ws, &password, &ice_session, unattended_enabled, twofa_enabled, totp_secret.as_deref(), approve, data_ready_tx,
     ));
+    let mut streamed = false;
     let result = tokio::select! {
         handle = data_ready_rx => {
             match handle {
                 Ok(handle) => {
+                    streamed = true;
                     activate_data_channel(app, handle, remote_id.clone());
                     tokio::select! {
                         result = &mut session => Some(result),
@@ -267,7 +269,8 @@ pub(crate) async fn run_paired_host_session(
         },
     );
     clear_data_channel(app);
-    HostSessionEnd { stopped: result.is_none(), authenticated: authenticated.load(Ordering::Relaxed) }
+    let dropped = streamed && matches!(result, Some(Err(_)));
+    HostSessionEnd { stopped: result.is_none(), authenticated: authenticated.load(Ordering::Relaxed), dropped }
 }
 
 /// Best-effort sealed `Control::Bye` on the active session's control channel.
@@ -309,6 +312,8 @@ pub(crate) struct HostSessionEnd {
     pub(crate) stopped: bool,
     /// The viewer got past the password/2FA checks.
     pub(crate) authenticated: bool,
+    /// A running session ended without a goodbye; the viewer will reconnect.
+    pub(crate) dropped: bool,
 }
 
 /// Limits password guessing against a host. The main defence is rotation:
@@ -330,6 +335,9 @@ pub(crate) struct AfterSession {
     pub(crate) delay: Duration,
     /// Replace the one-time session password.
     pub(crate) rotate_password: bool,
+    /// Replace it once the viewer's reconnect window has passed instead, so a
+    /// dropped viewer can still get back in with the password it has.
+    pub(crate) rotate_after_reconnect_window: bool,
 }
 
 impl AuthBackoff {
@@ -337,10 +345,10 @@ impl AuthBackoff {
     const ROTATE_EVERY_FAILURES: u32 = 3;
     const MAX_DELAY: Duration = Duration::from_secs(5);
 
-    pub(crate) fn after_session(&mut self, authenticated: bool) -> AfterSession {
+    pub(crate) fn after_session(&mut self, authenticated: bool, dropped: bool) -> AfterSession {
         if authenticated {
             self.consecutive_failures = 0;
-            return AfterSession { delay: Duration::ZERO, rotate_password: true };
+            return AfterSession { delay: Duration::ZERO, rotate_password: !dropped, rotate_after_reconnect_window: dropped };
         }
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
         let rotate_password = self.consecutive_failures.is_multiple_of(Self::ROTATE_EVERY_FAILURES);
@@ -350,7 +358,7 @@ impl AuthBackoff {
         } else {
             Duration::from_secs(1u64 << over.min(6)).min(Self::MAX_DELAY)
         };
-        AfterSession { delay, rotate_password }
+        AfterSession { delay, rotate_password, rotate_after_reconnect_window: false }
     }
 }
 
@@ -382,15 +390,22 @@ pub(crate) fn spawn_host_thread(
         runtime.block_on(async {
             let mut next = first;
             let mut backoff = AuthBackoff::default();
-            loop {
+            // Deferred rotation after a dropped session; see AfterSession.
+            let mut rotate_at: Option<tokio::time::Instant> = None;
+            'hosting: loop {
                 let params = host_session_params(&mut app.state::<AppState>().lock());
                 let (ws, pairing) = next;
                 let ended = run_paired_host_session(&app, ws, pairing, params, &mut stop_rx).await;
-                let AfterSession { delay, rotate_password } = backoff.after_session(ended.authenticated);
-                if rotate_password {
+                let after = backoff.after_session(ended.authenticated, ended.dropped);
+                let delay = after.delay;
+                if after.rotate_password || rotate_at.is_some_and(|at| at <= tokio::time::Instant::now()) {
                     // A finished session's password must not let anyone back
                     // in, and a guesser gets a fresh target every 3 misses.
                     rotate_session_password(&app);
+                    rotate_at = None;
+                }
+                if after.rotate_after_reconnect_window {
+                    rotate_at = Some(tokio::time::Instant::now() + host_core::reconnect::VIEWER_RECONNECT_WINDOW);
                 }
                 if ended.stopped {
                     break;
@@ -406,12 +421,20 @@ pub(crate) fn spawn_host_thread(
                 // go straight back to waiting rather than going offline.
                 emit_host_status(&app, "connecting");
                 let still_hosting = || owns_host_thread(&app, &token);
-                tokio::select! {
-                    paired = register_host_until_paired(&app, &registration, still_hosting) => match paired {
-                        Some(paired) => next = paired,
-                        None => break,
-                    },
-                    _ = &mut stop_rx => break,
+                let register = register_host_until_paired(&app, &registration, still_hosting);
+                tokio::pin!(register);
+                loop {
+                    tokio::select! {
+                        paired = &mut register => match paired {
+                            Some(paired) => { next = paired; break; }
+                            None => break 'hosting,
+                        },
+                        _ = &mut stop_rx => break 'hosting,
+                        _ = tokio::time::sleep_until(rotate_at.unwrap_or_else(tokio::time::Instant::now)), if rotate_at.is_some() => {
+                            rotate_session_password(&app);
+                            rotate_at = None;
+                        }
+                    }
                 }
             }
         });

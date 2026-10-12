@@ -652,19 +652,31 @@ mod tests {
     #[test]
     fn auth_backoff_stays_short_and_resets() {
         let mut backoff = AuthBackoff::default();
-        let delays: Vec<u64> = (0..8).map(|_| backoff.after_session(false).delay.as_secs()).collect();
+        let delays: Vec<u64> = (0..8).map(|_| backoff.after_session(false, false).delay.as_secs()).collect();
         assert_eq!(delays, [0, 0, 0, 2, 4, 5, 5, 5]);
-        assert_eq!(backoff.after_session(true).delay, Duration::ZERO);
-        assert_eq!(backoff.after_session(false).delay, Duration::ZERO);
+        assert_eq!(backoff.after_session(true, false).delay, Duration::ZERO);
+        assert_eq!(backoff.after_session(false, false).delay, Duration::ZERO);
+    }
+
+    #[test]
+    fn dropped_session_keeps_password_for_the_reconnect_window() {
+        let mut backoff = AuthBackoff::default();
+        let after = backoff.after_session(true, true);
+        assert!(!after.rotate_password);
+        assert!(after.rotate_after_reconnect_window);
+        assert_eq!(after.delay, Duration::ZERO);
+        let clean = backoff.after_session(true, false);
+        assert!(clean.rotate_password);
+        assert!(!clean.rotate_after_reconnect_window);
     }
 
     #[test]
     fn session_password_rotates_after_success_and_every_third_failure() {
         let mut backoff = AuthBackoff::default();
-        let rotations: Vec<bool> = (0..7).map(|_| backoff.after_session(false).rotate_password).collect();
+        let rotations: Vec<bool> = (0..7).map(|_| backoff.after_session(false, false).rotate_password).collect();
         assert_eq!(rotations, [false, false, true, false, false, true, false]);
-        assert!(backoff.after_session(true).rotate_password);
-        assert!(!backoff.after_session(false).rotate_password);
+        assert!(backoff.after_session(true, false).rotate_password);
+        assert!(!backoff.after_session(false, false).rotate_password);
     }
 
     #[test]
