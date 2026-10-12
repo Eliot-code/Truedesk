@@ -1,5 +1,17 @@
 Beta build for testing. Expect rough edges, and please report what breaks.
 
+## What's new
+
+- Smoother video: 60 fps instead of 15, sharper picture, no flicker.
+- Mouse and keyboard stay responsive while video is busy.
+- Video recovers by itself after a dropped frame instead of freezing.
+- Reconnecting after a network drop works again.
+- Clearer messages when the other device is busy, offline, or can't share
+  its screen.
+- Labeled toolbar buttons.
+
+Update both computers: most of the speed-up is on the computer being viewed.
+
 ## Install
 
 Pick the file for your system below. These builds are not code-signed, so
