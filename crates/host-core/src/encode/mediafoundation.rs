@@ -567,6 +567,21 @@ impl MfEncoder {
         Ok(self.ready.pop_front())
     }
 
+    /// Changes the mean bitrate of the running encoder. Hardware MFTs that
+    /// support dynamic rate control apply it from the next frame; others
+    /// keep their bitrate (and the change is only logged).
+    pub fn set_bitrate(&mut self, bitrate: u32) {
+        let Some(api) = &self.codec_api else {
+            return;
+        };
+        // SAFETY: the API is valid; the property takes a VT_UI4.
+        if let Err(error) =
+            unsafe { api.SetValue(&CODECAPI_AVEncCommonMeanBitRate, &variant_u32(bitrate)) }
+        {
+            log::debug!("Media Foundation bitrate change not applied: {error}");
+        }
+    }
+
     fn request_keyframe(&self) {
         let Some(api) = &self.codec_api else {
             return;

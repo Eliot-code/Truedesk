@@ -51,6 +51,10 @@ pub trait Encoder {
 
     /// Request that the next encoded frame be an intra frame when supported.
     fn force_intra_frame(&mut self) {}
+
+    /// Change the target bitrate (bps) of a running encoder, from the next
+    /// frame on, where the backend supports it.
+    fn set_bitrate(&mut self, _bps: u32) {}
 }
 
 /// An H.264 encoder could not be created.
@@ -76,6 +80,11 @@ pub struct H264Encoder {
     first_frame: bool,
     width: u16,
     height: u16,
+    /// A bitrate change requested before openh264 initialized itself (it
+    /// does so on the first encode).
+    pending_bitrate: Option<u32>,
+    /// The bitrate openh264 currently targets.
+    bitrate: u32,
 }
 
 impl H264Encoder {
@@ -91,17 +100,64 @@ impl H264Encoder {
             first_frame: true,
             width,
             height,
+            pending_bitrate: None,
+            bitrate,
         })
     }
 
     pub fn force_intra_frame(&mut self) {
         self.encoder.force_intra_frame();
     }
+
+    /// Sets openh264's target and maximum bitrate on the initialized encoder.
+    fn apply_bitrate(&mut self, bps: u32) {
+        use std::os::raw::{c_int, c_void};
+        // openh264's ENCODER_OPTION_{BITRATE,MAX_BITRATE} and layer ids.
+        const OPTION_BITRATE: c_int = 5;
+        const OPTION_MAX_BITRATE: c_int = 6;
+        const SPATIAL_LAYER_0: c_int = 0;
+        const SPATIAL_LAYER_ALL: c_int = 4;
+        /// Mirrors openh264's `SBitrateInfo { int iLayer; int iBitrate; }`.
+        #[repr(C)]
+        struct BitrateInfo {
+            layer: c_int,
+            bitrate: c_int,
+        }
+        let bitrate = c_int::try_from(bps).unwrap_or(c_int::MAX);
+        // The maximum must never sit below the target: raise it first when
+        // going up, lower it last when going down.
+        let target = [(OPTION_BITRATE, SPATIAL_LAYER_ALL), (OPTION_BITRATE, SPATIAL_LAYER_0)];
+        let maximum = [(OPTION_MAX_BITRATE, SPATIAL_LAYER_ALL), (OPTION_MAX_BITRATE, SPATIAL_LAYER_0)];
+        let order = if bps < self.bitrate {
+            [target, maximum]
+        } else {
+            [maximum, target]
+        };
+        for (option, layer) in order.into_iter().flatten() {
+            let mut info = BitrateInfo { layer, bitrate };
+            // SAFETY: the encoder is initialized (it encoded a frame), and both
+            // options read one SBitrateInfo, which `BitrateInfo` mirrors; the
+            // pointer is valid for the duration of the call.
+            let status = unsafe { self.encoder.raw_api().set_option(option, (&raw mut info).cast::<c_void>()) };
+            if status != 0 {
+                log::debug!("openh264 bitrate option {option} (layer {layer}) not applied: {status}");
+            }
+        }
+        self.bitrate = bps;
+    }
 }
 
 impl Encoder for H264Encoder {
     fn force_intra_frame(&mut self) {
         self.encoder.force_intra_frame();
+    }
+
+    fn set_bitrate(&mut self, bps: u32) {
+        if self.first_frame {
+            self.pending_bitrate = Some(bps);
+        } else {
+            self.apply_bitrate(bps);
+        }
     }
 
     fn encode(&mut self, frame: &RawFrame) -> Option<EncodedFrame> {
@@ -124,12 +180,13 @@ impl Encoder for H264Encoder {
 
         let bitstream = self.encoder.encode(&yuv).ok()?;
         let keyframe = self.first_frame || bitstream.frame_type() == FrameType::IDR;
+        let data = bitstream.to_vec();
         self.first_frame = false;
+        if let Some(bps) = self.pending_bitrate.take() {
+            self.apply_bitrate(bps);
+        }
 
-        Some(EncodedFrame {
-            data: bitstream.to_vec(),
-            keyframe,
-        })
+        Some(EncodedFrame { data, keyframe })
     }
 }
 
@@ -467,6 +524,18 @@ impl Encoder for VideoEncoder {
             Backend::MediaFoundation(encoder) => encoder.force_intra_frame(),
         }
     }
+
+    fn set_bitrate(&mut self, bps: u32) {
+        // A software fallback built later starts at this bitrate too.
+        self.bitrate = bps;
+        match &mut self.backend {
+            Backend::OpenH264(encoder) => encoder.set_bitrate(bps),
+            #[cfg(target_os = "macos")]
+            Backend::VideoToolbox(encoder) => encoder.set_bitrate(bps),
+            #[cfg(target_os = "windows")]
+            Backend::MediaFoundation(encoder) => encoder.set_bitrate(bps),
+        }
+    }
 }
 
 pub fn video_header(seq: u64, ts_us: u32, keyframe: bool, w: u16, h: u16) -> Vec<u8> {
@@ -550,6 +619,56 @@ pub(crate) mod tests {
             format: PixelFormat::Bgra,
             timestamp_us: index * 66_666,
         }
+    }
+
+    /// A BGRA frame of pseudo-random noise: incompressible, so the encoded
+    /// size follows the bitrate.
+    pub(crate) fn noise_frame(width: u16, height: u16, seed: u32) -> RawFrame {
+        let mut state = u64::from(seed).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        let data = (0..usize::from(width) * usize::from(height) * 4)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect();
+        RawFrame { width, height, data, format: PixelFormat::Bgra, timestamp_us: seed * 33_333 }
+    }
+
+    /// Mean encoded size of `frames` noise frames.
+    pub(crate) fn mean_size(encoder: &mut dyn Encoder, start: u32, frames: u32) -> usize {
+        let total: usize = (start..start + frames)
+            .map(|index| encoder.encode(&noise_frame(320, 240, index)).map_or(0, |out| out.data.len()))
+            .sum();
+        total / frames as usize
+    }
+
+    #[test]
+    fn openh264_follows_a_live_bitrate_change() {
+        let mut encoder = H264Encoder::new(320, 240, 30, 4_000_000).expect("openh264");
+        let high = mean_size(&mut encoder, 0, 20);
+        encoder.set_bitrate(300_000);
+        let _settle = mean_size(&mut encoder, 20, 10);
+        let low = mean_size(&mut encoder, 30, 20);
+        assert!(low * 3 < high, "high {high} B/frame, low {low} B/frame");
+        encoder.set_bitrate(4_000_000);
+        // Noise overshoots even the lowest quality at 300 kbps, so openh264
+        // first skips frames to pay that back; measure over a long window.
+        let again = mean_size(&mut encoder, 50, 80);
+        assert!(again > low * 2, "low {low} B/frame, raised {again} B/frame");
+    }
+
+    #[test]
+    fn openh264_applies_a_bitrate_set_before_the_first_frame() {
+        let mut encoder = H264Encoder::new(320, 240, 30, 4_000_000).expect("openh264");
+        encoder.set_bitrate(300_000);
+        let _settle = mean_size(&mut encoder, 0, 10);
+        let low = mean_size(&mut encoder, 10, 20);
+        let mut reference = H264Encoder::new(320, 240, 30, 4_000_000).expect("openh264");
+        let _settle = mean_size(&mut reference, 0, 10);
+        let high = mean_size(&mut reference, 10, 20);
+        assert!(low * 3 < high, "high {high} B/frame, low {low} B/frame");
     }
 
     #[test]

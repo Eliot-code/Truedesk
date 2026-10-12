@@ -249,6 +249,16 @@ impl VtEncoder {
         self.force_keyframe = true;
     }
 
+    /// Changes the average bitrate of the live session; VideoToolbox
+    /// applies it from the next frame.
+    pub fn set_bitrate(&mut self, bps: u32) {
+        // SAFETY: immutable CFString constant exported by VideoToolbox.
+        let key = unsafe { kVTCompressionPropertyKey_AverageBitRate };
+        if let Err(error) = self.set(key, &CFNumber::new_i32(i32::try_from(bps).unwrap_or(i32::MAX))) {
+            log::debug!("VideoToolbox bitrate change not applied: {error}");
+        }
+    }
+
     /// Encodes one frame. `Ok(None)` means the frame was rejected (wrong
     /// size/format) or dropped by the encoder; `Err` means the session is
     /// unusable and the caller should fall back to another encoder.
@@ -490,7 +500,7 @@ mod tests {
     use openh264::{decoder::Decoder, formats::YUVSource};
 
     use super::*;
-    use crate::encode::tests::{nal_types, synthetic_frame};
+    use crate::encode::tests::{nal_types, noise_frame, synthetic_frame};
 
     /// Creates a hardware session, or `None` (test skipped) where VideoToolbox
     /// has no hardware H.264 encoder, e.g. in a VM or on CI.
@@ -563,6 +573,28 @@ mod tests {
     #[test]
     fn videotoolbox_handles_non_macroblock_aligned_sizes() {
         encode_and_decode(1366, 770, 8);
+    }
+
+    #[test]
+    fn videotoolbox_follows_a_live_bitrate_change() {
+        let mut encoder = match VtEncoder::new(320, 240, 30, 4_000_000) {
+            Ok(encoder) => encoder,
+            Err(error) => return eprintln!("skipping VideoToolbox test: {error}"),
+        };
+        let mean = |encoder: &mut VtEncoder, start: u32, frames: u32| {
+            let total: usize = (start..start + frames)
+                .map(|index| {
+                    let frame = noise_frame(320, 240, index);
+                    encoder.encode(&frame).expect("VideoToolbox encode").map_or(0, |out| out.data.len())
+                })
+                .sum();
+            total / frames as usize
+        };
+        let high = mean(&mut encoder, 0, 30);
+        encoder.set_bitrate(300_000);
+        let _settle = mean(&mut encoder, 30, 15);
+        let low = mean(&mut encoder, 45, 30);
+        assert!(low * 3 < high, "high {high} B/frame, low {low} B/frame");
     }
 
     #[test]
