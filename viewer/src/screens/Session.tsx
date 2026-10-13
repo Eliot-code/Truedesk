@@ -4,6 +4,7 @@ import { makeDecoder } from "../lib/decode";
 import { attachInput } from "../lib/input";
 import Toolbar, { virtualDisplaySize } from "../components/Toolbar";
 import FileTransfer from "../components/FileTransfer";
+import ChatPanel, { type ChatEntry } from "../components/ChatPanel";
 import { friendlyError, useNotify } from "../lib/notify";
 
 /** Why the host didn't add or remove a virtual display. */
@@ -38,6 +39,14 @@ export default function Session({ remoteId, role, status = "in_session", onDisco
   const notify = useNotify();
   const [filesOpen, setFilesOpen] = useState(false);
   const onFilesOpenChange = useCallback((open: boolean) => setFilesOpen(open), []);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [messages, setMessages] = useState<ChatEntry[]>([]);
+  const [chatUnread, setChatUnread] = useState(0);
+  const chatOpenRef = useRef(false);
+  chatOpenRef.current = chatOpen;
+  const [viewOnly, setViewOnly] = useState(false);
+  const viewOnlyRef = useRef(false);
+  useEffect(() => { viewOnlyRef.current = viewOnly; }, [viewOnly]);
   // Off until the saved preference loads (clipboard sync defaults off).
   const [clipboardSync, setClipboardSync] = useState(false);
   const [audioMuted, setAudioMuted] = useState(false);
@@ -63,6 +72,24 @@ export default function Session({ remoteId, role, status = "in_session", onDisco
     void api.getConfig().then((config) => { if (mounted) setClipboardSync(config.clipboard_sync); }).catch(() => {});
     return () => { mounted = false; };
   }, []);
+
+  // Append inbound peer messages; count them as unread while the panel is closed.
+  useEffect(() => {
+    let stop: (() => void) | undefined;
+    const listener = api.onChatMessage(({ text }) => {
+      setMessages((current) => [...current, { from: "peer", text, at: Date.now() }]);
+      if (!chatOpenRef.current) setChatUnread((count) => count + 1);
+    });
+    void listener.then((unlisten) => { stop = unlisten; });
+    return () => { if (stop) stop(); else void listener.then((unlisten) => unlisten()); };
+  }, []);
+
+  const sendChat = (text: string) => {
+    setMessages((current) => [...current, { from: "me", text, at: Date.now() }]);
+    void api.sendChat(text).catch((error: unknown) => notify(friendlyError(error)));
+  };
+
+  const toggleChat = () => setChatOpen((open) => { if (!open) setChatUnread(0); return !open; });
 
   useEffect(() => {
     if (role !== "viewer") return;
@@ -222,7 +249,7 @@ export default function Session({ remoteId, role, status = "in_session", onDisco
     // harmless: the decoder asks again on the next dropped frame.
     const decoder = makeDecoder(canvas, { requestKeyframe: () => void api.requestKeyframe().catch(() => {}) });
     const stopVideo = api.startVideo(decoder.push);
-    const detachInput = attachInput(canvas, api.sendInput);
+    const detachInput = attachInput(canvas, (bytes) => viewOnlyRef.current ? Promise.resolve() : api.sendInput(bytes));
 
     return () => {
       stopVideo();
@@ -235,8 +262,9 @@ export default function Session({ remoteId, role, status = "in_session", onDisco
     <main className={`session-screen session-screen--${role}`}>
       {role === "viewer" && <canvas ref={canvasRef} className="session-canvas" tabIndex={0} aria-label="Remote screen" />}
       {role === "host" && <div className="session-host-overlay"><span className="eyebrow">OPENDESK · SECURE SESSION</span><h1>You are being controlled by {remoteId}</h1><p>Your screen is shared for this session.</p></div>}
-      <Toolbar remoteId={remoteId} role={role} status={status} link={link} monitors={monitors} selectedMonitor={selectedMonitor} onMonitorChange={chooseMonitor} canAddDisplay={canAddDisplay} onAddDisplay={addDisplay} onRemoveDisplay={removeDisplay} clipboardSync={clipboardSync} onClipboardSyncChange={toggleClipboardSync} audioMuted={audioMuted} onAudioMutedChange={toggleAudioMuted} recordingActive={recordingActive} recordingElapsed={recordingElapsed} onRecordingToggle={() => void toggleRecording()} filesOpen={filesOpen} onFilesToggle={() => setFilesOpen((open) => !open)} onDisconnect={onDisconnect} />
+      <Toolbar remoteId={remoteId} role={role} status={status} link={link} monitors={monitors} selectedMonitor={selectedMonitor} onMonitorChange={chooseMonitor} canAddDisplay={canAddDisplay} onAddDisplay={addDisplay} onRemoveDisplay={removeDisplay} clipboardSync={clipboardSync} onClipboardSyncChange={toggleClipboardSync} audioMuted={audioMuted} onAudioMutedChange={toggleAudioMuted} recordingActive={recordingActive} recordingElapsed={recordingElapsed} onRecordingToggle={() => void toggleRecording()} filesOpen={filesOpen} onFilesToggle={() => setFilesOpen((open) => !open)} chatOpen={chatOpen} onChatToggle={toggleChat} chatUnread={chatUnread} viewOnly={viewOnly} onViewOnlyChange={setViewOnly} onDisconnect={onDisconnect} />
       {role === "viewer" && <FileTransfer open={filesOpen} onOpenChange={onFilesOpenChange} />}
+      {role === "viewer" && <ChatPanel open={chatOpen} messages={messages} onSend={sendChat} onClose={() => setChatOpen(false)} />}
     </main>
   );
 }
