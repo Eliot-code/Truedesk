@@ -191,7 +191,8 @@ section { padding: clamp(56px, 8vw, 88px) 0; }
 
 .footer { border-top: 1px solid var(--border); padding: 28px 0 40px; color: var(--muted); font-size: 0.9rem; }
 .footer__row { display: grid; gap: 12px; }
-@media (min-width: 860px) { .footer__row { grid-template-columns: 1fr auto; align-items: center; } }
+@media (min-width: 860px) { .footer__row { grid-template-columns: 1fr auto; align-items: start; gap: 12px 40px; } }
+.footer p { max-width: 62ch; }
 .footer p { margin: 0; }
 .footer__links { display: flex; flex-wrap: wrap; gap: 6px 18px; }
 .footer__links a { color: var(--muted); }
