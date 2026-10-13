@@ -35,7 +35,7 @@ path is used whenever the network allows it.
 
 ## Features
 
-| | |
+| Feature | What you get |
 |---|---|
 | 🔒 **End-to-end encrypted** | SPAKE2 password key exchange, ChaCha20-Poly1305 for every frame and keystroke |
 | 🛰️ **Self-hosted relay** | One small Rust binary or Docker image; it never sees your screen or keys |
