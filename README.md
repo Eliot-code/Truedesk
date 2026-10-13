@@ -132,8 +132,22 @@ To run two instances on one machine, see [`docs/TESTING.md`](docs/TESTING.md).
 - [x] Unattended access with 2FA, start at sign-in
 - [x] Browser viewer
 - [x] Virtual displays on macOS and Windows
+- [x] In-session text chat and view-only sessions
 - [ ] Hardware H.264 on Linux (VAAPI)
-- [ ] Text chat and view-only sessions
+- [ ] Wake-on-LAN, privacy mode, TCP tunneling
+- [ ] Windows login screen, UAC prompts and Ctrl+Alt+Del
+
+### Longer term
+
+Bigger pieces that would bring OpenDesk closer to a full TeamViewer or AnyDesk
+replacement, in rough priority order:
+
+- **Accounts and a web console** — sign-in, synced address book, and device
+  and user management for teams.
+- **Native mobile apps** — Android and iOS, beyond today's browser viewer.
+- **More codecs** — H.265 and VP8/VP9, and hardware encoding on Linux.
+- **Session extras** — remote restart with auto-reconnect, swapping which side
+  controls, and remote printing.
 
 ## Contributing
 
