@@ -113,7 +113,7 @@ pub(crate) struct HostRegistration {
 /// renewed silently so the UI stays "online".
 pub(crate) async fn register_host_until_paired(
     app: &AppHandle,
-    registration: &HostRegistration,
+    registration: &mut HostRegistration,
     still_hosting: impl Fn() -> bool,
 ) -> Option<(host_core::relay_client::RelayWebSocket, host_core::relay_client::Pairing)> {
     let mut backoff = host_core::reconnect::HostRegistrationBackoff::new();
@@ -139,11 +139,30 @@ pub(crate) async fn register_host_until_paired(
         // Re-read per attempt so a relay change applies to the next registration.
         let relay_urls = app.state::<AppState>().lock().config.config.relay_urls.clone();
         let failure = match host_core::relay_client::register_host(&relay_urls, &registration.id, &registration.token).await {
+            Err(error) if host_core::relay_client::is_id_taken(&error) => {
+                // A brand-new random ID can collide with another device's.
+                // Pick another and try again; an ID that has registered
+                // before is kept and the error is shown instead.
+                let replaced = app.state::<AppState>().lock().config.replace_colliding_id();
+                match replaced {
+                    Some(id) => {
+                        log::info!("device ID was taken on the relay; switched to a new one");
+                        registration.id = id.clone();
+                        emit(app, "identity_changed", IdentityChangedEvent { id });
+                        continue;
+                    }
+                    None => {
+                        backoff.record_failure();
+                        error
+                    }
+                }
+            }
             Err(error) => {
                 backoff.record_failure();
                 error
             }
             Ok(mut ws) => {
+                app.state::<AppState>().lock().config.mark_id_registered();
                 if !online {
                     emit_host_status(app, "online");
                     online = true;
@@ -372,7 +391,7 @@ impl AuthBackoff {
 /// ownership of `host_thread` ends the loop.
 pub(crate) fn spawn_host_thread(
     app: AppHandle,
-    registration: HostRegistration,
+    mut registration: HostRegistration,
     first: (host_core::relay_client::RelayWebSocket, host_core::relay_client::Pairing),
     mut stop_rx: oneshot::Receiver<()>,
     token: Arc<()>,
@@ -423,7 +442,7 @@ pub(crate) fn spawn_host_thread(
                 // go straight back to waiting rather than going offline.
                 emit_host_status(&app, "connecting");
                 let still_hosting = || owns_host_thread(&app, &token);
-                let register = register_host_until_paired(&app, &registration, still_hosting);
+                let register = register_host_until_paired(&app, &mut registration, still_hosting);
                 tokio::pin!(register);
                 loop {
                     tokio::select! {
@@ -449,7 +468,7 @@ pub(crate) fn spawn_host_thread(
 #[tauri::command]
 pub(crate) fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<(), String> {
     let reservation_token = Arc::new(());
-    let registration = {
+    let mut registration = {
         let mut s = state.lock();
         // Check and reserve the hosting slot under this single lock so two
         // rapid calls (e.g. a StrictMode double mount) cannot both spawn.
@@ -463,7 +482,7 @@ pub(crate) fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -
     let task_token = reservation_token.clone();
     let task = tauri::async_runtime::spawn(async move {
         let still_reserved = || owns_current_host_reservation(&app, &task_token);
-        let Some(first) = register_host_until_paired(&app, &registration, still_reserved).await else {
+        let Some(first) = register_host_until_paired(&app, &mut registration, still_reserved).await else {
             return;
         };
         // Hold the state lock across spawning and installing the thread:

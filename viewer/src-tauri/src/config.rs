@@ -20,6 +20,12 @@ pub struct Config {
     pub id: String,
     #[serde(default)]
     pub registration_token: String,
+    /// Whether a relay has ever accepted `id`. Until then a collision with
+    /// another device's ID is fixed by picking a new one; after that the ID
+    /// is one people know, so it never changes on its own. Configs written
+    /// before this field existed belong to devices that already registered.
+    #[serde(default = "already_registered")]
+    pub id_registered: bool,
     pub relay_url: String,
     #[serde(default)]
     pub relay_urls: Vec<String>,
@@ -45,6 +51,7 @@ impl Default for Config {
         Self {
             id: generate_id(),
             registration_token: generate_registration_token(),
+            id_registered: false,
             relay_url: DEFAULT_RELAY_URL.to_string(),
             relay_urls: vec![DEFAULT_RELAY_URL.to_string()],
             allow_list: Vec::new(),
@@ -57,6 +64,8 @@ impl Default for Config {
         }
     }
 }
+
+fn already_registered() -> bool { true }
 
 impl Config {
     fn take_legacy_unattended_password(&mut self) -> Option<String> {
@@ -117,9 +126,29 @@ impl ConfigStore {
     pub fn ensure_identity(&mut self) -> String {
         if self.config.id.len() != 9 || !self.config.id.bytes().all(|b| b.is_ascii_digit()) {
             self.config.id = generate_id();
+            self.config.id_registered = false;
             let _ = self.save();
         }
         self.config.id.clone()
+    }
+
+    /// Replaces an ID that a relay says belongs to another device. Returns
+    /// the new ID, or `None` when the current ID has registered before and
+    /// must be kept.
+    pub fn replace_colliding_id(&mut self) -> Option<String> {
+        if self.config.id_registered {
+            return None;
+        }
+        self.config.id = generate_id();
+        let _ = self.save();
+        Some(self.config.id.clone())
+    }
+
+    pub fn mark_id_registered(&mut self) {
+        if !self.config.id_registered {
+            self.config.id_registered = true;
+            let _ = self.save();
+        }
     }
 
     pub fn ensure_registration_token(&mut self) -> String {
@@ -311,6 +340,28 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn only_an_id_that_never_registered_is_replaced_on_collision() {
+        let dir = test_dir();
+        let mut store = ConfigStore::load(&dir).unwrap();
+        let first = store.config.id.clone();
+        assert!(!store.config.id_registered);
+        let replaced = store.replace_colliding_id().expect("a fresh ID is replaced");
+        assert_ne!(replaced, first);
+        assert_eq!(store.config.id, replaced);
+        store.mark_id_registered();
+        assert_eq!(store.replace_colliding_id(), None, "a known ID is kept");
+        assert_eq!(store.config.id, replaced);
+        let reloaded = ConfigStore::load(&dir).unwrap();
+        assert!(reloaded.config.id_registered);
+    }
+
+    #[test]
+    fn configs_from_before_the_flag_count_as_registered() {
+        let config: Config = serde_json::from_str(r#"{"id":"123456789","relay_url":"wss://r/ws","allow_list":[],"recent_ids":[]}"#).unwrap();
+        assert!(config.id_registered);
     }
 
     #[test]

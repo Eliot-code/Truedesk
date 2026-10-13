@@ -11,7 +11,7 @@ const { listeners, mocks } = vi.hoisted(() => {
     onSessionEnded: on("session_ended"), onError: on("error"),
     startVideo: () => () => {}, requestKeyframe: vi.fn(), onAudioFrame: on("audio_frame"), onMonitorList: on("monitor_list"), onLinkStats: on("link_stats"),
     onFileOffer: on("file_offer"), onFileProgress: on("file_progress"), onFileDone: on("file_done"), onFileError: on("file_error"),
-    onFileDrop: on("drop"), onPasswordRotated: on("password_rotated"),
+    onFileDrop: on("drop"), onPasswordRotated: on("password_rotated"), onIdentityChanged: on("identity_changed"),
     permissionStatus: vi.fn(), connect: vi.fn(), disconnect: vi.fn(),
     getIdentity: vi.fn(), getConfig: vi.fn(), getUnattendedStatus: vi.fn(), listContacts: vi.fn(), listAllowed: vi.fn(), startHosting: vi.fn(), getStartAtSignIn: vi.fn(),
     sendInput: vi.fn(), respondToRequest: vi.fn(),

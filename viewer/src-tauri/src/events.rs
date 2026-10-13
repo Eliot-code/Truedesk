@@ -59,6 +59,11 @@ pub(crate) struct TotpEnrollment {
     pub(crate) qr_width: usize,
     pub(crate) qr_modules: Vec<bool>,
 }
+/// The device ID changed because a relay said it belonged to another device.
+#[derive(Serialize, Clone)]
+pub(crate) struct IdentityChangedEvent {
+    pub(crate) id: String,
+}
 #[derive(Serialize, Clone)]
 pub(crate) struct ErrorEvent {
     pub(crate) message: String,

@@ -56,7 +56,9 @@ export default function Home({ status, onConnect, onOpenPermissions, initialTarg
     // The backend rotates the session password after each session and after
     // repeated failed logins.
     const passwordListener = api.onPasswordRotated(({ password }) => { if (mounted) setIdentity((current) => current ? { ...current, password } : current); }).catch(() => undefined);
-    return () => { mounted = false; void passwordListener.then((unlisten) => unlisten?.()); };
+    // A new device's random ID can collide with another device's; the backend picks a new one.
+    const idListener = api.onIdentityChanged(({ id }) => { if (mounted) setIdentity((current) => current ? { ...current, id } : current); }).catch(() => undefined);
+    return () => { mounted = false; void passwordListener.then((unlisten) => unlisten?.()); void idListener.then((unlisten) => unlisten?.()); };
   }, []);
 
   const rotate = async () => {

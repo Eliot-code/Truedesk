@@ -117,3 +117,4 @@ export const onFileProgress = (handler: (payload: FileProgress) => void) => on("
 export const onFileDone = (handler: (payload: FileDone) => void) => on("file_done", handler);
 export const onFileError = (handler: (payload: FileError) => void) => on("file_error", handler);
 export const onPasswordRotated = (handler: (payload: { password: string }) => void) => on("password_rotated", handler);
+export const onIdentityChanged = (handler: (payload: { id: string }) => void) => on("identity_changed", handler);
