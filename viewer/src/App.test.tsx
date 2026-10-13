@@ -16,7 +16,7 @@ const { listeners, mocks } = vi.hoisted(() => {
     onFileDrop: on("drop"), onPasswordRotated: on("password_rotated"), onIdentityChanged: on("identity_changed"),
     onIdentityConflicts: on("identity_conflicts"), getIdentityConflicts: () => Promise.resolve([]),
     permissionStatus: vi.fn(), connect: vi.fn(), disconnect: vi.fn(),
-    getIdentity: vi.fn(), getConfig: vi.fn(), getUnattendedStatus: vi.fn(), listContacts: vi.fn(), listAllowed: vi.fn(), startHosting: vi.fn(), getStartAtSignIn: vi.fn(), getDisplayDriver: vi.fn(), closeKeepsRunning: vi.fn(),
+    getIdentity: vi.fn(), getConfig: vi.fn(), getUnattendedStatus: vi.fn(), listContacts: vi.fn(), listAllowed: vi.fn(), startHosting: vi.fn(), getWindowsServiceStatus: vi.fn(), getStartAtSignIn: vi.fn(), getDisplayDriver: vi.fn(), closeKeepsRunning: vi.fn(),
     sendInput: vi.fn(), respondToRequest: vi.fn(), respondFile: vi.fn(),
   };
   return { listeners, mocks };
@@ -47,6 +47,7 @@ describe("App", () => {
     mocks.listContacts.mockResolvedValue([]);
     mocks.listAllowed.mockResolvedValue([]);
     mocks.startHosting.mockResolvedValue(undefined);
+    mocks.getWindowsServiceStatus.mockResolvedValue({ supported: false, installed: false, running: false });
     mocks.getStartAtSignIn.mockResolvedValue(false);
     mocks.getDisplayDriver.mockResolvedValue({ applies: false, installed: false, license: "" });
     mocks.closeKeepsRunning.mockResolvedValue(false);

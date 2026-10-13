@@ -9,6 +9,7 @@ mod host;
 mod machine;
 mod startup;
 mod vdriver;
+mod windows_service;
 mod viewer;
 
 use config::ConfigStore;
@@ -327,6 +328,26 @@ fn get_unattended_status(state: tauri::State<'_, AppState>) -> UnattendedStatus 
     unattended_status(&state.lock().config.config)
 }
 
+#[tauri::command]
+fn windows_service_status() -> windows_service::ServiceStatus { windows_service::status() }
+
+#[tauri::command]
+fn install_windows_service(app: AppHandle) -> Result<windows_service::ServiceStatus, String> {
+    let data_dir = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    #[cfg(windows)]
+    unattended::stage_machine_store(&data_dir)?;
+    windows_service::install(&data_dir)?;
+    windows_service::start()
+}
+
+#[tauri::command]
+fn uninstall_windows_service() -> Result<windows_service::ServiceStatus, String> {
+    let status = windows_service::uninstall()?;
+    #[cfg(windows)]
+    unattended::clear_machine_store();
+    Ok(status)
+}
+
 fn unattended_status(config: &config::Config) -> UnattendedStatus {
     let check = unattended::check_config(config);
     UnattendedStatus {
@@ -576,6 +597,13 @@ fn disconnect(state: tauri::State<'_, AppState>, app: AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(windows)]
+    if windows_service::is_service_host_process() {
+        std::env::set_var("OPENDESK_SERVICE_HOST", "1");
+        if let Some(data_dir) = windows_service::data_dir() {
+            std::env::set_var("OPENDESK_DATA_DIR", data_dir);
+        }
+    }
     // The elevated copy that installs the virtual display driver (Windows)
     // does only that, before anything else starts.
     if let Some(code) = vdriver::run_helper(&std::env::args_os().skip(1).collect::<Vec<_>>()) {
@@ -644,6 +672,15 @@ pub fn run() {
                 clipboard_thread: None,
                 identity_conflicts: Vec::new(),
             })));
+            #[cfg(windows)]
+            if windows_service::is_service_host_process() {
+                if let Err(error) = host::start_hosting(app.state(), app.handle().clone()) {
+                    log::error!("could not start the service host: {error}");
+                }
+            } else {
+                startup::start(app.handle(), background);
+            }
+            #[cfg(not(windows))]
             startup::start(app.handle(), background);
             Ok(())
         })
@@ -667,6 +704,9 @@ pub fn run() {
             touch_contact,
             set_relay,
             get_unattended_status,
+            windows_service_status,
+            install_windows_service,
+            uninstall_windows_service,
             set_unattended_access,
             set_unattended_2fa,
             confirm_unattended_2fa,

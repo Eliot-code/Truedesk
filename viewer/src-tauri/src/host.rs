@@ -68,6 +68,13 @@ pub(crate) fn host_session_params(s: &mut RuntimeState) -> HostSessionParams {
     // A keyring failure deliberately disables unattended approval for this
     // session and uses the normal manual-accept PAKE path; the problem is
     // shown to the user when the session starts.
+    #[cfg(windows)]
+    let check = if crate::windows_service::is_service_host_process() {
+        unattended::check_runtime_config(&s.config.config)
+    } else {
+        unattended::check_config(&s.config.config)
+    };
+    #[cfg(not(windows))]
     let check = unattended::check_config(&s.config.config);
     let unattended_enabled = check.ready();
     let twofa_enabled = unattended_enabled && s.config.config.unattended_twofa_enabled;
@@ -620,6 +627,11 @@ pub(crate) fn spawn_host_thread(
 
 #[tauri::command]
 pub(crate) fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<(), String> {
+    if !crate::windows_service::should_run_user_host(crate::windows_service::status().running) {
+        log::info!("hosted by the OpenDesk service; user host is standing down");
+        emit_host_status(&app, "offline");
+        return Ok(());
+    }
     let reservation_token = Arc::new(());
     let mut registration = {
         let mut s = state.lock();

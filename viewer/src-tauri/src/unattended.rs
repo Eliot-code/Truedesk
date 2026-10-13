@@ -6,10 +6,28 @@
 
 use crate::config::Config;
 use keyring::{Entry, Error};
+#[cfg(windows)]
+#[allow(unused_imports)]
+use std::{collections::HashMap, path::{Path, PathBuf}};
 
 pub const SERVICE: &str = "opendesk";
 pub const USER: &str = "unattended";
 pub const TOTP_USER: &str = "unattended-totp";
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretStoreKind {
+    UserKeyring,
+    MachineProtected,
+}
+
+/// Select the scope required by the process that will read the secret.
+/// A signed-in user keeps the existing keyring behavior; only the helper
+/// needs the machine-protected store while no interactive user exists.
+#[allow(dead_code)]
+pub fn secret_store_kind(helper_active: bool, user_signed_in: bool) -> SecretStoreKind {
+    if helper_active && !user_signed_in { SecretStoreKind::MachineProtected } else { SecretStoreKind::UserKeyring }
+}
 
 const PASSWORD: &str = "the unattended access password";
 const TOTP: &str = "the 2FA secret";
@@ -34,6 +52,149 @@ impl SecretStore for Keyring {
     fn delete(&self, user: &str) -> keyring::Result<()> {
         Entry::new(SERVICE, user)?.delete_credential()
     }
+}
+
+#[cfg(windows)]
+pub struct MachineStore;
+
+#[cfg(windows)]
+fn machine_store_path() -> PathBuf {
+    std::env::var_os("ProgramData").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\ProgramData")).join("OpenDesk").join("secrets.json")
+}
+
+#[cfg(windows)]
+fn machine_error(error: impl std::fmt::Display) -> Error {
+    Error::PlatformFailure(Box::new(std::io::Error::other(error.to_string())))
+}
+
+/// DPAPI with the machine scope. The secrets are never written in the clear:
+/// only code running on this machine (the SYSTEM service and Administrators,
+/// to whom the file is also locked down) can decrypt them, and a stolen disk
+/// cannot. The machine scope lets the signed-in user encrypt a secret that the
+/// SYSTEM service later reads.
+#[cfg(windows)]
+mod dpapi {
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Cryptography::{CryptProtectData, CryptUnprotectData, CRYPTPROTECT_LOCAL_MACHINE, CRYPT_INTEGER_BLOB};
+
+    fn blob(data: &[u8]) -> CRYPT_INTEGER_BLOB {
+        CRYPT_INTEGER_BLOB { cbData: data.len() as u32, pbData: data.as_ptr() as *mut u8 }
+    }
+
+    fn take(out: CRYPT_INTEGER_BLOB) -> Vec<u8> {
+        unsafe {
+            let bytes = std::slice::from_raw_parts(out.pbData, out.cbData as usize).to_vec();
+            LocalFree(out.pbData as *mut core::ffi::c_void);
+            bytes
+        }
+    }
+
+    pub fn protect(plain: &[u8]) -> Option<Vec<u8>> {
+        let input = blob(plain);
+        let mut out = CRYPT_INTEGER_BLOB::default();
+        let ok = unsafe { CryptProtectData(&input, std::ptr::null(), std::ptr::null(), std::ptr::null(), std::ptr::null(), CRYPTPROTECT_LOCAL_MACHINE, &mut out) };
+        (ok != 0).then(|| take(out))
+    }
+
+    pub fn unprotect(sealed: &[u8]) -> Option<Vec<u8>> {
+        let input = blob(sealed);
+        let mut out = CRYPT_INTEGER_BLOB::default();
+        let ok = unsafe { CryptUnprotectData(&input, std::ptr::null_mut(), std::ptr::null(), std::ptr::null(), std::ptr::null(), CRYPTPROTECT_LOCAL_MACHINE, &mut out) };
+        (ok != 0).then(|| take(out))
+    }
+}
+
+/// Write a secrets file so only SYSTEM and Administrators can read it. The
+/// directory's inheritable permissions are reset *before* the file is created,
+/// so the file never exists with the broad ProgramData defaults, and the file
+/// itself is locked down too as a belt-and-braces second step.
+#[cfg(windows)]
+fn write_locked(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let dir = path.parent().ok_or("machine secret directory is missing")?;
+    std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
+    let lock = |target: &str| {
+        std::process::Command::new("icacls")
+            .args([target, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"])
+            .status()
+            .map_err(|error| error.to_string())
+            .and_then(|status| status.success().then_some(()).ok_or_else(|| "could not protect the machine secret store".to_owned()))
+    };
+    lock(&dir.to_string_lossy())?;
+    std::fs::write(path, bytes).map_err(|error| error.to_string())?;
+    lock(&path.to_string_lossy())
+}
+
+/// Read and decrypt the machine secrets map. Missing file, failed decryption
+/// or bad JSON all read as "no secrets" so a tampered or stale file can never
+/// crash the service; it just falls back to needing approval.
+#[cfg(windows)]
+fn read_machine_secrets() -> Result<HashMap<String, String>, Error> {
+    let sealed = match std::fs::read(machine_store_path()) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(Error::NoEntry),
+        Err(error) => return Err(machine_error(error)),
+    };
+    let plain = dpapi::unprotect(&sealed).ok_or(Error::NoEntry)?;
+    Ok(serde_json::from_slice(&plain).unwrap_or_default())
+}
+
+#[cfg(windows)]
+fn write_machine_secrets(secrets: &HashMap<String, String>) -> keyring::Result<()> {
+    let plain = serde_json::to_vec(secrets).map_err(machine_error)?;
+    let sealed = dpapi::protect(&plain).ok_or_else(|| machine_error("DPAPI could not encrypt the machine secret store"))?;
+    write_locked(&machine_store_path(), &sealed).map_err(machine_error)
+}
+
+#[cfg(windows)]
+impl SecretStore for MachineStore {
+    fn get(&self, user: &str) -> keyring::Result<String> {
+        read_machine_secrets()?.get(user).cloned().ok_or(Error::NoEntry)
+    }
+    fn set(&self, user: &str, secret: &str) -> keyring::Result<()> {
+        let mut secrets = read_machine_secrets().unwrap_or_default();
+        secrets.insert(user.to_owned(), secret.to_owned());
+        write_machine_secrets(&secrets)
+    }
+    fn delete(&self, user: &str) -> keyring::Result<()> {
+        let mut secrets = read_machine_secrets()?;
+        if secrets.remove(user).is_none() { return Err(Error::NoEntry); }
+        write_machine_secrets(&secrets)
+    }
+}
+
+#[cfg(windows)]
+pub fn stage_machine_store(data_dir: &Path) -> Result<(), String> {
+    let password = match read_password(&Keyring) { Lookup::Found(value) => value, Lookup::Missing => return Err("save unattended access before enabling the Windows sign-in service".into()), Lookup::Unavailable(error) => return Err(error) };
+    let mut secrets = HashMap::from([(USER.to_owned(), password)]);
+    if let Lookup::Found(secret) = read_totp_secret(&Keyring) { secrets.insert(TOTP_USER.to_owned(), secret); }
+    // Encrypt before the secrets ever touch the disk, and lock the staged file
+    // down too: it sits in ProgramData until the service promotes it.
+    let plain = serde_json::to_vec(&secrets).map_err(|error| error.to_string())?;
+    let sealed = dpapi::protect(&plain).ok_or("could not encrypt the staged secrets")?;
+    write_locked(&data_dir.join("service-secrets.json"), &sealed)
+}
+
+/// Remove the machine secret store. Called when the sign-in service is
+/// uninstalled so the unattended secret does not linger on disk.
+#[cfg(windows)]
+pub fn clear_machine_store() {
+    let _ = std::fs::remove_file(machine_store_path());
+}
+
+#[cfg(windows)]
+pub fn promote_staged_machine_store(data_dir: &Path) -> Result<(), String> {
+    let staged = data_dir.join("service-secrets.json");
+    // The staged file is already a DPAPI blob; move it to the machine store
+    // unchanged, locked down so only SYSTEM and Administrators can read it.
+    let sealed = std::fs::read(&staged).map_err(|error| error.to_string())?;
+    write_locked(&machine_store_path(), &sealed)?;
+    let _ = std::fs::remove_file(staged);
+    Ok(())
+}
+
+#[cfg(windows)]
+pub fn check_runtime_config(config: &Config) -> Check {
+    check(&MachineStore, config.unattended_enabled, config.unattended_password_set, config.unattended_twofa_enabled)
 }
 
 /// What to do when the keyring can't be used on this platform.
@@ -289,6 +450,13 @@ mod tests {
             self.failure(user)?;
             self.secrets.borrow_mut().remove(user).map(|_| ()).ok_or(Error::NoEntry)
         }
+    }
+
+    #[test]
+    fn machine_store_is_selected_only_for_an_unattended_helper() {
+        assert_eq!(secret_store_kind(true, false), SecretStoreKind::MachineProtected);
+        assert_eq!(secret_store_kind(true, true), SecretStoreKind::UserKeyring);
+        assert_eq!(secret_store_kind(false, false), SecretStoreKind::UserKeyring);
     }
 
     fn settings(enabled: bool, password_set: bool, twofa: bool) -> Config {

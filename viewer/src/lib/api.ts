@@ -11,6 +11,7 @@ export interface IdentityConflict { relay: string; kind: "taken" | "in_use"; mes
 export interface AppConfig { relay_url: string; relay_urls: string[]; recent_ids: string[]; clipboard_sync: boolean; allow_virtual_displays: boolean }
 /** `ready` means the keyring answered and connections skip approval; `problem` says why not when it is on. */
 export interface UnattendedStatus { enabled: boolean; has_password: boolean; twofa_enabled: boolean; ready: boolean; problem: string | null }
+export interface WindowsServiceStatus { supported: boolean; installed: boolean; running: boolean }
 export interface PermissionStatus { screen_recording: boolean; accessibility: boolean }
 export interface IncomingRequest { peer_id: string; fingerprint: string; known: boolean }
 export interface SessionStarted { role: "host" | "viewer"; remote_id: string }
@@ -46,6 +47,9 @@ export const setRelay = (url: string) => invoke<void>("set_relay", { url });
 export const setRelays = (urls: string[]) => invoke<void>("set_relays", { urls });
 export const listRelays = () => invoke<string[]>("list_relays");
 export const getUnattendedStatus = () => invoke<UnattendedStatus>("get_unattended_status");
+export const getWindowsServiceStatus = () => invoke<WindowsServiceStatus>("windows_service_status");
+export const installWindowsService = () => invoke<WindowsServiceStatus>("install_windows_service");
+export const uninstallWindowsService = () => invoke<WindowsServiceStatus>("uninstall_windows_service");
 export const setUnattendedAccess = (enabled: boolean, password: string | null) => invoke<UnattendedStatus>("set_unattended_access", { enabled, password });
 /** Enabling returns a pending enrollment; 2FA is active only after confirmUnattended2fa. */
 export const setUnattended2fa = (enabled: boolean) => invoke<TotpEnrollment | null>("set_unattended_2fa", { enabled });
