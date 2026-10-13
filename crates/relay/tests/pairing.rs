@@ -239,3 +239,52 @@ async fn a_host_that_reconnects_cleanly_is_never_in_use() {
     assert!(matches!(first_control(&mut viewer).await, Some(Control::Paired { .. })));
     assert!(matches!(first_control(&mut host).await, Some(Control::Paired { .. })));
 }
+
+#[tokio::test]
+async fn every_refusal_says_why() {
+    use protocol::control::{ERROR_CONNECT_RATE, ERROR_INVALID_CONNECT, ERROR_INVALID_CONTROL, ERROR_INVALID_REGISTER};
+    let addr = relay::spawn_test_server().await;
+    let url = format!("ws://{addr}/ws");
+    let error = |code: &str| Some(Control::Error { code: code.into() });
+
+    let (mut host, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    host.send(control(Control::Register { peer_id: "123456789".into(), token: "not-a-token".into(), ver: 1 })).await.unwrap();
+    assert_eq!(first_control(&mut host).await, error(ERROR_INVALID_REGISTER));
+
+    let (mut viewer, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    viewer.send(control(Control::Connect { target: "12".into(), peer_id: "987654321".into(), ver: 1 })).await.unwrap();
+    assert_eq!(first_control(&mut viewer).await, error(ERROR_INVALID_CONNECT));
+
+    let (mut other, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    other.send(control(Control::KeepAlive)).await.unwrap();
+    assert_eq!(first_control(&mut other).await, error(ERROR_INVALID_CONTROL));
+
+    // Six connects per ID per 10 s from one address.
+    let mut last = None;
+    for _ in 0..7 {
+        last = first_control(&mut viewer_connect(&url).await).await;
+    }
+    assert_eq!(last, error(ERROR_CONNECT_RATE));
+}
+
+#[tokio::test]
+async fn a_full_relay_says_it_is_busy() {
+    let addr = relay::spawn_test_server().await;
+    let url = format!("ws://{addr}/ws");
+    // 20 connection attempts per address per 10 s.
+    let mut open = Vec::new();
+    for _ in 0..20 {
+        open.push(tokio_tungstenite::connect_async(&url).await.unwrap().0);
+    }
+    let (mut refused, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    assert_eq!(first_control(&mut refused).await, Some(Control::Error { code: protocol::control::ERROR_RELAY_BUSY.into() }));
+}
+
+#[tokio::test]
+async fn a_parked_host_gets_pongs() {
+    let addr = relay::spawn_test_server().await;
+    let mut host = register(&format!("ws://{addr}/ws"), &"00".repeat(32)).await;
+    host.send(Message::Ping(b"x".to_vec().into())).await.unwrap();
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(2), host.next()).await.unwrap().unwrap().unwrap();
+    assert_eq!(reply, Message::Pong(b"x".to_vec().into()));
+}

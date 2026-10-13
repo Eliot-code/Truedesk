@@ -10,6 +10,22 @@ pub const ERROR_ID_IN_USE: &str = "id_in_use";
 /// `Control::Error` code the relay sends when a `connect` names an ID that is
 /// not waiting for a viewer: offline, or already in a session.
 pub const ERROR_PEER_UNAVAILABLE: &str = "peer_unavailable";
+/// The relay has no room for another ID.
+pub const ERROR_REGISTRY_FULL: &str = "registry_full";
+/// Too many new IDs registered from this network (20 an hour by default).
+pub const ERROR_NEW_ID_RATE: &str = "new_id_rate";
+/// Too many `connect`s from this network to one ID in a short time.
+pub const ERROR_CONNECT_RATE: &str = "connect_rate";
+/// The relay is at its connection limit, or this network opened too many.
+pub const ERROR_RELAY_BUSY: &str = "relay_busy";
+/// A `register` the relay can't accept (bad ID, token or version).
+pub const ERROR_INVALID_REGISTER: &str = "invalid_register";
+/// A `connect` the relay can't accept (bad ID or version).
+pub const ERROR_INVALID_CONNECT: &str = "invalid_connect";
+/// A first message that is neither `register` nor `connect`.
+pub const ERROR_INVALID_CONTROL: &str = "invalid_control";
+// Relays older than these codes just close the socket. Apps that don't know
+// a code treat it like that close: a generic rejection they retry.
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]

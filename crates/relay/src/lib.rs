@@ -295,6 +295,7 @@ async fn ws_handler(ws: WebSocketUpgrade, ConnectInfo(addr): ConnectInfo<SocketA
 async fn handle(socket: WebSocket, state: RelayState, addr: IpAddr, guard: Option<ConnectionGuard>) {
     let Some(_guard) = guard else {
         let mut socket = socket;
+        let _ = socket.send(Message::Binary(session::error_frame(protocol::control::ERROR_RELAY_BUSY).into())).await;
         let _ = socket.send(Message::Close(Some(CloseFrame { code: 1013, reason: "relay capacity".into() }))).await;
         return;
     };
@@ -376,20 +377,20 @@ async fn handle(socket: WebSocket, state: RelayState, addr: IpAddr, guard: Optio
             (peer, peer_close_tx, Some(peer_id))
         }
         Err(error) => {
+            use protocol::control::*;
             let reason = match error {
-                session::ClassifyError::ConnectRateLimited => "connect_rate",
-                session::ClassifyError::InvalidRegistration => "invalid_register",
-                session::ClassifyError::IdTaken => protocol::control::ERROR_ID_TAKEN,
-                session::ClassifyError::IdInUse => protocol::control::ERROR_ID_IN_USE,
-                session::ClassifyError::RegistryFull => "registry_full",
-                session::ClassifyError::NewIdRateLimited => "new_id_rate",
-                session::ClassifyError::InvalidConnect => "invalid_connect",
-                session::ClassifyError::PeerUnavailable => protocol::control::ERROR_PEER_UNAVAILABLE,
-                session::ClassifyError::InvalidControl => "invalid_control",
+                session::ClassifyError::ConnectRateLimited => ERROR_CONNECT_RATE,
+                session::ClassifyError::InvalidRegistration => ERROR_INVALID_REGISTER,
+                session::ClassifyError::IdTaken => ERROR_ID_TAKEN,
+                session::ClassifyError::IdInUse => ERROR_ID_IN_USE,
+                session::ClassifyError::RegistryFull => ERROR_REGISTRY_FULL,
+                session::ClassifyError::NewIdRateLimited => ERROR_NEW_ID_RATE,
+                session::ClassifyError::InvalidConnect => ERROR_INVALID_CONNECT,
+                session::ClassifyError::PeerUnavailable => ERROR_PEER_UNAVAILABLE,
+                session::ClassifyError::InvalidControl => ERROR_INVALID_CONTROL,
             };
-            if matches!(error, session::ClassifyError::IdTaken | session::ClassifyError::IdInUse | session::ClassifyError::PeerUnavailable) {
-                let _ = my_tx.send(session::error_frame(reason)).await;
-            }
+            // Always say why: a bare close leaves the app guessing.
+            let _ = my_tx.send(session::error_frame(reason)).await;
             let _ = close_tx.send(Some(CloseFrame { code: 1008, reason: reason.into() }));
             log_event("pairing_failure", addr, reason);
             // Give the writer a moment to flush the error and close frames.
