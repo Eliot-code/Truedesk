@@ -15,7 +15,7 @@ use config::ConfigStore;
 use contacts::{Contact, ContactStore};
 use futures_util::StreamExt;
 use host_core::{clipboard::{ArboardBackend, ClipboardSync}, datachan::{FileRouter, IncomingTransfer}, filexfer::{ConsentDecision, FileReceiver, FileSink, FileSource, FileSender}, roles::DataHandle, transport::reliable::ReliableSender};
-use protocol::{control::{Control, MonitorInfo}, crypto::{Opener, Sealer}, datamsg::DataMsg, filexfer::FileMsg, frame, Tag};
+use protocol::{chat::ChatMsg, control::{Control, MonitorInfo}, crypto::{Opener, Sealer}, datamsg::DataMsg, filexfer::FileMsg, frame, Tag};
 use serde::Serialize;
 use std::{collections::HashMap, fs, fs::OpenOptions, io, path::{Path, PathBuf}, sync::{atomic::{AtomicBool, Ordering}, mpsc as std_mpsc, Arc, Mutex}, time::{Duration, Instant}};
 use tauri::{AppHandle, Emitter, Manager};
@@ -162,6 +162,7 @@ fn spawn_clipboard_thread(
 /// never stops on an unexpected message: ending it would drop the reliable
 /// reader's Data queue and with it the session.
 fn dispatch_data(
+    app: AppHandle,
     incoming: mpsc::Receiver<Vec<u8>>,
     opener: Arc<Mutex<Opener>>,
     clipboard_tx: Option<std_mpsc::Sender<ClipboardCommand>>,
@@ -174,6 +175,7 @@ fn dispatch_data(
         move |message| {
             if let Some(sender) = &clipboard_tx { let _ = sender.send(ClipboardCommand::Apply(message.text)); }
         },
+        move |message| emit(&app, "chat_message", ChatMessage { text: message.text }),
     ));
     (router, offers)
 }
@@ -184,7 +186,7 @@ fn activate_data_channel(app: &AppHandle, handle: DataHandle, from: String) {
     let sealer = Arc::new(Mutex::new(sealer));
     let clipboard_thread = spawn_clipboard_thread(sender.clone(), sealer.clone(), enabled);
     let clipboard_tx = clipboard_thread.as_ref().map(|(tx, _)| tx.clone());
-    let (file_router, offers) = dispatch_data(receiver, Arc::new(Mutex::new(opener)), clipboard_tx);
+    let (file_router, offers) = dispatch_data(app.clone(), receiver, Arc::new(Mutex::new(opener)), clipboard_tx);
     let state = app.state::<AppState>();
     let mut state = state.lock();
     state.file_outgoing = Some(sender);
@@ -501,6 +503,18 @@ fn set_clipboard_sync(state: tauri::State<'_, AppState>, enabled: bool) {
         log::warn!("could not save clipboard sync preference: {error}");
     }
 }
+#[tauri::command]
+async fn send_chat(state: tauri::State<'_, AppState>, text: String) -> Result<(), String> {
+    let (outgoing, sealer) = {
+        let state = state.lock();
+        (state.file_outgoing.clone(), state.file_sealer.clone())
+    };
+    let outgoing = outgoing.ok_or_else(|| "no active session".to_owned())?;
+    let sealer = sealer.ok_or_else(|| "no active session".to_owned())?;
+    let plaintext = DataMsg::Chat(ChatMsg { text }).to_bytes();
+    let sealed = lock_unpoisoned(&sealer).seal(&[Tag::Data as u8], &plaintext);
+    outgoing.send_frame(Tag::Data, &sealed).await.map_err(|error| error.to_string())
+}
 
 /// Applies from the next session on.
 #[tauri::command]
@@ -679,6 +693,7 @@ pub fn run() {
             set_audio_muted,
             send_file,
             respond_file,
+            send_chat,
             start_recording,
             append_recording,
             finish_recording,

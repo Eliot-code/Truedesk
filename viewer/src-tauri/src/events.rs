@@ -145,10 +145,16 @@ pub(crate) struct FileError {
     pub(crate) id: u64,
     pub(crate) message: String,
 }
+/// An inbound chat message from the peer. The UI echoes locally sent messages
+/// itself, so only the peer's messages ever reach it as this event.
+#[derive(Serialize, Clone)]
+pub(crate) struct ChatMessage {
+    pub(crate) text: String,
+}
 
 /// Lifecycle events that also go to the log file, so a bug report can include
 /// what happened. Media and progress events are too frequent to log.
-pub(crate) const LOGGED_EVENTS: &[&str] = &["status_changed", VIEWER_STATUS, "session_started", "session_ended", "incoming_request", "error", "file_error", "identity_changed", "identity_conflicts"];
+pub(crate) const LOGGED_EVENTS: &[&str] = &["status_changed", VIEWER_STATUS, "session_started", "session_ended", "incoming_request", "error", "file_error", "identity_changed", "identity_conflicts", "chat_message"];
 
 /// The outgoing (viewer) session's own status. `status_changed` is only ever
 /// the host's presence, so a host hiccup never shows up in a viewer session.
