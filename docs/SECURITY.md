@@ -78,6 +78,13 @@ the keychain read fails, the host disables unattended approval for that
 session and falls back to manual approval. Use a long, unique secret and
 disable unattended access when you don't need it.
 
+"Start OpenDesk when I sign in" adds a per-user sign-in entry (a LaunchAgent
+on macOS, the `Run` registry key on Windows, an XDG autostart file on Linux).
+It starts the app hidden in the tray and hosting, but only after someone signs
+in: nothing runs at the login screen or as a system service. It can only be
+turned on once unattended access is saved. While it is on, closing the window
+leaves the host running; use Quit in the tray menu to stop it.
+
 Manual approval is the default when unattended access is disabled. Devices on
 the host's allow-list skip the approval dialog but still have to authenticate
 with the password. The pairing flow does not yet provide a cryptographic peer

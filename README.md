@@ -42,6 +42,7 @@ addresses; it does not relay media or receive desktop contents.
 - End-to-end encrypted screen, input, and audio
 - End-to-end encrypted file transfer and text-only clipboard sync
 - Optional unattended access with a stored password and an optional TOTP two-factor code
+- Optional start at sign-in, so an unattended machine is reachable again after a restart
 - Local address book and recent peer IDs
 - Multi-monitor discovery and monitor selection
 

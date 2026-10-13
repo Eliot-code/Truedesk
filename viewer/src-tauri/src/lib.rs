@@ -6,6 +6,7 @@ mod events;
 mod recording;
 mod files;
 mod host;
+mod startup;
 mod viewer;
 
 use config::ConfigStore;
@@ -550,13 +551,17 @@ fn disconnect(state: tauri::State<'_, AppState>, app: AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let background = startup::launched_in_background(std::env::args_os().skip(1));
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         // Checks the manifest in `plugins.updater` (tauri.conf.json); the
         // frontend decides when to install. See docs/RELEASE.md.
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        // The sign-in entry (a LaunchAgent on macOS, the Run key on Windows,
+        // an XDG autostart file on Linux) launches with BACKGROUND_ARG.
+        .plugin(tauri_plugin_autostart::Builder::new().arg(startup::BACKGROUND_ARG).build())
         // Stdout plus a rotating file in the OS log dir (macOS:
         // ~/Library/Logs/com.opendesk.app/) for bug reports.
         .plugin(
@@ -572,7 +577,7 @@ pub fn run() {
         .manage(Recordings::default())
         .manage(VideoSink::default())
         .manage(unattended::PendingTotp::default())
-        .setup(|app| {
+        .setup(move |app| {
             let app_data_dir = app
                 .path()
                 .app_data_dir()
@@ -604,7 +609,15 @@ pub fn run() {
                 audio_muted: Arc::new(AtomicBool::new(false)),
                 clipboard_thread: None,
             })));
+            startup::start(app.handle(), background);
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if startup::hide_instead_of_close(window) {
+                    api.prevent_close();
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             get_identity,
@@ -645,8 +658,15 @@ pub fn run() {
             set_relays,
             list_relays
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+    app.run(|_app, _event| {
+        // Clicking the Dock icon brings back a window hidden to the tray.
+        #[cfg(target_os = "macos")]
+        if let tauri::RunEvent::Reopen { has_visible_windows: false, .. } = _event {
+            startup::show_main_window(_app);
+        }
+    });
 }
 
 #[cfg(test)]

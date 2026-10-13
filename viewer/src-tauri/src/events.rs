@@ -123,6 +123,7 @@ static HOST_STATUS: std::sync::Mutex<&str> = std::sync::Mutex::new("offline");
 
 pub(crate) fn emit_host_status(app: &AppHandle, state: &'static str) {
     remember_host_status(state);
+    crate::startup::sync_tray(app, state);
     emit(app, "status_changed", StatusEvent { state });
 }
 

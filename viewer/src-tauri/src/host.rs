@@ -221,6 +221,8 @@ pub(crate) async fn run_paired_host_session(
             let _ = rejected_tx.send(false);
             return false;
         }
+        // A host started at sign-in may be hidden in the tray.
+        startup::reveal_if_hidden(&approve_app);
         emit(&approve_app, "incoming_request", IncomingRequest {
             peer_id: peer_id.clone(), fingerprint: "pending".into(), known,
         });
