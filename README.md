@@ -48,7 +48,9 @@ addresses; it does not relay media or receive desktop contents.
 
 The host sends its system sound on macOS 14.6+, Windows, and Linux (PulseAudio, or PipeWire via pipewire-pulse). Elsewhere (older macOS, Linux without either server) it sends no sound. It never uses the microphone. Windows and Linux host support is less mature than macOS, which is where most testing has happened.
 
-For the architecture, security model, and self-hosting instructions, see
+User docs (install, sessions, unattended access, troubleshooting) are at
+<https://opendesk.treeot.dev/docs/>. For the architecture, security model,
+and self-hosting details, see
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
 [`docs/SECURITY.md`](docs/SECURITY.md), and
 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
@@ -70,7 +72,7 @@ For local development, run `cargo run -p relay`, use
 ## Browser viewer
 
 If you can't install anything on the computer you're sitting at, open
-<https://opendesk.treeot.dev>, enter the other computer's ID and
+<https://opendesk.treeot.dev/connect/>, enter the other computer's ID and
 password (and its 2FA code, if it asks for one), and connect. The other
 computer still needs the desktop app to host.
 
@@ -89,6 +91,11 @@ setup, use the desktop app, or build `web/` yourself and host it.
 To build it: `cd web && npm ci && npm run wasm && npm run build` (needs the
 `wasm32-unknown-unknown` target and `wasm-bindgen-cli` 0.2.129). Set
 `OPENDESK_DEFAULT_RELAY` at build time to choose the default relay.
+
+The website, with the docs and this viewer at `/connect/`, is the Astro
+project in `site/`: run `npm run wasm` in `web/` first, then
+`cd site && npm ci && npm run build`. The docs pages are Markdown files in
+`site/src/content/docs/docs/`.
 
 ## Why OpenDesk
 
@@ -206,7 +213,8 @@ finalizing, and reserves unique paths for concurrent transfers.
 ### Clipboard sync
 
 Clipboard sync sends text-only clipboard contents, end-to-end encrypted, over
-the session Data channel. A per-session toggle controls it (on by default).
+the session Data channel. A toolbar toggle controls it; it starts off, and
+the choice is remembered.
 Clipboard text is capped at 1 MB (`MAX_CLIPBOARD`), and a value received from
 the peer is not echoed back after it is applied locally.
 
