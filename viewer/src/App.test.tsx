@@ -40,7 +40,7 @@ describe("App", () => {
     mocks.disconnect.mockResolvedValue(undefined);
     mocks.getIdentity.mockResolvedValue({ id: "123456789", password: "654321" });
     mocks.getConfig.mockResolvedValue({ relay_url: "wss://relay", relay_urls: ["wss://relay"], recent_ids: [], clipboard_sync: false });
-    mocks.getUnattendedStatus.mockResolvedValue({ enabled: false, has_password: false, twofa_enabled: false });
+    mocks.getUnattendedStatus.mockResolvedValue({ enabled: false, has_password: false, twofa_enabled: false, ready: false, problem: null });
     mocks.listContacts.mockResolvedValue([]);
     mocks.listAllowed.mockResolvedValue([]);
     mocks.startHosting.mockResolvedValue(undefined);

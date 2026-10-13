@@ -73,10 +73,12 @@ If you also turn on two-factor authentication, the viewer must send a valid
 TOTP code as well; a wrong code rejects the session.
 
 The viewer stores the unattended password and the TOTP secret in the OS
-keychain, so anyone who can unlock the host's user account can read them. If
-the keychain read fails, the host disables unattended approval for that
-session and falls back to manual approval. Use a long, unique secret and
-disable unattended access when you don't need it.
+keychain, so anyone who can unlock the host's user account can read them.
+Nothing is written to disk in plaintext when the keychain is unavailable. If
+it can't be read (locked, wiped, moved to a new machine, or no Secret Service
+on Linux), the app says so, each connection falls back to manual approval,
+and a launch at sign-in opens the window instead of hiding in the tray. Use a
+long, unique secret and disable unattended access when you don't need it.
 
 "Start OpenDesk when I sign in" adds a per-user sign-in entry (a LaunchAgent
 on macOS, the `Run` registry key on Windows, an XDG autostart file on Linux).

@@ -59,21 +59,19 @@ pub(crate) struct HostSessionParams {
     pub(crate) unattended_enabled: bool,
     pub(crate) twofa_enabled: bool,
     pub(crate) totp_secret: Option<String>,
+    /// Why unattended access is on but can't be used for this session.
+    pub(crate) unattended_problem: Option<String>,
 }
 
 pub(crate) fn host_session_params(s: &mut RuntimeState) -> HostSessionParams {
-    let unattended_password = if s.config.config.unattended_enabled {
-        unattended::get_password().ok()
-    } else {
-        None
-    };
-    // A keychain failure deliberately disables unattended approval for
-    // this session and uses the normal manual-accept PAKE path.
-    let unattended_enabled = unattended_password.is_some();
+    // A keyring failure deliberately disables unattended approval for this
+    // session and uses the normal manual-accept PAKE path; the problem is
+    // shown to the user when the session starts.
+    let check = unattended::check_config(&s.config.config);
+    let unattended_enabled = check.ready();
     let twofa_enabled = unattended_enabled && s.config.config.unattended_twofa_enabled;
-    let totp_secret = if twofa_enabled { unattended::get_totp_secret().ok() } else { None };
-    let password = unattended_password.unwrap_or_else(|| current_password(s));
-    HostSessionParams { password, unattended_enabled, twofa_enabled, totp_secret }
+    let password = check.password.unwrap_or_else(|| current_password(s));
+    HostSessionParams { password, unattended_enabled, twofa_enabled, totp_secret: check.totp_secret, unattended_problem: check.problem }
 }
 
 /// Wakes hosting loops when the saved relay list changes, so a parked
@@ -211,7 +209,11 @@ pub(crate) async fn run_paired_host_session(
     // when host-core asks for approval.
     let authenticated = Arc::new(AtomicBool::new(false));
     let authenticated_flag = authenticated.clone();
-    let HostSessionParams { password, unattended_enabled, twofa_enabled, totp_secret } = params;
+    let HostSessionParams { password, unattended_enabled, twofa_enabled, totp_secret, unattended_problem } = params;
+    if let Some(problem) = unattended_problem {
+        // This connection will need approval; say why before the prompt.
+        emit(app, "error", ErrorEvent { message: problem });
+    }
     // The viewer's peer ID comes from the relay's pairing message and is not
     // authenticated, so an allow-listed ID never skips approval; the prompt
     // only marks it as a known device. Unattended access (its own password,

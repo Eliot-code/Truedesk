@@ -315,11 +315,17 @@ fn list_relays(state: tauri::State<'_, AppState>) -> Vec<String> {
 }
 #[tauri::command]
 fn get_unattended_status(state: tauri::State<'_, AppState>) -> UnattendedStatus {
-    let state = state.lock();
+    unattended_status(&state.lock().config.config)
+}
+
+fn unattended_status(config: &config::Config) -> UnattendedStatus {
+    let check = unattended::check_config(config);
     UnattendedStatus {
-        enabled: state.config.config.unattended_enabled,
-        has_password: unattended::has_password(state.config.config.unattended_password_set),
-        twofa_enabled: state.config.config.unattended_twofa_enabled && unattended::get_totp_secret().is_ok(),
+        enabled: config.unattended_enabled,
+        has_password: check.has_password,
+        twofa_enabled: config.unattended_twofa_enabled,
+        ready: check.ready(),
+        problem: check.problem,
     }
 }
 
@@ -358,7 +364,7 @@ fn set_unattended_2fa(
         if !state.config.config.unattended_enabled {
             return Err("turn on unattended access before adding two-factor".into());
         }
-        if state.config.config.unattended_twofa_enabled && unattended::get_totp_secret().is_ok() {
+        if unattended::twofa_active(&unattended::Keyring, &state.config.config) {
             return Err("two-factor is already enabled".into());
         }
         let secret = pending.get_or_insert_with(random_base32_secret).clone();
@@ -367,10 +373,7 @@ fn set_unattended_2fa(
         Ok(Some(TotpEnrollment { uri, secret, qr_width, qr_modules }))
     } else {
         *pending = None;
-        if state.config.config.unattended_twofa_enabled || unattended::get_totp_secret().is_ok() {
-            unattended::delete_totp_secret().map_err(|error| format!("could not clear TOTP secret: {error}"))?;
-        }
-        state.config.config.unattended_twofa_enabled = false;
+        unattended::disable_twofa(&unattended::Keyring, &mut state.config.config)?;
         state.config.save().map_err(|error| error.to_string())?;
         Ok(None)
     }
@@ -380,7 +383,7 @@ fn confirm_unattended_2fa(
     state: tauri::State<'_, AppState>,
     pending: tauri::State<'_, unattended::PendingTotp>,
     code: String,
-) -> Result<(), String> {
+) -> Result<UnattendedStatus, String> {
     let mut state = state.lock();
     let mut pending = pending.lock();
     let secret = pending.clone().ok_or("no two-factor setup is in progress")?;
@@ -391,11 +394,10 @@ fn confirm_unattended_2fa(
     if !host_core::roles::totp_is_valid(&secret, code.trim(), now) {
         return Err("invalid 2FA code".into());
     }
-    unattended::set_totp_secret(&secret).map_err(|error| format!("could not store TOTP secret: {error}"))?;
-    state.config.config.unattended_twofa_enabled = true;
+    unattended::enable_twofa(&unattended::Keyring, &mut state.config.config, &secret)?;
     state.config.save().map_err(|error| error.to_string())?;
     *pending = None;
-    Ok(())
+    Ok(unattended_status(&state.config.config))
 }
 /// Unattended access skips the approval prompt, so its password is the only
 /// barrier against online guessing.
@@ -460,21 +462,17 @@ fn set_unattended_access(
     state: tauri::State<'_, AppState>,
     enabled: bool,
     password: Option<String>,
-) -> Result<(), String> {
+) -> Result<UnattendedStatus, String> {
     let mut state = state.lock();
     // A blank field keeps the stored password (the UI says "enter a new
     // password to replace it"); disabling is how access is turned off.
-    if let Some(password) = password.filter(|value| !value.is_empty()) {
-        validate_unattended_password(&password)?;
-        unattended::set_password(&password).map_err(|error| format!("could not store unattended access password: {error}"))?;
+    let password = password.filter(|value| !value.is_empty());
+    if let Some(password) = &password {
+        validate_unattended_password(password)?;
     }
-    let has_password = unattended::get_password().is_ok();
-    if enabled && !has_password {
-        return Err("enter an unattended access password before enabling it".into());
-    }
-    state.config.config.unattended_password_set = has_password;
-    state.config.config.unattended_enabled = enabled;
-    state.config.save().map_err(|error| error.to_string())
+    unattended::set_access(&unattended::Keyring, &mut state.config.config, enabled, password.as_deref())?;
+    state.config.save().map_err(|error| error.to_string())?;
+    Ok(unattended_status(&state.config.config))
 }
 #[tauri::command]
 fn permission_status() -> PermissionStatus {

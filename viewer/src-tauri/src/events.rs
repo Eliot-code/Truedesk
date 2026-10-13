@@ -23,6 +23,10 @@ pub(crate) struct UnattendedStatus {
     pub(crate) enabled: bool,
     pub(crate) has_password: bool,
     pub(crate) twofa_enabled: bool,
+    /// Turned on and every secret it needs could be read from the keyring.
+    pub(crate) ready: bool,
+    /// Why unattended access is on but not working, for the user.
+    pub(crate) problem: Option<String>,
 }
 #[derive(Serialize)]
 pub(crate) struct PermissionStatus {

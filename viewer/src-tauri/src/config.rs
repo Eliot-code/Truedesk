@@ -102,7 +102,9 @@ impl ConfigStore {
         if let Some(password) = config.take_legacy_unattended_password() {
             // Migration is best effort. The plaintext is removed from the
             // in-memory config regardless, so save() cannot preserve it.
-            config.unattended_password_set = unattended::set_password(&password).is_ok();
+            config.unattended_password_set = unattended::set_password(&password)
+                .inspect_err(|error| log::warn!("could not migrate the unattended access password: {error}"))
+                .is_ok();
         }
         // Migrate legacy configs without relay_urls while retaining relay_url
         // as the primary/back-compat field.

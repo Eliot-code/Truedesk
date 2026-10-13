@@ -7,7 +7,8 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 export type Status = "offline" | "online" | "connecting" | "in_session";
 export interface Identity { id: string; password: string }
 export interface AppConfig { relay_url: string; relay_urls: string[]; recent_ids: string[]; clipboard_sync: boolean }
-export interface UnattendedStatus { enabled: boolean; has_password: boolean; twofa_enabled: boolean }
+/** `ready` means the keyring answered and connections skip approval; `problem` says why not when it is on. */
+export interface UnattendedStatus { enabled: boolean; has_password: boolean; twofa_enabled: boolean; ready: boolean; problem: string | null }
 export interface PermissionStatus { screen_recording: boolean; accessibility: boolean }
 export interface IncomingRequest { peer_id: string; fingerprint: string; known: boolean }
 export interface SessionStarted { role: "host" | "viewer"; remote_id: string }
@@ -39,10 +40,10 @@ export const setRelay = (url: string) => invoke<void>("set_relay", { url });
 export const setRelays = (urls: string[]) => invoke<void>("set_relays", { urls });
 export const listRelays = () => invoke<string[]>("list_relays");
 export const getUnattendedStatus = () => invoke<UnattendedStatus>("get_unattended_status");
-export const setUnattendedAccess = (enabled: boolean, password: string | null) => invoke<void>("set_unattended_access", { enabled, password });
+export const setUnattendedAccess = (enabled: boolean, password: string | null) => invoke<UnattendedStatus>("set_unattended_access", { enabled, password });
 /** Enabling returns a pending enrollment; 2FA is active only after confirmUnattended2fa. */
 export const setUnattended2fa = (enabled: boolean) => invoke<TotpEnrollment | null>("set_unattended_2fa", { enabled });
-export const confirmUnattended2fa = (code: string) => invoke<void>("confirm_unattended_2fa", { code });
+export const confirmUnattended2fa = (code: string) => invoke<UnattendedStatus>("confirm_unattended_2fa", { code });
 export const permissionStatus = () => invoke<PermissionStatus>("permission_status");
 export const openPermissionSettings = (which: "screen" | "accessibility") => invoke<void>("open_permission_settings", { which });
 // Tauri v2 exposes Rust snake_case params to JS as camelCase (peerId/targetId).

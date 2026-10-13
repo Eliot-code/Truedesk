@@ -56,10 +56,15 @@ pub(crate) fn hosting_item_label(host_status: &str) -> &'static str {
     if host_status == "offline" { "Start hosting" } else { "Stop hosting" }
 }
 
+/// Needs the secrets to actually be readable: the config alone can say "set"
+/// after the keyring was wiped, locked, or left behind on another machine.
 fn unattended_ready(app: &AppHandle) -> bool {
     let state = app.state::<AppState>();
-    let state = state.lock();
-    state.config.config.unattended_enabled && unattended::has_password(state.config.config.unattended_password_set)
+    let check = unattended::check_config(&state.lock().config.config);
+    if let Some(problem) = &check.problem {
+        log::warn!("unattended access is not ready: {problem}");
+    }
+    check.ready()
 }
 
 /// Called from `setup` once `AppState` is managed. The main window is

@@ -14,7 +14,7 @@ describe("Home", () => {
   beforeEach(() => {
     vi.mocked(api.getIdentity).mockResolvedValue({ id: "123456789", password: "654321" });
     vi.mocked(api.getConfig).mockResolvedValue({ relay_url: "wss://relay", relay_urls: ["wss://relay"], recent_ids: [], clipboard_sync: false });
-    vi.mocked(api.getUnattendedStatus).mockResolvedValue({ enabled: false, has_password: false, twofa_enabled: false });
+    vi.mocked(api.getUnattendedStatus).mockResolvedValue({ enabled: false, has_password: false, twofa_enabled: false, ready: false, problem: null });
     vi.mocked(api.listContacts).mockResolvedValue([]);
     vi.mocked(api.listAllowed).mockResolvedValue([]);
     vi.mocked(api.startHosting).mockResolvedValue(undefined); vi.mocked(api.connect).mockResolvedValue(undefined);
@@ -96,9 +96,9 @@ describe("Home", () => {
   });
 
   it("enables 2FA only after a code from the authenticator is confirmed", async () => {
-    vi.mocked(api.getUnattendedStatus).mockResolvedValue({ enabled: true, has_password: true, twofa_enabled: false });
+    vi.mocked(api.getUnattendedStatus).mockResolvedValue({ enabled: true, has_password: true, twofa_enabled: false, ready: true, problem: null });
     vi.mocked(api.setUnattended2fa).mockResolvedValue({ uri: "otpauth://totp/OpenDesk:123456789?secret=JBSWY3DPEHPK3PXP&issuer=OpenDesk", secret: "JBSWY3DPEHPK3PXP", qr_width: 2, qr_modules: [true, false, false, true] });
-    vi.mocked(api.confirmUnattended2fa).mockRejectedValueOnce("invalid 2FA code").mockResolvedValueOnce(undefined);
+    vi.mocked(api.confirmUnattended2fa).mockRejectedValueOnce("invalid 2FA code").mockResolvedValueOnce({ enabled: true, has_password: true, twofa_enabled: true, ready: true, problem: null });
     const notify = vi.fn();
     render(<NotifyContext.Provider value={notify}><Home status="online" onConnect={vi.fn()} /></NotifyContext.Provider>);
     const toggle = screen.getByRole("checkbox", { name: "Require 2FA code" }) as HTMLInputElement;
@@ -122,7 +122,7 @@ describe("Home", () => {
   });
 
   it("discards a pending 2FA setup on cancel", async () => {
-    vi.mocked(api.getUnattendedStatus).mockResolvedValue({ enabled: true, has_password: true, twofa_enabled: false });
+    vi.mocked(api.getUnattendedStatus).mockResolvedValue({ enabled: true, has_password: true, twofa_enabled: false, ready: true, problem: null });
     vi.mocked(api.setUnattended2fa).mockResolvedValueOnce({ uri: "otpauth://x", secret: "ABCD", qr_width: 1, qr_modules: [true] }).mockResolvedValueOnce(null);
     render(<Home status="online" onConnect={vi.fn()} />);
     const toggle = screen.getByRole("checkbox", { name: "Require 2FA code" }) as HTMLInputElement;
@@ -151,7 +151,7 @@ describe("Home", () => {
     });
 
     it("turns on through the OS once unattended access is ready", async () => {
-      vi.mocked(api.getUnattendedStatus).mockResolvedValue({ enabled: true, has_password: true, twofa_enabled: false });
+      vi.mocked(api.getUnattendedStatus).mockResolvedValue({ enabled: true, has_password: true, twofa_enabled: false, ready: true, problem: null });
       render(<Home status="online" onConnect={vi.fn()} />);
       await waitFor(() => expect(toggle().disabled).toBe(false));
       fireEvent.click(toggle());
@@ -172,7 +172,7 @@ describe("Home", () => {
     });
 
     it("keeps the old state and reports an error when the OS refuses", async () => {
-      vi.mocked(api.getUnattendedStatus).mockResolvedValue({ enabled: true, has_password: true, twofa_enabled: false });
+      vi.mocked(api.getUnattendedStatus).mockResolvedValue({ enabled: true, has_password: true, twofa_enabled: false, ready: true, problem: null });
       vi.mocked(api.setStartAtSignIn).mockRejectedValue("permission denied");
       const notify = vi.fn();
       render(<NotifyContext.Provider value={notify}><Home status="online" onConnect={vi.fn()} /></NotifyContext.Provider>);
@@ -183,11 +183,76 @@ describe("Home", () => {
     });
 
     it("is disabled when the OS state can't be read", async () => {
-      vi.mocked(api.getUnattendedStatus).mockResolvedValue({ enabled: true, has_password: true, twofa_enabled: false });
+      vi.mocked(api.getUnattendedStatus).mockResolvedValue({ enabled: true, has_password: true, twofa_enabled: false, ready: true, problem: null });
       vi.mocked(api.getStartAtSignIn).mockRejectedValue("unsupported");
       render(<Home status="online" onConnect={vi.fn()} />);
       await screen.findByText("123456789");
       expect(toggle().disabled).toBe(true);
+    });
+  });
+
+  describe("when the system keyring fails", () => {
+    const keyringLocked = "OpenDesk couldn't read the unattended access password from the system keyring. Until it can, connections need your approval. Unlock your login keychain in Keychain Access, then try again.";
+    const broken: api.UnattendedStatus = { enabled: true, has_password: true, twofa_enabled: false, ready: false, problem: keyringLocked };
+    const startToggle = () => screen.getByRole("checkbox", { name: "Start OpenDesk when I sign in" }) as HTMLInputElement;
+
+    it("says what's wrong and keeps start at sign-in off", async () => {
+      vi.mocked(api.getUnattendedStatus).mockResolvedValue(broken);
+      const notify = vi.fn();
+      render(<NotifyContext.Provider value={notify}><Home status="online" onConnect={vi.fn()} /></NotifyContext.Provider>);
+      expect((await screen.findByRole("alert")).textContent).toBe(keyringLocked);
+      expect(notify).toHaveBeenCalledWith(keyringLocked, "error");
+      expect(screen.getByText("Fix unattended access first.")).toBeTruthy();
+      expect(startToggle().disabled).toBe(true);
+    });
+
+    it("warns that a sign-in launch will open the window", async () => {
+      vi.mocked(api.getUnattendedStatus).mockResolvedValue(broken);
+      vi.mocked(api.getStartAtSignIn).mockResolvedValue(true);
+      render(<Home status="online" onConnect={vi.fn()} />);
+      expect(await screen.findByText(/isn't working, so OpenDesk will just open its window at sign-in/)).toBeTruthy();
+      expect(startToggle().disabled).toBe(false);
+    });
+
+    it("shows the keyring error when saving and reverts the toggle", async () => {
+      const saveFailed = "OpenDesk couldn't find a system keyring to save the unattended access password. Install and unlock a keyring such as GNOME Keyring or KWallet, then try again.";
+      vi.mocked(api.setUnattendedAccess).mockRejectedValue(saveFailed);
+      const notify = vi.fn();
+      render(<NotifyContext.Provider value={notify}><Home status="online" onConnect={vi.fn()} /></NotifyContext.Provider>);
+      await screen.findByText("123456789");
+      fireEvent.change(screen.getByLabelText("Unattended access password"), { target: { value: "long-password-1" } });
+      const enabled = screen.getByRole("checkbox", { name: "Enabled" }) as HTMLInputElement;
+      fireEvent.click(enabled);
+      fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+      await waitFor(() => expect(notify).toHaveBeenCalledWith(saveFailed, "error"));
+      expect(enabled.checked).toBe(false);
+      expect(screen.queryByRole("alert")).toBeNull();
+    });
+
+    it("clears the problem once the password is saved again", async () => {
+      vi.mocked(api.getUnattendedStatus).mockResolvedValue({ ...broken, has_password: false, problem: "The unattended access password is missing from the system keyring, so connections need your approval. Enter the password again and save." });
+      vi.mocked(api.setUnattendedAccess).mockResolvedValue({ enabled: true, has_password: true, twofa_enabled: false, ready: true, problem: null });
+      render(<Home status="online" onConnect={vi.fn()} />);
+      await screen.findByRole("alert");
+      fireEvent.change(screen.getByLabelText("Unattended access password"), { target: { value: "long-password-1" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+      await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+      expect(api.setUnattendedAccess).toHaveBeenCalledWith(true, "long-password-1");
+      expect(startToggle().disabled).toBe(false);
+    });
+
+    it("lets 2FA be turned off when its secret is gone", async () => {
+      const lost = { enabled: true, has_password: true, twofa_enabled: true, ready: false, problem: "The 2FA secret is missing from the system keyring, so connections need your approval. Turn off \"Require 2FA code\" and set it up again." };
+      vi.mocked(api.getUnattendedStatus).mockResolvedValueOnce(lost).mockResolvedValue({ ...lost, twofa_enabled: false, ready: true, problem: null });
+      vi.mocked(api.setUnattended2fa).mockResolvedValue(null);
+      render(<Home status="online" onConnect={vi.fn()} />);
+      await screen.findByRole("alert");
+      const twofa = screen.getByRole("checkbox", { name: "Require 2FA code" }) as HTMLInputElement;
+      expect(twofa.checked).toBe(true);
+      fireEvent.click(twofa);
+      await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+      expect(api.setUnattended2fa).toHaveBeenCalledWith(false);
+      expect(twofa.checked).toBe(false);
     });
   });
 
