@@ -20,12 +20,22 @@ pub struct Config {
     pub id: String,
     #[serde(default)]
     pub registration_token: String,
-    /// Whether a relay has ever accepted `id`. Until then a collision with
-    /// another device's ID is fixed by picking a new one; after that the ID
-    /// is one people know, so it never changes on its own. Configs written
-    /// before this field existed belong to devices that already registered.
-    #[serde(default = "already_registered")]
-    pub id_registered: bool,
+    /// Hash of the computer `id` and the token belong to (see `machine`).
+    /// When the config turns up on another computer, as a cloned disk or a
+    /// restored backup, that computer gets its own identity.
+    #[serde(default)]
+    machine: Option<String>,
+    /// Relays that have accepted `id`. Each relay binds IDs on its own, so
+    /// this is per relay URL. While it is empty a collision with another
+    /// device's ID is fixed by picking a new one; after that the ID is one
+    /// people know, so it never changes on its own. `None` only while
+    /// loading a config from before this field.
+    #[serde(default)]
+    registered_relays: Option<Vec<String>>,
+    // Read only for migration: the single flag that preceded
+    // registered_relays. Never serialized back to disk.
+    #[serde(default, rename = "id_registered", skip_serializing)]
+    legacy_id_registered: Option<bool>,
     pub relay_url: String,
     #[serde(default)]
     pub relay_urls: Vec<String>,
@@ -51,7 +61,9 @@ impl Default for Config {
         Self {
             id: generate_id(),
             registration_token: generate_registration_token(),
-            id_registered: false,
+            machine: None,
+            registered_relays: Some(Vec::new()),
+            legacy_id_registered: None,
             relay_url: DEFAULT_RELAY_URL.to_string(),
             relay_urls: vec![DEFAULT_RELAY_URL.to_string()],
             allow_list: Vec::new(),
@@ -65,11 +77,44 @@ impl Default for Config {
     }
 }
 
-fn already_registered() -> bool { true }
-
 impl Config {
     fn take_legacy_unattended_password(&mut self) -> Option<String> {
         self.legacy_unattended_password.take()
+    }
+
+    /// Configs from before per-relay tracking belong to devices that already
+    /// registered, so they count as registered on the relays they list,
+    /// unless the old flag says the ID never registered anywhere.
+    fn migrate_registered_relays(&mut self) {
+        if self.registered_relays.is_none() {
+            let never_registered = self.legacy_id_registered.take() == Some(false);
+            self.registered_relays = Some(if never_registered { Vec::new() } else { self.relay_urls.clone() });
+        }
+    }
+
+    pub fn registered_relays(&self) -> &[String] {
+        self.registered_relays.as_deref().unwrap_or_default()
+    }
+
+    /// A new ID and token, registered nowhere yet.
+    fn new_identity(&mut self) {
+        self.id = generate_id();
+        self.registration_token = generate_registration_token();
+        self.registered_relays = Some(Vec::new());
+    }
+
+    /// Ties the identity to `machine`. A config first seen on this machine
+    /// keeps its identity; one made on a different machine gets a new one,
+    /// since the original is presumably still using it. Returns whether the
+    /// identity changed. An unknown machine changes nothing.
+    fn bind_to_machine(&mut self, machine: Option<String>) -> bool {
+        let Some(machine) = machine else { return false };
+        let moved = self.machine.as_ref().is_some_and(|saved| *saved != machine);
+        if moved {
+            self.new_identity();
+        }
+        self.machine = Some(machine);
+        moved
     }
 }
 
@@ -81,6 +126,11 @@ pub struct ConfigStore {
 
 impl ConfigStore {
     pub fn load(app_data_dir: impl AsRef<Path>) -> io::Result<Self> {
+        Self::load_on(app_data_dir, crate::machine::fingerprint())
+    }
+
+    /// [`ConfigStore::load`] on the machine with fingerprint `machine`.
+    fn load_on(app_data_dir: impl AsRef<Path>, machine: Option<String>) -> io::Result<Self> {
         let dir = app_data_dir.as_ref();
         fs::create_dir_all(dir)?;
         let path = dir.join("config.json");
@@ -114,6 +164,10 @@ impl ConfigStore {
         if config.relay_url.trim().is_empty() {
             config.relay_url = config.relay_urls.first().cloned().unwrap_or_else(|| DEFAULT_RELAY_URL.to_string());
         }
+        config.migrate_registered_relays();
+        if config.bind_to_machine(machine) {
+            log::info!("config was copied from another computer; this one gets its own device ID");
+        }
         let store = Self { path, config };
         store.save()?;
         Ok(store)
@@ -128,27 +182,38 @@ impl ConfigStore {
     pub fn ensure_identity(&mut self) -> String {
         if self.config.id.len() != 9 || !self.config.id.bytes().all(|b| b.is_ascii_digit()) {
             self.config.id = generate_id();
-            self.config.id_registered = false;
+            self.config.registered_relays = Some(Vec::new());
             let _ = self.save();
         }
         self.config.id.clone()
     }
 
-    /// Replaces an ID that a relay says belongs to another device. Returns
-    /// the new ID, or `None` when the current ID has registered before and
-    /// must be kept.
+    /// Replaces an ID that a relay refused (another device's, or this
+    /// device's own token in use elsewhere) with a new ID and token. Returns
+    /// the new ID, or `None` when some relay has accepted the current ID:
+    /// people may know it, so it is kept and the problem shown instead.
     pub fn replace_colliding_id(&mut self) -> Option<String> {
-        if self.config.id_registered {
+        if !self.config.registered_relays().is_empty() {
             return None;
         }
-        self.config.id = generate_id();
-        let _ = self.save();
-        Some(self.config.id.clone())
+        Some(self.reset_identity())
     }
 
-    pub fn mark_id_registered(&mut self) {
-        if !self.config.id_registered {
-            self.config.id_registered = true;
+    /// A new ID and token on the user's request. Anyone who saved the old ID
+    /// needs the new one.
+    pub fn reset_identity(&mut self) -> String {
+        self.config.new_identity();
+        let _ = self.save();
+        self.config.id.clone()
+    }
+
+    pub fn is_registered_on(&self, relay: &str) -> bool {
+        self.config.registered_relays().iter().any(|known| known == relay)
+    }
+
+    pub fn mark_registered_on(&mut self, relay: &str) {
+        if !self.is_registered_on(relay) {
+            self.config.registered_relays.get_or_insert_with(Vec::new).push(relay.to_owned());
             let _ = self.save();
         }
     }
@@ -348,22 +413,103 @@ mod tests {
     fn only_an_id_that_never_registered_is_replaced_on_collision() {
         let dir = test_dir();
         let mut store = ConfigStore::load(&dir).unwrap();
-        let first = store.config.id.clone();
-        assert!(!store.config.id_registered);
+        let (first, first_token) = (store.config.id.clone(), store.config.registration_token.clone());
+        assert!(store.config.registered_relays().is_empty());
         let replaced = store.replace_colliding_id().expect("a fresh ID is replaced");
         assert_ne!(replaced, first);
+        assert_ne!(store.config.registration_token, first_token, "the token may be shared with a copy");
         assert_eq!(store.config.id, replaced);
-        store.mark_id_registered();
+        store.mark_registered_on("wss://a/ws");
         assert_eq!(store.replace_colliding_id(), None, "a known ID is kept");
         assert_eq!(store.config.id, replaced);
         let reloaded = ConfigStore::load(&dir).unwrap();
-        assert!(reloaded.config.id_registered);
+        assert!(reloaded.is_registered_on("wss://a/ws"));
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn configs_from_before_the_flag_count_as_registered() {
-        let config: Config = serde_json::from_str(r#"{"id":"123456789","relay_url":"wss://r/ws","allow_list":[],"recent_ids":[]}"#).unwrap();
-        assert!(config.id_registered);
+    fn registration_is_tracked_per_relay() {
+        let dir = test_dir();
+        let mut store = ConfigStore::load(&dir).unwrap();
+        store.set_relays(vec!["wss://a/ws".into(), "wss://b/ws".into()]).unwrap();
+        store.mark_registered_on("wss://a/ws");
+        store.mark_registered_on("wss://a/ws");
+        assert_eq!(store.config.registered_relays(), ["wss://a/ws"]);
+        assert!(store.is_registered_on("wss://a/ws"));
+        assert!(!store.is_registered_on("wss://b/ws"), "a new relay starts unregistered");
+        // Known on one relay: a collision on another never changes the ID.
+        let id = store.config.id.clone();
+        assert_eq!(store.replace_colliding_id(), None);
+        assert_eq!(store.config.id, id);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn configs_from_before_per_relay_tracking_count_as_registered_on_their_relays() {
+        let dir = test_dir();
+        fs::write(dir.join("config.json"), r#"{"id":"123456789","relay_url":"wss://r/ws","relay_urls":["wss://r/ws","wss://s/ws"],"allow_list":[],"recent_ids":[]}"#).unwrap();
+        let store = ConfigStore::load_on(&dir, None).unwrap();
+        assert_eq!(store.config.registered_relays(), ["wss://r/ws", "wss://s/ws"]);
+        let single: Config = serde_json::from_str(r#"{"id":"123456789","relay_url":"wss://r/ws","allow_list":[],"recent_ids":[],"id_registered":true}"#).unwrap();
+        let mut single = single;
+        single.relay_urls.push(single.relay_url.clone());
+        single.migrate_registered_relays();
+        assert_eq!(single.registered_relays(), ["wss://r/ws"]);
+        let mut fresh: Config = serde_json::from_str(r#"{"id":"123456789","relay_url":"wss://r/ws","relay_urls":["wss://r/ws"],"allow_list":[],"recent_ids":[],"id_registered":false}"#).unwrap();
+        fresh.migrate_registered_relays();
+        assert!(fresh.registered_relays().is_empty());
+        let saved = fs::read_to_string(dir.join("config.json")).unwrap();
+        assert!(!saved.contains("id_registered"), "{saved}");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_config_copied_to_another_machine_gets_a_new_identity() {
+        let dir = test_dir();
+        let mut store = ConfigStore::load_on(&dir, Some("machine-a".into())).unwrap();
+        store.mark_registered_on("wss://a/ws");
+        let (id, token) = (store.config.id.clone(), store.config.registration_token.clone());
+        // Same machine: nothing changes.
+        let same = ConfigStore::load_on(&dir, Some("machine-a".into())).unwrap();
+        assert_eq!((same.config.id.as_str(), same.config.registration_token.as_str()), (id.as_str(), token.as_str()));
+        assert!(same.is_registered_on("wss://a/ws"));
+        // Unknown machine (no OS ID): nothing changes either.
+        let unknown = ConfigStore::load_on(&dir, None).unwrap();
+        assert_eq!(unknown.config.id, id);
+        // Another machine: new ID and token, registered nowhere.
+        let copy = ConfigStore::load_on(&dir, Some("machine-b".into())).unwrap();
+        assert_ne!(copy.config.id, id);
+        assert_ne!(copy.config.registration_token, token);
+        assert!(copy.config.registered_relays().is_empty());
+        // ...and that is now this config's machine.
+        let again = ConfigStore::load_on(&dir, Some("machine-b".into())).unwrap();
+        assert_eq!(again.config.id, copy.config.id);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_config_from_before_machine_binding_keeps_its_identity() {
+        let dir = test_dir();
+        fs::write(dir.join("config.json"), r#"{"id":"123456789","registration_token":"ab","relay_url":"wss://r/ws","allow_list":[],"recent_ids":[]}"#).unwrap();
+        let store = ConfigStore::load_on(&dir, Some("machine-a".into())).unwrap();
+        assert_eq!(store.config.id, "123456789");
+        let saved = fs::read_to_string(dir.join("config.json")).unwrap();
+        assert!(saved.contains("machine-a"), "{saved}");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn reset_identity_replaces_even_a_known_id() {
+        let dir = test_dir();
+        let mut store = ConfigStore::load(&dir).unwrap();
+        store.mark_registered_on("wss://a/ws");
+        let (id, token) = (store.config.id.clone(), store.config.registration_token.clone());
+        let new_id = store.reset_identity();
+        assert_ne!(new_id, id);
+        assert_ne!(store.config.registration_token, token);
+        assert!(store.config.registered_relays().is_empty());
+        assert_eq!(ConfigStore::load(&dir).unwrap().config.id, new_id);
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

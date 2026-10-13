@@ -74,26 +74,76 @@ pub(crate) fn host_session_params(s: &mut RuntimeState) -> HostSessionParams {
     HostSessionParams { password, unattended_enabled, twofa_enabled, totp_secret: check.totp_secret, unattended_problem: check.problem }
 }
 
-/// Wakes hosting loops when the saved relay list changes, so a parked
-/// registration moves to the new list right away instead of at its next
+/// Wakes hosting loops when the saved relay list or the device ID changes,
+/// so a parked registration moves over right away instead of at its next
 /// renewal.
 fn relays_changed() -> &'static tokio::sync::Notify {
     static RELAYS_CHANGED: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
     RELAYS_CHANGED.get_or_init(tokio::sync::Notify::new)
 }
 
-/// Call after saving a new relay list: every hosting loop re-registers.
+/// Call after saving a new relay list or ID: every hosting loop re-registers.
 pub(crate) fn notify_relays_changed() {
     relays_changed().notify_waiters();
 }
 
-/// The relay identity a hosting loop registers under. It is stable for the
-/// loop's lifetime: re-registering with the same token is accepted by the
-/// relay's ownership lease, so a host can come back after every session.
+/// The relay identity a hosting loop registers under. It is re-read from the
+/// config before every attempt, so a new ID applies to the next registration.
+/// Re-registering with the same token is accepted by the relay's ownership
+/// lease, so a host can come back after every session.
 #[derive(Clone)]
 pub(crate) struct HostRegistration {
     pub(crate) id: String,
     pub(crate) token: String,
+}
+
+/// The relays to try next: the saved list minus those that refused this
+/// device's ID, or the whole list again once every relay has refused it.
+pub(crate) fn relays_to_try(relays: &[String], refused: &[String]) -> Vec<String> {
+    let usable: Vec<String> = relays.iter().filter(|relay| !refused.contains(relay)).cloned().collect();
+    if usable.is_empty() { relays.to_vec() } else { usable }
+}
+
+/// What the user is told when `relay` refuses ID `id`. `in_use` means the
+/// relay saw another live connection with this device's own ID and token;
+/// otherwise the ID belongs to someone else's token there.
+pub(crate) fn identity_conflict(relay: &str, id: &str, in_use: bool, registered_here: bool) -> IdentityConflict {
+    let message = if in_use {
+        format!("Another computer is online with ID {id} on {relay}. It is probably a copy of this one, such as a cloned disk or virtual machine. Get a new ID on one of them.")
+    } else if registered_here {
+        format!("ID {id} now belongs to another device on {relay}, probably because this one was offline long enough for the relay to release it. Get a new ID to be reachable there again.")
+    } else {
+        format!("ID {id} belongs to another device on {relay}, so this device can't be reached through that relay. Remove it from your relays or get a new ID.")
+    };
+    IdentityConflict { relay: relay.to_owned(), kind: if in_use { "in_use" } else { "taken" }, message }
+}
+
+/// Replace `relay`'s entry in the conflict list (`None` clears it) and tell
+/// the UI if anything changed.
+pub(crate) fn set_identity_conflict(app: &AppHandle, relay: &str, conflict: Option<IdentityConflict>) {
+    let conflicts = {
+        let state = app.state::<AppState>();
+        let mut state = state.lock();
+        let before = state.identity_conflicts.clone();
+        state.identity_conflicts.retain(|known| known.relay != relay);
+        state.identity_conflicts.extend(conflict);
+        if state.identity_conflicts == before { return; }
+        state.identity_conflicts.clone()
+    };
+    emit(app, "identity_conflicts", IdentityConflictsEvent { conflicts });
+}
+
+/// Keep only conflicts for relays still in `relays` (`None`: drop all).
+pub(crate) fn prune_identity_conflicts(app: &AppHandle, relays: Option<&[String]>) {
+    let conflicts = {
+        let state = app.state::<AppState>();
+        let mut state = state.lock();
+        let before = state.identity_conflicts.len();
+        state.identity_conflicts.retain(|conflict| relays.is_some_and(|relays| relays.contains(&conflict.relay)));
+        if state.identity_conflicts.len() == before { return; }
+        state.identity_conflicts.clone()
+    };
+    emit(app, "identity_conflicts", IdentityConflictsEvent { conflicts });
 }
 
 /// Connect to the relay, register, and wait for a viewer to pair, retrying
@@ -104,6 +154,9 @@ pub(crate) struct HostRegistration {
 ///
 /// Registration uses the saved relay list in order (first reachable wins),
 /// and starts over at once when [`notify_relays_changed`] reports a new list.
+/// A relay that refuses the ID is skipped while others are left: a new ID
+/// is picked if no relay has accepted this one yet, otherwise the ID is kept
+/// and the refusal is shown as an identity conflict.
 ///
 /// Status: "online" when a registration is parked on the relay; "connecting"
 /// (plus one error event per failure streak) while registration is failing.
@@ -114,8 +167,11 @@ pub(crate) async fn register_host_until_paired(
     registration: &mut HostRegistration,
     still_hosting: impl Fn() -> bool,
 ) -> Option<(host_core::relay_client::RelayWebSocket, host_core::relay_client::Pairing)> {
+    use host_core::relay_client::{await_pairing, is_id_in_use, is_id_taken, register_host, settle_registration, REGISTRATION_SETTLE};
     let mut backoff = host_core::reconnect::HostRegistrationBackoff::new();
     let mut online = false;
+    // Relays that refused the ID during this loop.
+    let mut refused: Vec<String> = Vec::new();
     loop {
         // Created before the attempt so a change saved while connecting is
         // not missed (a Notified future counts from creation).
@@ -127,6 +183,7 @@ pub(crate) async fn register_host_until_paired(
                 _ = tokio::time::sleep(delay) => {}
                 _ = &mut relay_change => {
                     backoff = host_core::reconnect::HostRegistrationBackoff::new();
+                    refused.clear();
                     continue;
                 }
             }
@@ -134,51 +191,87 @@ pub(crate) async fn register_host_until_paired(
         if !still_hosting() {
             return None;
         }
-        // Re-read per attempt so a relay change applies to the next registration.
-        let relay_urls = app.state::<AppState>().lock().config.config.relay_urls.clone();
-        let failure = match host_core::relay_client::register_host(&relay_urls, &registration.id, &registration.token).await {
-            Err(error) if host_core::relay_client::is_id_taken(&error) => {
-                // A brand-new random ID can collide with another device's.
-                // Pick another and try again; an ID that has registered
-                // before is kept and the error is shown instead.
-                let replaced = app.state::<AppState>().lock().config.replace_colliding_id();
-                match replaced {
-                    Some(id) => {
-                        log::info!("device ID was taken on the relay; switched to a new one");
-                        registration.id = id.clone();
-                        emit(app, "identity_changed", IdentityChangedEvent { id });
-                        continue;
-                    }
-                    None => {
-                        backoff.record_failure();
-                        error
-                    }
-                }
-            }
+        // Re-read per attempt so a relay or identity change applies to the
+        // next registration.
+        let relay_urls = {
+            let state = app.state::<AppState>();
+            let state = state.lock();
+            registration.id.clone_from(&state.config.config.id);
+            registration.token.clone_from(&state.config.config.registration_token);
+            relays_to_try(&state.config.config.relay_urls, &refused)
+        };
+        let failure = match register_host(&relay_urls, &registration.id, &registration.token).await {
             Err(error) => {
                 backoff.record_failure();
                 error
             }
-            Ok(mut ws) => {
-                app.state::<AppState>().lock().config.mark_id_registered();
-                if !online {
-                    emit_host_status(app, "online");
-                    online = true;
-                }
+            Ok((relay, mut ws)) => {
                 let parked_at = Instant::now();
-                let paired = tokio::select! {
-                    paired = host_core::relay_client::await_pairing(&mut ws) => paired,
+                // The relay never acknowledges a registration; it only
+                // refuses one, right away. Wait for that before trusting it.
+                let settled = tokio::select! {
+                    settled = settle_registration(&mut ws, REGISTRATION_SETTLE) => settled,
                     _ = &mut relay_change => {
-                        log::info!("relay list changed; re-registering");
                         backoff = host_core::reconnect::HostRegistrationBackoff::new();
+                        refused.clear();
                         continue;
                     }
                 };
-                match paired {
-                    Ok(pairing) => return Some((ws, pairing)),
-                    Err(error) => {
-                        backoff.record_parked_then_closed(parked_at.elapsed());
+                match settled {
+                    Err(error) if is_id_taken(&error) || is_id_in_use(&error) => {
+                        let in_use = is_id_in_use(&error);
+                        let (replaced, registered_here) = {
+                            let state = app.state::<AppState>();
+                            let mut state = state.lock();
+                            let registered_here = state.config.is_registered_on(&relay);
+                            (state.config.replace_colliding_id(), registered_here)
+                        };
+                        if let Some(id) = replaced {
+                            // Nobody knows this ID yet, so just pick another.
+                            log::info!("device ID was refused by the relay before it was ever used; switched to a new one");
+                            emit(app, "identity_changed", IdentityChangedEvent { id });
+                            continue;
+                        }
+                        set_identity_conflict(app, &relay, Some(identity_conflict(&relay, &registration.id, in_use, registered_here)));
+                        if !refused.contains(&relay) {
+                            refused.push(relay);
+                        }
+                        backoff.record_failure();
                         error
+                    }
+                    Err(error) => {
+                        backoff.record_failure();
+                        error
+                    }
+                    Ok(early) => {
+                        {
+                            let state = app.state::<AppState>();
+                            state.lock().config.mark_registered_on(&relay);
+                        }
+                        set_identity_conflict(app, &relay, None);
+                        if !online {
+                            emit_host_status(app, "online");
+                            online = true;
+                        }
+                        let paired = match early {
+                            Some(pairing) => Ok(pairing),
+                            None => tokio::select! {
+                                paired = await_pairing(&mut ws) => paired,
+                                _ = &mut relay_change => {
+                                    log::info!("relay list or device ID changed; re-registering");
+                                    backoff = host_core::reconnect::HostRegistrationBackoff::new();
+                                    refused.clear();
+                                    continue;
+                                }
+                            },
+                        };
+                        match paired {
+                            Ok(pairing) => return Some((ws, pairing)),
+                            Err(error) => {
+                                backoff.record_parked_then_closed(parked_at.elapsed());
+                                error
+                            }
+                        }
                     }
                 }
             }
@@ -193,6 +286,24 @@ pub(crate) async fn register_host_until_paired(
         }
         online = false;
     }
+}
+
+/// A new ID and token for this device, on the user's request: the way out
+/// when a relay has given the old ID to another device or a copy of this
+/// one is using it. Hosting re-registers under the new ID right away.
+#[tauri::command]
+pub(crate) fn reset_identity(app: AppHandle) -> String {
+    let id = app.state::<AppState>().lock().config.reset_identity();
+    log::info!("device ID replaced at the user's request");
+    prune_identity_conflicts(&app, None);
+    emit(&app, "identity_changed", IdentityChangedEvent { id: id.clone() });
+    notify_relays_changed();
+    id
+}
+
+#[tauri::command]
+pub(crate) fn get_identity_conflicts(state: tauri::State<'_, AppState>) -> Vec<IdentityConflict> {
+    state.lock().identity_conflicts.clone()
 }
 
 /// Run one paired host session. Returns `true` when the stop signal ended it
@@ -563,5 +674,34 @@ pub(crate) fn stop_hosting(state: tauri::State<'_, AppState>, app: AppHandle) {
         let _ = host_thread.join.join();
     } else {
         emit_host_status(&app, "offline");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn urls(list: &[&str]) -> Vec<String> { list.iter().map(|url| (*url).to_owned()).collect() }
+
+    #[test]
+    fn a_relay_that_refused_the_id_is_skipped_while_others_remain() {
+        let relays = urls(&["wss://a", "wss://b", "wss://c"]);
+        assert_eq!(relays_to_try(&relays, &[]), relays);
+        assert_eq!(relays_to_try(&relays, &urls(&["wss://a"])), urls(&["wss://b", "wss://c"]));
+        // Every relay refused it: keep trying them all so the error stays visible.
+        assert_eq!(relays_to_try(&relays, &relays), relays);
+    }
+
+    #[test]
+    fn conflicts_explain_each_case() {
+        let copy = identity_conflict("wss://a", "123456789", true, true);
+        assert_eq!(copy.kind, "in_use");
+        assert!(copy.message.contains("copy of this one"), "{}", copy.message);
+        let lost = identity_conflict("wss://a", "123456789", false, true);
+        assert_eq!(lost.kind, "taken");
+        assert!(lost.message.contains("now belongs to another device") && lost.message.contains("Get a new ID"), "{}", lost.message);
+        let other_relay = identity_conflict("wss://b", "123456789", false, false);
+        assert!(other_relay.message.contains("can't be reached through that relay"), "{}", other_relay.message);
+        assert!(other_relay.message.contains("wss://b") && other_relay.message.contains("123456789"));
     }
 }

@@ -6,6 +6,7 @@ mod events;
 mod recording;
 mod files;
 mod host;
+mod machine;
 mod startup;
 mod viewer;
 
@@ -47,6 +48,8 @@ struct RuntimeState {
     clipboard_enabled: Arc<AtomicBool>,
     audio_muted: Arc<AtomicBool>,
     clipboard_thread: Option<ClipboardThread>,
+    /// Relays currently refusing this device's ID; see `host::identity_conflict`.
+    identity_conflicts: Vec<IdentityConflict>,
 }
 
 /// Each host session runs with its own current-thread Tokio runtime on a
@@ -293,19 +296,21 @@ fn touch_contact(state: tauri::State<'_, AppState>, peer_id: String) -> Result<(
     state.lock().contacts.touch(&peer_id).map_err(|e| e.to_string())
 }
 #[tauri::command]
-fn set_relay(state: tauri::State<'_, AppState>, url: String) -> Result<(), String> {
+fn set_relay(state: tauri::State<'_, AppState>, app: AppHandle, url: String) -> Result<(), String> {
     let url = url.trim().to_owned();
     if url.is_empty() {
         return Err("relay URL cannot be empty".into());
     }
-    state.lock().config.set_relays(vec![url])?;
+    state.lock().config.set_relays(vec![url.clone()])?;
+    prune_identity_conflicts(&app, Some(&[url]));
     notify_relays_changed();
     Ok(())
 }
 #[tauri::command]
-fn set_relays(state: tauri::State<'_, AppState>, urls: Vec<String>) -> Result<(), String> {
+fn set_relays(state: tauri::State<'_, AppState>, app: AppHandle, urls: Vec<String>) -> Result<(), String> {
     let urls: Vec<String> = urls.into_iter().map(|url| url.trim().to_owned()).filter(|url| !url.is_empty()).collect();
-    state.lock().config.set_relays(urls)?;
+    state.lock().config.set_relays(urls.clone())?;
+    prune_identity_conflicts(&app, Some(&urls));
     notify_relays_changed();
     Ok(())
 }
@@ -610,6 +615,7 @@ pub fn run() {
                 clipboard_enabled: Arc::new(AtomicBool::new(clipboard_sync)),
                 audio_muted: Arc::new(AtomicBool::new(false)),
                 clipboard_thread: None,
+                identity_conflicts: Vec::new(),
             })));
             startup::start(app.handle(), background);
             Ok(())
@@ -660,7 +666,9 @@ pub fn run() {
             set_relays,
             list_relays,
             startup::close_keeps_running,
-            startup::quit_app
+            startup::quit_app,
+            reset_identity,
+            get_identity_conflicts
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -922,6 +930,7 @@ mod tests {
             clipboard_enabled: Arc::new(AtomicBool::new(true)),
             audio_muted: Arc::new(AtomicBool::new(false)),
             clipboard_thread: None,
+            identity_conflicts: Vec::new(),
         }));
 
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

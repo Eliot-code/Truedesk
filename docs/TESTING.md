@@ -42,6 +42,8 @@ Run the relay where both machines can reach it, then point both apps at it
 | 12 | Record session, stop | "Recording saved to …" appears; the `.webm` plays |
 | 13 | With unattended on, tick **Start OpenDesk when I sign in**, then sign out and back in | No window opens; a tray icon appears and the viewer can connect without accept. Closing the window keeps hosting; tray **Quit** stops it |
 | 14 | Linux only: in a session with no keyring running (no GNOME Keyring or KWallet), save unattended access | Saving fails with "couldn't … system keyring" and a hint; if it was already on, the card says it isn't working and connections need accept |
+| 15 | Copy the host's `config.json` to the other machine, restart the app there | It shows a different ID from the host; both stay online |
+| 16 | On the host, **Get a new ID**, confirm | The ID changes and the host is online under it; the old ID no longer connects |
 
 macOS asks for **Screen Recording** and **Accessibility** permission the first
 time; restart the app after granting them. When you report an issue, include

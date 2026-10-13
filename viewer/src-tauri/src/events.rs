@@ -68,6 +68,19 @@ pub(crate) struct TotpEnrollment {
 pub(crate) struct IdentityChangedEvent {
     pub(crate) id: String,
 }
+/// A relay that refuses this device's ID. Sent as the whole current list in
+/// `identity_conflicts` whenever it changes.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct IdentityConflict {
+    pub(crate) relay: String,
+    /// "taken" (another device's ID there) or "in_use" (a copy of this one).
+    pub(crate) kind: &'static str,
+    pub(crate) message: String,
+}
+#[derive(Serialize, Clone)]
+pub(crate) struct IdentityConflictsEvent {
+    pub(crate) conflicts: Vec<IdentityConflict>,
+}
 #[derive(Serialize, Clone)]
 pub(crate) struct ErrorEvent {
     pub(crate) message: String,
@@ -124,7 +137,7 @@ pub(crate) struct FileError {
 
 /// Lifecycle events that also go to the log file, so a bug report can include
 /// what happened. Media and progress events are too frequent to log.
-pub(crate) const LOGGED_EVENTS: &[&str] = &["status_changed", VIEWER_STATUS, "session_started", "session_ended", "incoming_request", "error", "file_error"];
+pub(crate) const LOGGED_EVENTS: &[&str] = &["status_changed", VIEWER_STATUS, "session_started", "session_ended", "incoming_request", "error", "file_error", "identity_changed", "identity_conflicts"];
 
 /// The outgoing (viewer) session's own status. `status_changed` is only ever
 /// the host's presence, so a host hiccup never shows up in a viewer session.
