@@ -66,6 +66,29 @@ For local development, run `cargo run -p relay`, use
 `ws://127.0.0.1:8080/ws`, and start the app as described in
 [Build and run](#build-and-run).
 
+## Browser viewer
+
+If you can't install anything on the computer you're sitting at, open
+<https://treeot.github.io/opendesk/>, enter the other computer's ID and
+password (and its 2FA code, if it asks for one), and connect. The other
+computer still needs the desktop app to host.
+
+The page can only view and control. It always goes through the relay, since
+browsers can't take part in the direct UDP path, and it has no audio, file
+transfer, clipboard sync or recording yet. It needs a browser with WebCodecs:
+a recent Chrome, Edge, Firefox or Safari.
+
+The crypto is the same Rust code as the desktop app (`crates/web-core`,
+compiled to WebAssembly), so the relay still sees only sealed bytes. The
+trade-off is where that code comes from: GitHub Pages serves the page fresh
+on every visit, so you are trusting GitHub and this repository each time you
+load it, not a binary you built or checked once. If that matters for your
+setup, use the desktop app, or build `web/` yourself and host it.
+
+To build it: `cd web && npm ci && npm run wasm && npm run build` (needs the
+`wasm32-unknown-unknown` target and `wasm-bindgen-cli` 0.2.129). Set
+`OPENDESK_DEFAULT_RELAY` at build time to choose the default relay.
+
 ## Why OpenDesk
 
 - **The relay can't read your session.** TLS protects the wire, and an inner ChaCha20-Poly1305 layer encrypts payloads end to end. Whoever runs the relay sees only metadata.
@@ -124,6 +147,9 @@ OpenDesk is under active development. Current state:
   WebView only decodes with WebCodecs and captures input. Direct P2P works in
   both directions: the host sends video and the viewer sends input over the
   selected transport.
+- **`crates/web-core`** and **`web/`**: the browser viewer. web-core is the
+  viewer's session logic built on `protocol`, compiled to WebAssembly; `web/`
+  is the page around it.
 
 ## Build and run
 
@@ -150,7 +176,7 @@ To run two instances on one machine, see [`docs/TESTING.md`](docs/TESTING.md).
 - **Two layers.** TLS protects the connection to the reverse proxy. A separate inner AEAD layer (ChaCha20-Poly1305) encrypts end to end. TLS alone would let the relay operator read traffic; the inner layer prevents that.
 - **Key agreement.** SPAKE2, a password-authenticated exchange, derives a fresh key for each session. With a wrong password, key confirmation fails and nothing is decrypted.
 - **Blind relay.** The relay holds no keys and parses only the routing control messages. Frames and input are opaque to it.
-- **Native client.** The viewer is a native Tauri app you can build and verify yourself, unlike a JavaScript client that a server can change on every page load.
+- **Native client.** The viewer is a native Tauri app you can build and verify yourself, unlike a JavaScript client that a server can change on every page load. The [browser viewer](#browser-viewer) is exactly that kind of client; use it knowing the trade-off.
 
 ### Checking the selected transport
 
