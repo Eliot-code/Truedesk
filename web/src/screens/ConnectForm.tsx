@@ -74,8 +74,8 @@ export default function ConnectForm({ viewerId, relay: savedRelay, defaultRelay,
           </details>
         </form>
         <p className="caption">
-          The video and your input are encrypted between this page and the other computer; the relay only passes sealed data along.
-          Audio, file transfer and clipboard sync need the desktop app.
+          Everything you see and do stays encrypted all the way to the other computer. The relay only passes sealed data through &mdash; it can't read your screen or what you type.
+          For sound, file transfer and clipboard sharing, use the desktop app.
         </p>
       </section>
     </main>
