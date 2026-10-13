@@ -22,10 +22,10 @@ const { title, description } = Astro.props;
   </head>
   <body>
     <a class="skip" href="#main">Skip to content</a>
-    <header class="masthead">
+    <header class="masthead" data-masthead>
       <div class="wrap masthead__row">
         <a class="brand" href="/">
-          <svg class="brand__mark" viewBox="0 0 24 24" aria-hidden="true"><rect width="18" height="11" x="3" y="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></svg>
+          <svg class="brand__mark" viewBox="0 0 48 48" aria-hidden="true"><g fill="none" stroke-width="6"><circle cx="19" cy="29" r="13" stroke="#22d3ee" /><circle cx="29" cy="19" r="13" stroke="#f5b921" /></g><circle cx="29" cy="19" r="5" fill="#22d3ee" /></svg>
           OpenDesk
         </a>
         <nav class="nav" aria-label="Main">
@@ -55,5 +55,32 @@ const { title, description } = Astro.props;
         </nav>
       </div>
     </footer>
+    <script>
+      // Add a shadow/edge to the sticky header once the page scrolls, and
+      // reveal sections as they enter the viewport. Both are opt-in via
+      // prefers-reduced-motion; without motion, everything is shown at once.
+      const header = document.querySelector("[data-masthead]");
+      if (header) {
+        const onScroll = () => header.classList.toggle("is-stuck", window.scrollY > 4);
+        onScroll();
+        window.addEventListener("scroll", onScroll, { passive: true });
+      }
+
+      const reveals = document.querySelectorAll("[data-reveal]");
+      const allowMotion = window.matchMedia("(prefers-reduced-motion: no-preference)").matches;
+      if (allowMotion && "IntersectionObserver" in window && reveals.length) {
+        const io = new IntersectionObserver((entries) => {
+          for (const entry of entries) {
+            if (entry.isIntersecting) {
+              entry.target.classList.add("is-in");
+              io.unobserve(entry.target);
+            }
+          }
+        }, { rootMargin: "0px 0px -8% 0px", threshold: 0.08 });
+        reveals.forEach((el) => io.observe(el));
+      } else {
+        reveals.forEach((el) => el.classList.add("is-in"));
+      }
+    </script>
   </body>
 </html>

@@ -15,7 +15,7 @@ const platforms = [
 >
   <section class="hero">
     <div class="wrap hero__grid">
-      <div class="hero__copy">
+      <div class="hero__copy" data-reveal>
         <p class="eyebrow">Open source · Self-hosted · Beta</p>
         <h1>Remote desktop through a relay that can't see your screen.</h1>
         <p class="lede">
@@ -34,7 +34,7 @@ const platforms = [
         </p>
       </div>
 
-      <figure class="mock" aria-labelledby="mock-caption">
+      <figure class="mock" aria-labelledby="mock-caption" data-reveal>
         <div class="mock__window" aria-hidden="true">
           <div class="mock__bar"><span></span><span></span><span></span></div>
           <div class="mock__body">
@@ -70,7 +70,7 @@ const platforms = [
   <section class="band" aria-labelledby="how-title">
     <div class="wrap">
       <h2 id="how-title">How a session works</h2>
-      <figure class="diagram">
+      <figure class="diagram" data-reveal>
         <svg viewBox="0 0 720 250" role="img" aria-labelledby="diagram-title diagram-desc">
           <title id="diagram-title">Host, relay and viewer</title>
           <desc id="diagram-desc">
@@ -105,7 +105,7 @@ const platforms = [
           <text x="360" y="212" class="diagram__label">ChaCha20-Poly1305 either way</text>
         </svg>
       </figure>
-      <ol class="steps">
+      <ol class="steps" data-reveal>
         <li>
           <h3>Share an ID and password</h3>
           <p>The computer you want to reach shows a 9-digit ID and a password that changes after every session.</p>
@@ -125,7 +125,7 @@ const platforms = [
   <section aria-labelledby="features-title">
     <div class="wrap">
       <h2 id="features-title">What you get</h2>
-      <ul class="features">
+      <ul class="features" data-reveal>
         <li>
           <h3>Your own relay</h3>
           <p>One small Rust service. The Docker Compose setup puts Caddy in front, which gets the HTTPS certificate for you.</p>
@@ -172,7 +172,7 @@ const platforms = [
         Install it on both computers. The app connects to the project's test relay out of the box;
         you can <a href="/docs/self-hosting/">point it at your own</a>.
       </p>
-      <div class="downloads">
+      <div class="downloads" data-reveal>
         {platforms.map((platform) => {
           const files = release?.[platform.key] ?? [];
           return (
@@ -205,7 +205,7 @@ const platforms = [
   </section>
 
   <section aria-labelledby="limits-title">
-    <div class="wrap two-col">
+    <div class="wrap two-col" data-reveal>
       <div>
         <h2 id="limits-title">Before you rely on it</h2>
         <ul class="plain-list">
