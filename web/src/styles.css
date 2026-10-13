@@ -1,0 +1,19 @@
+/* Additions to the desktop viewer's styles (viewer/src/styles.css). No web
+   fonts are loaded, so fall back to the system's. */
+:root {
+  --heading: "Space Grotesk", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --body: Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+.web-shell { max-width: 640px; }
+.web-own-id { color: var(--text); letter-spacing: .04em; }
+.web-connect-card form { margin-top: 0; }
+.web-connect-card .message { margin: 0 0 16px; line-height: 1.5; }
+.web-advanced { margin-top: 16px; color: var(--muted); font-size: 12px; }
+.web-advanced summary { cursor: pointer; width: fit-content; }
+.web-advanced input { width: 100%; margin-top: 10px; font-size: 13px; }
+.web-advanced .caption { margin-top: 8px; overflow-wrap: anywhere; }
+.web-overlay { background: #070a0ecc; }
+.web-overlay .connecting-spinner { margin-bottom: 4px; }
+.session-screen:fullscreen { width: 100vw; height: 100vh; }
+@media (max-width: 720px) { .web-shell .topbar { flex-direction: column; align-items: flex-start; gap: 10px; } }

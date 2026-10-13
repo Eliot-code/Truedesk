@@ -16,6 +16,8 @@ Cargo.lock.orig
 node_modules/
 /viewer/dist/
 /viewer/node_modules/
+/web/dist/
+/web/src/wasm/
 npm-debug.log*
 yarn-error.log*
 
