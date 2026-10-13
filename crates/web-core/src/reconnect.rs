@@ -46,6 +46,7 @@ pub mod reject_code {
     pub const TWOFA_REQUIRED: &str = "2fa_required";
     pub const TWOFA_INVALID: &str = "2fa_invalid";
     pub const CAPTURE_UNAVAILABLE: &str = "capture_unavailable";
+    pub const NO_ANSWER: &str = "no_answer";
 }
 
 const REJECTION_PREFIX: &str = "session rejected by host: ";
@@ -91,8 +92,9 @@ pub fn auth_failure_message(error: &str, after_session: bool) -> String {
         Some(reject_code::TWOFA_INVALID) => {
             "The 2FA code was rejected (wrong, expired, or already used). Enter the current code and connect again.".to_owned()
         }
+        Some(reject_code::NO_ANSWER) => "Nobody answered the connection request on the other device. Try again when someone is there.".to_owned(),
         Some(reject_code::CAPTURE_UNAVAILABLE) => {
-            "The other device can't share its screen. On that device, allow Screen Recording for OpenDesk, restart it, and connect again.".to_owned()
+            "The other device can't share its screen. On that device, check that a display is on and Screen Recording is allowed for OpenDesk, restart it, and connect again.".to_owned()
         }
         Some(other) => format!("The host rejected the session ({other})."),
         None => format!("{error}; authentication failed—check the password and connect again (it changes after every session)"),
