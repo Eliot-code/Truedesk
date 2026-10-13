@@ -54,7 +54,34 @@ pub enum Control {
     Ping { sent_us: u64 },
     /// Host → viewer: the answer to a `Ping`, echoing its `sent_us`.
     Pong { sent_us: u64 },
+    /// Host → viewer, after the first `MonitorList`: this host lets the
+    /// viewer add up to `max` virtual displays. Hosts that can't, or don't
+    /// allow it, never send it, so viewers hide the option by default.
+    VirtualDisplaySupport { max: u32 },
+    /// Viewer → host: add a virtual display of `width` x `height` pixels.
+    /// With `hidpi` the display runs at 2x, so it is half that size in
+    /// points. Only sent to hosts that sent `VirtualDisplaySupport`.
+    AddVirtualDisplay {
+        width: u32,
+        height: u32,
+        #[serde(default)]
+        hidpi: bool,
+    },
+    /// Viewer → host: remove a virtual display this session added.
+    RemoveVirtualDisplay { id: u32 },
+    /// Host → viewer: the display from `AddVirtualDisplay` is up and being
+    /// shared. A `MonitorList` that includes it comes first.
+    VirtualDisplayAdded { id: u32 },
+    /// Host → viewer: an add or remove request failed; `code` is one of
+    /// [`VIRTUAL_DISPLAY_LIMIT`] and friends, or a newer code.
+    VirtualDisplayRefused { code: String },
 }
+
+/// `VirtualDisplayRefused` codes.
+pub const VIRTUAL_DISPLAY_LIMIT: &str = "limit";
+pub const VIRTUAL_DISPLAY_NOT_ALLOWED: &str = "not_allowed";
+pub const VIRTUAL_DISPLAY_FAILED: &str = "failed";
+pub const VIRTUAL_DISPLAY_UNKNOWN: &str = "unknown_display";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MonitorInfo {
@@ -63,6 +90,10 @@ pub struct MonitorInfo {
     pub width: u32,
     pub height: u32,
     pub is_primary: bool,
+    /// A virtual display this session added, which the viewer may remove.
+    /// beta.5 peers neither send nor read it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_virtual: bool,
 }
 
 impl Control {
@@ -127,9 +158,44 @@ mod tests {
                 width: 2560,
                 height: 1600,
                 is_primary: true,
+                is_virtual: false,
             }],
         };
+        let json = String::from_utf8(c.to_bytes()).unwrap();
+        assert!(!json.contains("is_virtual"), "beta.5 wire shape for real displays: {json}");
         assert_eq!(Control::from_bytes(&c.to_bytes()), Some(c));
+    }
+
+    #[test]
+    fn virtual_display_messages_roundtrip() {
+        for c in [
+            Control::VirtualDisplaySupport { max: 2 },
+            Control::AddVirtualDisplay { width: 2560, height: 1440, hidpi: true },
+            Control::RemoveVirtualDisplay { id: 9 },
+            Control::VirtualDisplayAdded { id: 9 },
+            Control::VirtualDisplayRefused { code: VIRTUAL_DISPLAY_LIMIT.into() },
+        ] {
+            assert_eq!(Control::from_bytes(&c.to_bytes()), Some(c.clone()), "{c:?}");
+        }
+        assert_eq!(
+            String::from_utf8(Control::AddVirtualDisplay { width: 1280, height: 720, hidpi: false }.to_bytes()).unwrap(),
+            r#"{"t":"add_virtual_display","width":1280,"height":720,"hidpi":false}"#
+        );
+        assert_eq!(
+            Control::from_bytes(br#"{"t":"add_virtual_display","width":1280,"height":720}"#),
+            Some(Control::AddVirtualDisplay { width: 1280, height: 720, hidpi: false })
+        );
+    }
+
+    #[test]
+    fn virtual_monitors_are_flagged_and_old_lists_read_as_real() {
+        let virt = MonitorInfo { id: 5, name: "OpenDesk".into(), width: 0, height: 0, is_primary: false, is_virtual: true };
+        let c = Control::MonitorList { monitors: vec![virt] };
+        assert_eq!(Control::from_bytes(&c.to_bytes()), Some(c));
+        // A beta.5 host's list has no flag.
+        let old = br#"{"t":"monitor_list","monitors":[{"id":1,"name":"A","width":0,"height":0,"is_primary":true}]}"#;
+        let Some(Control::MonitorList { monitors }) = Control::from_bytes(old) else { panic!("old list unreadable") };
+        assert!(!monitors[0].is_virtual);
     }
 
     #[test]
@@ -172,8 +238,11 @@ mod tests {
     /// control with this, and anything that fails to parse falls through to
     /// a `_` arm in their session loops.
     mod beta5 {
-        use super::MonitorInfo;
         use serde::Deserialize;
+
+        #[derive(Debug, Deserialize)]
+        #[allow(dead_code)]
+        pub struct MonitorInfo { pub id: u32, pub name: String, pub width: u32, pub height: u32, pub is_primary: bool }
 
         #[derive(Debug, Deserialize)]
         #[serde(tag = "t", rename_all = "snake_case")]
@@ -202,6 +271,23 @@ mod tests {
         for known in [Control::KeepAlive, Control::RequestKeyframe, Control::Bye { session: String::new() }, Control::SelectMonitor { id: 2 }] {
             assert!(beta5::from_bytes(&known.to_bytes()).is_some(), "{known:?}");
         }
+    }
+
+    #[test]
+    fn beta5_peers_skip_virtual_display_messages_but_read_flagged_lists() {
+        for newer in [
+            Control::VirtualDisplaySupport { max: 2 },
+            Control::AddVirtualDisplay { width: 1920, height: 1080, hidpi: false },
+            Control::RemoveVirtualDisplay { id: 3 },
+            Control::VirtualDisplayAdded { id: 3 },
+            Control::VirtualDisplayRefused { code: VIRTUAL_DISPLAY_FAILED.into() },
+        ] {
+            assert!(beta5::from_bytes(&newer.to_bytes()).is_none(), "{newer:?}");
+        }
+        let list = Control::MonitorList {
+            monitors: vec![MonitorInfo { id: 3, name: "OpenDesk".into(), width: 0, height: 0, is_primary: false, is_virtual: true }],
+        };
+        assert!(matches!(beta5::from_bytes(&list.to_bytes()), Some(beta5::Control::MonitorList { .. })));
     }
 
     #[test]
