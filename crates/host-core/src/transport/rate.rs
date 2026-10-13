@@ -222,6 +222,18 @@ mod tests {
     }
 
     #[test]
+    fn light_random_loss_keeps_the_ceiling() {
+        // 5% loss on a steady RTT is repaired by NACKs, not a congestion signal.
+        let mut estimator = AimdEstimator::default();
+        let mut now = Instant::now();
+        let lossy = PathSample { rtt: Some(Duration::from_millis(20)), loss: 0.05 };
+        for _ in 0..50 {
+            assert_eq!(estimator.on_report(now, CEILING, lossy), CEILING);
+            now += STEP;
+        }
+    }
+
+    #[test]
     fn heavy_loss_cuts_multiplicatively_once_per_spacing() {
         let mut estimator = AimdEstimator::default();
         let now = Instant::now();
