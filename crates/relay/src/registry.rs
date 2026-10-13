@@ -23,6 +23,9 @@ pub enum Registration {
     Accepted,
     /// The ID is leased to a different token.
     IdTaken,
+    /// The right token, but it keeps displacing another live connection
+    /// with the same token: two copies of one device are fighting over it.
+    InUse,
     /// The binding table is at its cap.
     Full,
     /// This source claimed too many new IDs recently.
@@ -39,6 +42,10 @@ pub struct RegistryConfig {
     pub connect_refill: Duration,
     pub new_id_burst: u32,
     pub new_id_refill: Duration,
+    /// Same-token takeovers of a live registration allowed per
+    /// `takeover_window` before further ones are refused with `InUse`.
+    pub takeover_limit: u32,
+    pub takeover_window: Duration,
     pub state_file: Option<PathBuf>,
 }
 
@@ -52,6 +59,8 @@ impl Default for RegistryConfig {
             connect_refill: Duration::from_secs(10),
             new_id_burst: 20,
             new_id_refill: Duration::from_secs(3600),
+            takeover_limit: 3,
+            takeover_window: Duration::from_secs(600),
             state_file: None,
         }
     }
@@ -75,6 +84,27 @@ struct RegistrationState {
     owner_until: Instant,
     parked: Option<(Outbound, CloseOutbound, PeerNotify)>,
     active: Option<Outbound>,
+    takeovers: Takeovers,
+}
+
+/// Counts same-token registrations that replaced a live parked one. A host
+/// does that once after a network change leaves a stale socket behind; two
+/// machines sharing one ID and token do it over and over.
+#[derive(Clone, Copy, Default)]
+struct Takeovers {
+    count: u32,
+    since: Option<Instant>,
+}
+
+impl Takeovers {
+    /// Records one takeover at `now` and says whether it is within `limit`.
+    fn record(&mut self, now: Instant, limit: u32, window: Duration) -> bool {
+        if self.since.is_none_or(|since| now.duration_since(since) >= window) {
+            *self = Self { count: 0, since: Some(now) };
+        }
+        self.count = self.count.saturating_add(1);
+        self.count <= limit
+    }
 }
 
 impl RegistrationState {
@@ -105,7 +135,7 @@ impl Registry {
     pub fn register(&self, peer_id: String, token: [u8; 32], source: IpAddr, tx: Outbound, close_tx: CloseOutbound, notify: PeerNotify) -> Registration {
         let now = Instant::now();
         let token_hash = hash_token(&token);
-        let state = RegistrationState { token_hash, owner_until: now + self.config.lease, parked: Some((tx, close_tx, notify)), active: None };
+        let mut state = RegistrationState { token_hash, owner_until: now + self.config.lease, parked: Some((tx, close_tx, notify)), active: None, takeovers: Takeovers::default() };
         let result = match self.hosts.entry(peer_id) {
             Entry::Occupied(mut existing) => {
                 let same_owner = constant_time_eq(&existing.get().token_hash, &token_hash);
@@ -113,7 +143,13 @@ impl Registry {
                     Registration::IdTaken
                 } else if !same_owner && !self.new_id_limits.allow(rate_key(source)) {
                     Registration::RateLimited
+                } else if same_owner && existing.get().parked.is_some()
+                    && !existing.get_mut().takeovers.record(now, self.config.takeover_limit, self.config.takeover_window)
+                {
+                    // The live registration stays; the newcomer is told why.
+                    Registration::InUse
                 } else {
+                    if same_owner { state.takeovers = existing.get().takeovers; }
                     existing.insert(state);
                     Registration::Accepted
                 }
@@ -223,7 +259,7 @@ impl Registry {
             if !crate::session::valid_peer_id(&binding.id) || binding.expires_unix <= now_unix { continue; }
             let remaining = Duration::from_secs(binding.expires_unix - now_unix).min(self.config.lease);
             if let Entry::Vacant(slot) = self.hosts.entry(binding.id) {
-                slot.insert(RegistrationState { token_hash, owner_until: now + remaining, parked: None, active: None });
+                slot.insert(RegistrationState { token_hash, owner_until: now + remaining, parked: None, active: None, takeovers: Takeovers::default() });
                 self.bindings.fetch_add(1, Ordering::Relaxed);
                 loaded += 1;
             }
@@ -342,6 +378,57 @@ mod tests {
         assert_eq!(register_from(&registry, "123456789", [1; 32], SOURCE).0, Registration::Accepted);
         std::thread::sleep(Duration::from_millis(3));
         assert_eq!(register_from(&registry, "123456789", [2; 32], SOURCE).0, Registration::Accepted);
+    }
+
+    #[test]
+    fn one_takeover_of_a_live_registration_is_fine() {
+        // A host whose old socket is still parked after a network change.
+        let registry = Registry::default();
+        let (_, _stale) = registration(&registry, "123456789", "same");
+        let (result, fresh) = registration(&registry, "123456789", "same");
+        assert_eq!(result, Registration::Accepted);
+        let (stored_tx, _, _) = registry.take("123456789").unwrap();
+        assert!(fresh.same_channel(&stored_tx));
+    }
+
+    #[test]
+    fn repeated_takeovers_with_one_token_are_refused_as_in_use() {
+        let registry = Registry::new(RegistryConfig { takeover_limit: 2, ..RegistryConfig::default() });
+        let (_, _first) = registration(&registry, "123456789", "same");
+        assert_eq!(registration(&registry, "123456789", "same").0, Registration::Accepted);
+        let (result, winner) = registration(&registry, "123456789", "same");
+        assert_eq!(result, Registration::Accepted);
+        assert_eq!(registration(&registry, "123456789", "same").0, Registration::InUse);
+        assert_eq!(registration(&registry, "123456789", "same").0, Registration::InUse);
+        // The live registration is left alone.
+        let (stored_tx, _, _) = registry.take("123456789").unwrap();
+        assert!(winner.same_channel(&stored_tx));
+        // A different token is still just taken.
+        assert_eq!(registration(&registry, "123456789", "other").0, Registration::IdTaken);
+    }
+
+    #[test]
+    fn re_registering_after_the_old_one_closed_is_not_a_takeover() {
+        let registry = Registry::new(RegistryConfig { takeover_limit: 1, ..RegistryConfig::default() });
+        for _ in 0..5 {
+            let (result, tx) = registration(&registry, "123456789", "same");
+            assert_eq!(result, Registration::Accepted);
+            registry.unregister("123456789", &tx);
+        }
+        // A taken (paired) registration is not live either.
+        let (_, _parked) = registration(&registry, "123456789", "same");
+        let _ = registry.take("123456789");
+        assert_eq!(registration(&registry, "123456789", "same").0, Registration::Accepted);
+    }
+
+    #[test]
+    fn takeover_count_resets_after_the_window() {
+        let registry = Registry::new(RegistryConfig { takeover_limit: 1, takeover_window: Duration::from_millis(20), ..RegistryConfig::default() });
+        let (_, _first) = registration(&registry, "123456789", "same");
+        assert_eq!(registration(&registry, "123456789", "same").0, Registration::Accepted);
+        assert_eq!(registration(&registry, "123456789", "same").0, Registration::InUse);
+        std::thread::sleep(Duration::from_millis(30));
+        assert_eq!(registration(&registry, "123456789", "same").0, Registration::Accepted);
     }
 
     #[test]

@@ -88,7 +88,9 @@ you don't control, narrow `RELAY_TRUSTED_PROXIES` to your proxy's address.
 
 **ID ownership.** The first host to register an ID owns it until it has been
 offline for the lease period. Another device that tries to register the same
-ID gets an `id_taken` error. Without `RELAY_STATE_FILE` this ownership is lost
+ID gets an `id_taken` error. The owner's token may replace its own live
+registration, but if that keeps happening (more than 3 times in 10 minutes,
+usually two copies of one machine) the newcomer gets `id_in_use`. Without `RELAY_STATE_FILE` this ownership is lost
 when the relay restarts. The file stores a SHA-256 hash of each host token,
 not the token itself. The Compose setup stores it in the `relay_data` volume.
 

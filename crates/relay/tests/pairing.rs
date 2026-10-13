@@ -160,3 +160,68 @@ async fn browser_style_upgrade_pairs() {
     host.send(Message::Binary(payload.clone().into())).await.unwrap();
     assert_eq!(browser.next().await.unwrap().unwrap().into_data(), payload);
 }
+
+type Client = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+async fn register(url: &str, token: &str) -> Client {
+    let (mut host, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+    host.send(control(Control::Register { peer_id: "123456789".into(), token: token.into(), ver: 1 })).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    host
+}
+
+async fn first_control(ws: &mut Client) -> Option<Control> {
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next()).await.ok()??.ok()?;
+    let data = reply.into_data();
+    frame::unwrap(&data).and_then(|(tag, body)| if tag == Tag::Control { Control::from_bytes(body) } else { None })
+}
+
+async fn viewer_connect(url: &str) -> Client {
+    let (mut viewer, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+    viewer.send(control(Control::Connect { target: "123456789".into(), peer_id: "987654321".into(), ver: 1 })).await.unwrap();
+    viewer
+}
+
+#[tokio::test]
+async fn a_parked_host_that_disconnects_is_unregistered() {
+    let addr = relay::spawn_test_server().await;
+    let url = format!("ws://{addr}/ws");
+    let host = register(&url, &"00".repeat(32)).await;
+    drop(host);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let mut viewer = viewer_connect(&url).await;
+    assert_eq!(first_control(&mut viewer).await, Some(Control::Error { code: protocol::control::ERROR_PEER_UNAVAILABLE.into() }));
+}
+
+#[tokio::test]
+async fn copies_of_one_device_fighting_over_an_id_get_id_in_use() {
+    let addr = relay::spawn_test_server().await;
+    let url = format!("ws://{addr}/ws");
+    let token = "00".repeat(32);
+    // Each newcomer displaces the live registration before it, as two
+    // running machines with one ID and token do.
+    let mut live = register(&url, &token).await;
+    for _ in 0..3 { live = register(&url, &token).await; }
+    let mut newest = register(&url, &token).await;
+    assert_eq!(first_control(&mut newest).await, Some(Control::Error { code: protocol::control::ERROR_ID_IN_USE.into() }));
+    // The registration that was live is still the one viewers reach.
+    let mut viewer = viewer_connect(&url).await;
+    assert!(matches!(first_control(&mut viewer).await, Some(Control::Paired { .. })));
+    assert!(matches!(first_control(&mut live).await, Some(Control::Paired { .. })));
+}
+
+#[tokio::test]
+async fn a_host_that_reconnects_cleanly_is_never_in_use() {
+    let addr = relay::spawn_test_server().await;
+    let url = format!("ws://{addr}/ws");
+    let token = "00".repeat(32);
+    for _ in 0..6 {
+        let mut host = register(&url, &token).await;
+        host.close(None).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let mut host = register(&url, &token).await;
+    let mut viewer = viewer_connect(&url).await;
+    assert!(matches!(first_control(&mut viewer).await, Some(Control::Paired { .. })));
+    assert!(matches!(first_control(&mut host).await, Some(Control::Paired { .. })));
+}

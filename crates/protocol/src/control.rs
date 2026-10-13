@@ -3,6 +3,10 @@ use serde::{Deserialize, Serialize};
 /// `Control::Error` code the relay sends when a `register` names an ID that is
 /// leased to a different token.
 pub const ERROR_ID_TAKEN: &str = "id_taken";
+/// `Control::Error` code the relay sends when a `register` with the right
+/// token keeps displacing another live connection with the same token, as
+/// two copies of one device do. Older apps show it as a generic rejection.
+pub const ERROR_ID_IN_USE: &str = "id_in_use";
 /// `Control::Error` code the relay sends when a `connect` names an ID that is
 /// not waiting for a viewer: offline, or already in a session.
 pub const ERROR_PEER_UNAVAILABLE: &str = "peer_unavailable";

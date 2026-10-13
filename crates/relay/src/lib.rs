@@ -127,6 +127,8 @@ fn registry_config_from_env() -> RegistryConfig {
         connect_refill: Duration::from_secs(env_u64("RELAY_CONNECT_REFILL_SECS", default.connect_refill.as_secs())),
         new_id_burst: env_u64("RELAY_NEW_ID_BURST", default.new_id_burst as u64) as u32,
         new_id_refill: Duration::from_secs(env_u64("RELAY_NEW_ID_REFILL_SECS", default.new_id_refill.as_secs())),
+        takeover_limit: default.takeover_limit,
+        takeover_window: default.takeover_window,
         state_file: std::env::var_os("RELAY_STATE_FILE").filter(|value| !value.is_empty()).map(Into::into),
     }
 }
@@ -347,8 +349,15 @@ async fn handle(socket: WebSocket, state: RelayState, addr: IpAddr, guard: Optio
         }
         Ok(Bridge::HostRegistered { peer_id, notify_rx }) => {
             let peer = tokio::select! {
-                _ = shutdown.changed() => { state.registry.unregister(&peer_id, &my_tx); writer.abort(); log_event("connection_close", addr, "shutdown"); return; }
+                // A pairing wins over anything the host sends in reply to it.
+                biased;
                 result = tokio::time::timeout(state.config.pair_timeout, notify_rx) => result.ok().and_then(Result::ok),
+                _ = shutdown.changed() => { state.registry.unregister(&peer_id, &my_tx); writer.abort(); log_event("connection_close", addr, "shutdown"); return; }
+                // A parked host sends nothing until it is paired, so this
+                // only ends when it goes away. Dropping the registration then
+                // keeps viewers off a dead socket, and lets the host's next
+                // registration in without counting as a takeover.
+                () = parked_host_gone(&mut stream) => { state.registry.unregister(&peer_id, &my_tx); writer.abort(); log_event("connection_close", addr, "host_left"); return; }
             };
             let Some((peer, peer_close_tx, requester_id)) = peer else { state.registry.unregister(&peer_id, &my_tx); writer.abort(); log_event("pairing_failure", addr, "pair_timeout"); return; };
             let _ = my_tx.send(session::paired_frame("host", &requester_id)).await;
@@ -360,13 +369,14 @@ async fn handle(socket: WebSocket, state: RelayState, addr: IpAddr, guard: Optio
                 session::ClassifyError::ConnectRateLimited => "connect_rate",
                 session::ClassifyError::InvalidRegistration => "invalid_register",
                 session::ClassifyError::IdTaken => protocol::control::ERROR_ID_TAKEN,
+                session::ClassifyError::IdInUse => protocol::control::ERROR_ID_IN_USE,
                 session::ClassifyError::RegistryFull => "registry_full",
                 session::ClassifyError::NewIdRateLimited => "new_id_rate",
                 session::ClassifyError::InvalidConnect => "invalid_connect",
                 session::ClassifyError::PeerUnavailable => protocol::control::ERROR_PEER_UNAVAILABLE,
                 session::ClassifyError::InvalidControl => "invalid_control",
             };
-            if matches!(error, session::ClassifyError::IdTaken | session::ClassifyError::PeerUnavailable) {
+            if matches!(error, session::ClassifyError::IdTaken | session::ClassifyError::IdInUse | session::ClassifyError::PeerUnavailable) {
                 let _ = my_tx.send(session::error_frame(reason)).await;
             }
             let _ = close_tx.send(Some(CloseFrame { code: 1008, reason: reason.into() }));
@@ -403,6 +413,12 @@ async fn forward_rest(stream: &mut futures_util::stream::SplitStream<WebSocket>,
             if !queued { break; }
         }
     }
+}
+
+/// Resolves when a parked host's socket closes or sends a data frame, which
+/// it must not do before it is paired.
+async fn parked_host_gone(stream: &mut futures_util::stream::SplitStream<WebSocket>) {
+    while let Some(Ok(Message::Ping(_) | Message::Pong(_))) = stream.next().await {}
 }
 
 fn close_peer(peer_close_tx: &CloseOutbound) {

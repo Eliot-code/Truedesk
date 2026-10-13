@@ -10,6 +10,8 @@ pub enum ClassifyError {
     InvalidRegistration,
     /// The ID is leased to a different token.
     IdTaken,
+    /// Two live connections with the same token keep displacing each other.
+    IdInUse,
     RegistryFull,
     NewIdRateLimited,
     InvalidConnect,
@@ -65,6 +67,7 @@ pub fn classify(msg: &[u8], me: Outbound, me_close_tx: CloseOutbound, reg: &Regi
             match reg.register(peer_id.clone(), token, source, me, me_close_tx, notify_tx) {
                 Registration::Accepted => {}
                 Registration::IdTaken => return Err(ClassifyError::IdTaken),
+                Registration::InUse => return Err(ClassifyError::IdInUse),
                 Registration::Full => return Err(ClassifyError::RegistryFull),
                 Registration::RateLimited => return Err(ClassifyError::NewIdRateLimited),
             }
