@@ -6,12 +6,15 @@
 - `host-core`: host build, loopback tests, and clippy on macOS.
 - `tauri`: check and clippy for `viewer/src-tauri` (its own manifest) on macOS.
 - `viewer`: Vite build and Vitest suite on Ubuntu (Node 24).
+- `web`: the browser viewer's wasm, Vite build and Vitest suite, then the
+  `site/` build that serves it.
 - `host-core-cross` / `tauri-cross`: compile checks for the Windows and Linux
   host code, which the macOS jobs don't build.
 - `cargo-deny`: advisories, licenses, bans, and sources.
 
 `release.yml` runs on `v*` tags and builds unsigned bundles for macOS, Linux,
-and Windows (see `docs/RELEASE.md`).
+and Windows (see `docs/RELEASE.md`). When it has published, it starts
+`pages.yml`, which builds `site/` and deploys it to GitHub Pages.
 
 Linux jobs are pinned to `ubuntu-24.04` so a runner image change can't
 silently rename the apt packages they install.

@@ -1,10 +1,12 @@
-name: Browser viewer (Pages)
+name: Site (Pages)
 
-# Builds web/ (with the web-core wasm) and publishes it to GitHub Pages.
+# Builds site/ (landing page, docs, and the browser viewer at /connect/ with
+# the web-core wasm) and publishes it to GitHub Pages.
 on:
   push:
     branches: [main]
     paths:
+      - "site/**"
       - "web/**"
       - "crates/web-core/**"
       - "crates/protocol/**"
@@ -14,6 +16,8 @@ on:
       - "viewer/src/styles.css"
       - "Cargo.lock"
       - ".github/workflows/pages.yml"
+  # release.yml dispatches this after publishing, so the download links
+  # point at the new release.
   workflow_dispatch:
 
 permissions:
@@ -45,7 +49,7 @@ jobs:
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: web/package-lock.json
+          cache-dependency-path: site/package-lock.json
       - name: Require a default relay
         env:
           OPENDESK_DEFAULT_RELAY: ${{ vars.OPENDESK_DEFAULT_RELAY }}
@@ -54,18 +58,21 @@ jobs:
             wss://*/ws) ;;
             *) echo "Set the repo variable OPENDESK_DEFAULT_RELAY (e.g. wss://relay.example.com/ws)"; exit 1 ;;
           esac
-      - run: npm ci
-        working-directory: web
+      # The viewer page imports web/src, which loads this wasm build.
       - run: npm run wasm
         working-directory: web
+      - run: npm ci
+        working-directory: site
       - run: npm run build
-        working-directory: web
+        working-directory: site
         env:
           OPENDESK_DEFAULT_RELAY: ${{ vars.OPENDESK_DEFAULT_RELAY }}
+          # Read-only lookup of the newest release for the download links.
+          GITHUB_TOKEN: ${{ github.token }}
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
-          path: web/dist
+          path: site/dist
 
   deploy:
     name: Deploy

@@ -94,7 +94,9 @@ jobs:
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: web/package-lock.json
+          cache-dependency-path: |
+            web/package-lock.json
+            site/package-lock.json
       - run: npm ci
         working-directory: web
       - run: npm run wasm
@@ -103,6 +105,11 @@ jobs:
         working-directory: web
       - run: npx vitest run
         working-directory: web
+      # The site (landing page, docs, and the viewer at /connect/).
+      - run: npm ci
+        working-directory: site
+      - run: npm run build
+        working-directory: site
 
   # First-ever cross-compile of the cfg-gated Windows/Linux host code
   # (scap/enigo/cpal). These paths are never built on macOS, so this job is
