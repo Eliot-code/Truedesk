@@ -1,5 +1,6 @@
 //! Relay media transport view over the session's [`ReliableChannel`].
 
+use super::link::RttMeter;
 use super::rate::{AimdEstimator, RateControl};
 use super::{reliable::VideoPermit, ReliableSender, Transport, TransportError, TransportReceiver, TransportSender};
 use protocol::Tag;
@@ -34,6 +35,7 @@ impl<S> Transport for RelayTransport<S> {
                 video_permit: None,
                 waiting_since: None,
                 rate: Arc::new(RateControl::default()),
+                rtt: Arc::new(RttMeter::default()),
                 estimator: AimdEstimator::default(),
             }),
             Box::new(RelayReceiver { media_rx: self.media_rx.take().expect("media receiver already taken") }),
@@ -49,6 +51,9 @@ pub struct RelaySender {
     /// cancelled `ready_for_video` calls).
     waiting_since: Option<Instant>,
     rate: Arc<RateControl>,
+    /// Filled by the viewer session from its ping/pong exchange; the
+    /// relay transport itself measures nothing.
+    rtt: Arc<RttMeter>,
     estimator: AimdEstimator,
 }
 
@@ -89,6 +94,8 @@ impl TransportSender for RelaySender {
     }
 
     fn rate_control(&self) -> Arc<RateControl> { Arc::clone(&self.rate) }
+
+    fn rtt_meter(&self) -> Arc<RttMeter> { Arc::clone(&self.rtt) }
 }
 
 pub struct RelayReceiver { media_rx: mpsc::Receiver<(Tag, Vec<u8>)> }

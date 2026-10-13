@@ -61,6 +61,11 @@ URL, peer ID, recent IDs, contacts, and optional unattended-access settings.
    that direct path. If ICE times out, the session uses the already-open relay
    WebSocket as the fallback. No inbound listening port or port forwarding is
    required.
+6. The viewer toolbar shows which path is in use and its round-trip time.
+   On the direct path the host measures it from UDP feedback and passes it
+   on; on the relay the viewer sends sealed pings that the host answers.
+   Relayed hosts from beta.5 and earlier don't answer, so the badge shows
+   the path with no time.
 
 All signaling and relay fallback traffic uses the relay's single HTTP port;
 with a TLS reverse proxy, clients use `wss://` on the public HTTPS port.

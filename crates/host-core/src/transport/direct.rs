@@ -11,6 +11,7 @@
 
 use super::feedback::{self, Feedback};
 use super::pacer::Pacer;
+use super::link::RttMeter;
 use super::rate::{AimdEstimator, PathSample, RateControl};
 use super::recovery::{fragment_message, ReceiveTracker, RecvStats, RetransmitRing, FRAG_HEADER_LEN, MAX_MESSAGE_LEN};
 use super::{Transport, TransportError, TransportReceiver, TransportSender};
@@ -89,6 +90,7 @@ impl Transport for DirectTransport {
             work: Notify::new(),
             drained: Notify::new(),
             rate: Arc::new(RateControl::default()),
+            rtt: Arc::new(RttMeter::default()),
         });
         let (deliver, messages) = mpsc::channel(RECEIVE_QUEUE);
         let feedback = self.feedback.map(|keys| FeedbackState {
@@ -140,6 +142,8 @@ impl TransportSender for DirectSender {
     }
 
     fn rate_control(&self) -> Arc<RateControl> { Arc::clone(&self.shared.rate) }
+
+    fn rtt_meter(&self) -> Arc<RttMeter> { Arc::clone(&self.shared.rtt) }
 }
 
 #[async_trait::async_trait]
@@ -168,6 +172,9 @@ struct Shared {
     /// Wakes senders: video drained, or the writer failed.
     drained: Notify,
     rate: Arc<RateControl>,
+    /// Smoothed RTT: the host measures it from receiver reports, the viewer
+    /// takes it from the host's sender reports.
+    rtt: Arc<RttMeter>,
 }
 
 impl Shared {
@@ -355,7 +362,9 @@ impl FeedbackState {
                     tracker.enable_ordered();
                 }
                 if rtt_us > 0 {
-                    tracker.set_rtt(Duration::from_micros(u64::from(rtt_us)));
+                    let rtt = Duration::from_micros(u64::from(rtt_us));
+                    tracker.set_rtt(rtt);
+                    shared.rtt.record(rtt, now);
                 }
                 let stats = tracker.stats();
                 let report = Feedback::ReceiverReport {
@@ -386,6 +395,9 @@ impl FeedbackState {
                     if target.abs_diff(before) > before / 10 {
                         log::debug!("direct transport: target bitrate {target} bps (loss {:.1}%, rtt {rtt:?})", loss * 100.0);
                     }
+                }
+                if let Some(srtt) = self.estimator.srtt() {
+                    shared.rtt.record(srtt, now);
                 }
             }
             Feedback::Nack(ranges) => {
@@ -691,5 +703,36 @@ mod tests {
         // mode and still gets every frame.
         let run = run_link(0, false, true, 30).await;
         assert_eq!(run.received, (0..30).collect::<Vec<_>>());
+    }
+
+    /// The viewer's RTT meter after a short idle session.
+    async fn viewer_rtt(host_feedback: bool, viewer_feedback: bool) -> (Option<Duration>, Option<Duration>) {
+        let shared = [12u8; 32];
+        let (host_conn, viewer_conn) = lossy_pair(0).await;
+        let (host_tx, _host_rx) = transport(host_conn, host_feedback.then(|| FeedbackKeys::derive(&shared, true))).into_split();
+        let (viewer_tx, _viewer_rx) = transport(viewer_conn, viewer_feedback.then(|| FeedbackKeys::derive(&shared, false))).into_split();
+        // The host estimates the path once its encoder publishes a ceiling.
+        host_tx.rate_control().set_ceiling(CEILING);
+        // A few report intervals: the host needs one receiver report before
+        // its sender reports carry an RTT.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let now = Instant::now();
+        (host_tx.rtt_meter().latest(now), viewer_tx.rtt_meter().latest(now))
+    }
+
+    #[tokio::test]
+    async fn viewer_learns_the_rtt_from_host_sender_reports() {
+        let (host, viewer) = viewer_rtt(true, true).await;
+        let viewer = viewer.expect("viewer has an RTT");
+        assert!(viewer < Duration::from_millis(100), "{viewer:?}");
+        assert!(host.is_some());
+    }
+
+    #[tokio::test]
+    async fn rtt_stays_unknown_with_peers_without_feedback() {
+        // Old host: no sender reports, so the viewer has nothing to show.
+        assert_eq!(viewer_rtt(false, true).await, (None, None));
+        // Old viewer: no receiver reports, so the host never measures one.
+        assert_eq!(viewer_rtt(true, false).await, (None, None));
     }
 }

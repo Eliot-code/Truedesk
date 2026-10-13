@@ -3,6 +3,7 @@
 pub mod direct;
 mod feedback;
 pub mod ice;
+pub mod link;
 mod pacer;
 pub mod rate;
 mod recovery;
@@ -11,6 +12,7 @@ pub mod reliable;
 
 pub use direct::{DirectTransport, FeedbackKeys};
 pub use rate::RateControl;
+pub use link::{LinkStatus, MediaPath, RttMeter};
 pub use ice::RelayIceSignaling;
 pub use relay::RelayTransport;
 pub use reliable::{ReliableChannel, ReliableSender};
@@ -72,6 +74,10 @@ pub trait TransportSender: Send {
     /// ceiling and applies the target this transport estimates for the path.
     /// The default is a detached instance that always yields the ceiling.
     fn rate_control(&self) -> Arc<RateControl> { Arc::new(RateControl::default()) }
+
+    /// Round trips measured on this path (see [`link`]). The default is a
+    /// detached meter that never has a sample.
+    fn rtt_meter(&self) -> Arc<RttMeter> { Arc::new(RttMeter::default()) }
 }
 
 /// The independently owned receiving half of a transport.
@@ -84,6 +90,15 @@ pub trait TransportReceiver: Send {
 pub enum AnyTransport<S = tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
     Relay(Box<relay::RelayTransport<S>>),
     Direct(direct::DirectTransport),
+}
+
+impl<S> AnyTransport<S> {
+    pub fn path(&self) -> MediaPath {
+        match self {
+            Self::Relay(_) => MediaPath::Relay,
+            Self::Direct(_) => MediaPath::Direct,
+        }
+    }
 }
 
 #[async_trait::async_trait]

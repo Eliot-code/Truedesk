@@ -174,7 +174,7 @@ fn dispatch_data(
 }
 
 fn activate_data_channel(app: &AppHandle, handle: DataHandle, from: String) {
-    let DataHandle { sender, receiver, sealer, opener, control_sender, control_sealer } = handle;
+    let DataHandle { sender, receiver, sealer, opener, control_sender, control_sealer, .. } = handle;
     let enabled = app.state::<AppState>().lock().clipboard_enabled.clone();
     let sealer = Arc::new(Mutex::new(sealer));
     let clipboard_thread = spawn_clipboard_thread(sender.clone(), sealer.clone(), enabled);

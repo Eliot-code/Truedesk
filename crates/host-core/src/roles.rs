@@ -158,7 +158,12 @@ pub struct DataHandle {
     /// shares it (keepalives) so every control frame uses one nonce sequence;
     /// a second `Sealer` on the same key would reuse nonces.
     pub control_sealer: SharedSealer,
+    /// The path media takes and its measured round trip, for display.
+    pub link: transport::LinkStatus,
 }
+
+/// How often a viewer pings the host while media goes over the relay.
+pub const RELAY_PING_INTERVAL: Duration = Duration::from_secs(1);
 
 /// A sealer shared between the session loop and the application.
 pub type SharedSealer = Arc<Mutex<Sealer>>;
@@ -488,6 +493,8 @@ where
     let monitor_ids: Vec<u32> = monitors.iter().map(|monitor| monitor.id).collect();
     let monitor_list = Control::MonitorList { monitors };
     reliable.sender().send_frame(Tag::Control, &seal_control(&control_sealer, &monitor_list)).await?;
+    let path = transport.path();
+    let (transport_tx, transport_rx) = transport.into_split();
     if let Some(ready) = data_ready {
         let _ = ready.send(DataHandle {
             sender: reliable.sender(),
@@ -496,9 +503,9 @@ where
             opener: data_opener,
             control_sender: reliable.sender(),
             control_sealer: Arc::clone(&control_sealer),
+            link: transport::LinkStatus::new(path, transport_tx.rtt_meter()),
         });
     }
-    let (transport_tx, transport_rx) = transport.into_split();
     let audio_rx = audio::spawn_capture();
 
     // Capture and encode run on their own thread, so a slow encode never
@@ -546,6 +553,9 @@ where
                         video.send(VideoCommand::SelectMonitor(id));
                     }
                     Some(Control::RequestKeyframe) => video.send(VideoCommand::RequestKeyframe),
+                    Some(Control::Ping { sent_us }) => {
+                        let _ = sender.send_frame(Tag::Control, &seal_control(&control_sealer, &Control::Pong { sent_us })).await;
+                    }
                     _ => {}
                 }
             },
@@ -1159,6 +1169,8 @@ where
         Some(code) = rejected_rx.recv() => return Err(rejection_error(&code)),
         transport = establish => transport,
     };
+    let path = transport.path();
+    let (transport_tx, transport_rx) = transport.into_split();
     if let Some(ready) = data_ready {
         let _ = ready.send(DataHandle {
             sender: reliable.sender(),
@@ -1167,12 +1179,15 @@ where
             opener: data_opener,
             control_sender: reliable.sender(),
             control_sealer: Arc::clone(&control_sealer),
+            link: transport::LinkStatus::new(path, transport_tx.rtt_meter()),
         });
     }
-    let (transport_tx, transport_rx) = transport.into_split();
 
-    let keyframe_requests = KeyframeRequester { sender: reliable.sender(), sealer: Arc::clone(&control_sealer) };
-    run_viewer_media_loop_with_control(transport_tx, transport_rx, frame_sink, input_rx, sealer, opener, control_plain_rx, rejected_rx, monitor_sink, audio_sink, Some(keyframe_requests), timings.dead_peer).await
+    // The relay carries no feedback, so the viewer measures its round trip
+    // itself. A direct path reports RTT through UDP feedback instead.
+    let relay_ping = (path == transport::MediaPath::Relay).then_some(RELAY_PING_INTERVAL);
+    let host_control = HostControl { sender: reliable.sender(), sealer: Arc::clone(&control_sealer), relay_ping };
+    run_viewer_media_loop_with_control(transport_tx, transport_rx, frame_sink, input_rx, sealer, opener, control_plain_rx, rejected_rx, monitor_sink, audio_sink, Some(host_control), timings.dead_peer).await
 }
 
 /// Ask the host for a keyframe, e.g. after a decoder error. Uses the
@@ -1183,10 +1198,33 @@ pub async fn request_keyframe(sender: &transport::reliable::ReliableSender, seal
     sender.send_frame(Tag::Control, &seal_control(sealer, &Control::RequestKeyframe)).await
 }
 
-/// What the viewer media loop needs to ask the host for keyframes.
-struct KeyframeRequester {
+/// What the viewer media loop needs to send control frames to the host:
+/// keyframe requests, and pings while media goes over the relay.
+struct HostControl {
     sender: transport::reliable::ReliableSender,
     sealer: SharedSealer,
+    relay_ping: Option<Duration>,
+}
+
+/// Relay round trips from sealed `Ping`/`Pong` frames. The send time
+/// travels in the ping and comes back in the pong, so a late pong still
+/// gives a correct sample. A host from beta.5 or older never answers.
+struct RelayPinger {
+    clock: Instant,
+}
+
+impl RelayPinger {
+    fn new(clock: Instant) -> Self { Self { clock } }
+
+    fn micros(&self, now: Instant) -> u64 { now.saturating_duration_since(self.clock).as_micros() as u64 }
+
+    fn ping(&self, now: Instant) -> Control { Control::Ping { sent_us: self.micros(now) } }
+
+    /// The round trip of the ping a pong answers; `None` if it claims to be
+    /// from the future.
+    fn rtt(&self, sent_us: u64, now: Instant) -> Option<Duration> {
+        self.micros(now).checked_sub(sent_us).map(Duration::from_micros)
+    }
 }
 
 /// How long the viewer waits for a requested keyframe before asking again.
@@ -1267,9 +1305,14 @@ async fn run_viewer_media_loop_with_control(
     mut rejected_rx: tokio::sync::mpsc::Receiver<String>,
     monitor_sink: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
     audio_sink: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
-    keyframe_requests: Option<KeyframeRequester>,
+    host_control: Option<HostControl>,
     dead_peer: Duration,
 ) -> Result<(), String> {
+    let rtt = transport_tx.rtt_meter();
+    let pinger = RelayPinger::new(Instant::now());
+    let relay_ping = host_control.as_ref().and_then(|control| control.relay_ping);
+    let mut ping_ticks = tokio::time::interval(relay_ping.unwrap_or(RELAY_PING_INTERVAL));
+    ping_ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // The host keepalives on the relay socket even when media is direct, so
     // silence there means the host is gone: a direct transport never reports
     // a dead peer on its own.
@@ -1296,6 +1339,10 @@ async fn run_viewer_media_loop_with_control(
                     Some(Control::MonitorList { .. }) => {
                         if let Some(sink) = &monitor_sink { let _ = sink.send(plaintext).await; }
                     }
+                    Some(Control::Pong { sent_us }) if relay_ping.is_some() => {
+                        let now = Instant::now();
+                        if let Some(sample) = pinger.rtt(sent_us, now) { rtt.record(sample, now); }
+                    }
                     _ => {}
                 }
             },
@@ -1303,6 +1350,12 @@ async fn run_viewer_media_loop_with_control(
                 let Some(bytes) = input else { return Ok(()) };
                 let sealed = sealer.seal(&[Tag::Input as u8], &bytes);
                 if transport_tx.send(Tag::Input, &sealed).await.is_err() { return Err("viewer input transport closed".into()) }
+            }
+            _ = ping_ticks.tick(), if relay_ping.is_some() => {
+                if let Some(control) = &host_control {
+                    let ping = seal_control(&control.sealer, &pinger.ping(Instant::now()));
+                    let _ = control.sender.send_frame(Tag::Control, &ping).await;
+                }
             }
             _ = tokio::time::sleep_until(peer_deadline) => {
                 return Err(format!("connection closed: host stopped responding for {}s", dead_peer.as_secs()));
@@ -1341,7 +1394,7 @@ async fn run_viewer_media_loop_with_control(
                             }
                         }
                         if gate.should_request(Instant::now()) {
-                            if let Some(requests) = &keyframe_requests {
+                            if let Some(requests) = &host_control {
                                 log::debug!("video frames lost; requesting a keyframe");
                                 let _ = request_keyframe(&requests.sender, &requests.sealer).await;
                             }
@@ -1905,7 +1958,7 @@ mod tests {
         let viewer_ws = WebSocketStream::from_raw_socket(viewer_ws, Role::Client, None).await;
         let mut host_ws = WebSocketStream::from_raw_socket(host_ws, Role::Server, None).await;
         let reliable = ReliableChannel::spawn(viewer_ws);
-        let requests = KeyframeRequester { sender: reliable.sender(), sealer: Arc::new(Mutex::new(Sealer::new(viewer_control_send))) };
+        let requests = HostControl { sender: reliable.sender(), sealer: Arc::new(Mutex::new(Sealer::new(viewer_control_send))), relay_ping: None };
 
         let (viewer_conn, host_conn) = pipe();
         let (viewer_tx, viewer_rx) = DirectTransport::new(Arc::new(viewer_conn)).into_split();
@@ -1937,6 +1990,111 @@ mod tests {
         let plaintext = Opener::new(host_control_recv).open(&[Tag::Control as u8], &body).unwrap();
         assert_eq!(Control::from_bytes(&plaintext), Some(Control::RequestKeyframe));
         viewer.abort();
+    }
+
+    /// A viewer media loop whose control frames are read raw on the host
+    /// end. Returns the loop, the viewer's RTT meter, a way to feed it host
+    /// control plaintext, and a reader for the control frames it sends.
+    struct PingRig {
+        viewer: tokio::task::JoinHandle<Result<(), String>>,
+        rtt: Arc<transport::RttMeter>,
+        host_control: mpsc::Sender<Vec<u8>>,
+        host_ws: WebSocketStream<tokio::io::DuplexStream>,
+        host_opener: Opener,
+        _input: mpsc::Sender<Vec<u8>>,
+        _rejected: mpsc::Sender<String>,
+        _reliable: ReliableChannel<tokio::io::DuplexStream>,
+        // Dropping the far end would end the loop at once.
+        _host_conn: Arc<dyn webrtc_util::conn::Conn + Send + Sync>,
+    }
+
+    impl PingRig {
+        async fn start(relay_ping: Option<Duration>) -> Self {
+            use tokio_tungstenite::tungstenite::protocol::Role;
+            let shared = [33u8; 32];
+            let (viewer_send, viewer_recv) = derive_keys(&shared, false);
+            let (viewer_control_send, _) = protocol::kex::derive_control_keys(&shared, false);
+            let (_, host_control_recv) = protocol::kex::derive_control_keys(&shared, true);
+            let (viewer_ws, host_ws) = tokio::io::duplex(64 * 1024);
+            let viewer_ws = WebSocketStream::from_raw_socket(viewer_ws, Role::Client, None).await;
+            let host_ws = WebSocketStream::from_raw_socket(host_ws, Role::Server, None).await;
+            let reliable = ReliableChannel::spawn(viewer_ws);
+            let control = HostControl { sender: reliable.sender(), sealer: Arc::new(Mutex::new(Sealer::new(viewer_control_send))), relay_ping };
+            let (viewer_conn, host_conn) = pipe();
+            let (viewer_tx, viewer_rx) = DirectTransport::new(Arc::new(viewer_conn)).into_split();
+            let rtt = viewer_tx.rtt_meter();
+            let (frame_sink, _frames) = mpsc::channel(1);
+            let (input, input_rx) = mpsc::channel(1);
+            let (host_control, control_rx) = mpsc::channel(4);
+            let (rejected, rejected_rx) = mpsc::channel(1);
+            let viewer = tokio::spawn(run_viewer_media_loop_with_control(
+                viewer_tx, viewer_rx, frame_sink, input_rx, Sealer::new(viewer_send), Opener::new(viewer_recv),
+                control_rx, rejected_rx, None, None, Some(control), DEAD_PEER_TIMEOUT,
+            ));
+            Self { viewer, rtt, host_control, host_ws, host_opener: Opener::new(host_control_recv), _input: input, _rejected: rejected, _reliable: reliable, _host_conn: Arc::new(host_conn) }
+        }
+
+        /// The next control frame the viewer sent, if one comes soon.
+        async fn next_control(&mut self) -> Option<Control> {
+            use futures_util::StreamExt;
+            let message = timeout(Duration::from_millis(300), self.host_ws.next()).await.ok()??.ok()?;
+            let (tag, body) = protocol::frame::unwrap(&message.into_data()).map(|(tag, body)| (tag, body.to_vec()))?;
+            assert_eq!(tag, Tag::Control);
+            Control::from_bytes(&self.host_opener.open(&[Tag::Control as u8], &body)?)
+        }
+    }
+
+    #[tokio::test]
+    async fn viewer_measures_the_relay_rtt_with_ping_and_pong() {
+        let mut rig = PingRig::start(Some(Duration::from_millis(50))).await;
+        assert_eq!(rig.rtt.latest(Instant::now()), None);
+        let Some(Control::Ping { sent_us }) = rig.next_control().await else { panic!("expected a ping") };
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        rig.host_control.send(Control::Pong { sent_us }.to_bytes()).await.unwrap();
+        let rtt = timeout(Duration::from_secs(1), async {
+            loop {
+                if let Some(rtt) = rig.rtt.latest(Instant::now()) { break rtt; }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("a pong gives an RTT");
+        assert!(rtt >= Duration::from_millis(20) && rtt < Duration::from_secs(1), "{rtt:?}");
+        rig.viewer.abort();
+    }
+
+    #[tokio::test]
+    async fn an_old_host_that_never_answers_leaves_the_rtt_unknown() {
+        let mut rig = PingRig::start(Some(Duration::from_millis(50))).await;
+        for _ in 0..3 {
+            assert!(matches!(rig.next_control().await, Some(Control::Ping { .. })));
+        }
+        // A beta.5 host keeps the session going (keepalives) but never pongs.
+        rig.host_control.send(Control::KeepAlive.to_bytes()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(rig.rtt.latest(Instant::now()), None);
+        assert!(!rig.viewer.is_finished());
+        rig.viewer.abort();
+    }
+
+    #[tokio::test]
+    async fn viewer_does_not_ping_when_media_is_direct() {
+        let mut rig = PingRig::start(None).await;
+        assert_eq!(rig.next_control().await, None);
+        // A stray pong is not about the media path.
+        rig.host_control.send(Control::Pong { sent_us: 0 }.to_bytes()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(rig.rtt.latest(Instant::now()), None);
+        rig.viewer.abort();
+    }
+
+    #[test]
+    fn relay_pinger_rejects_pongs_from_the_future() {
+        let start = Instant::now();
+        let pinger = RelayPinger::new(start);
+        let Control::Ping { sent_us } = pinger.ping(start + Duration::from_millis(5)) else { unreachable!() };
+        assert_eq!(pinger.rtt(sent_us, start + Duration::from_millis(35)), Some(Duration::from_millis(30)));
+        assert_eq!(pinger.rtt(sent_us, start), None);
     }
 
     #[tokio::test]
@@ -1989,6 +2147,12 @@ mod tests {
 
         impl TestRelay {
             async fn start(idle: Duration) -> (Self, WebSocketStream<DuplexStream>, WebSocketStream<DuplexStream>) {
+                Self::start_with(idle, true).await
+            }
+
+            /// With `ice` false the relay drops ICE candidates, so the session
+            /// falls back to relayed media.
+            async fn start_with(idle: Duration, ice: bool) -> (Self, WebSocketStream<DuplexStream>, WebSocketStream<DuplexStream>) {
                 let (host_end, host_relay) = tokio::io::duplex(8 * 1024 * 1024);
                 let (viewer_end, viewer_relay) = tokio::io::duplex(8 * 1024 * 1024);
                 let host_ws = WebSocketStream::from_raw_socket(host_end, Role::Client, None).await;
@@ -2006,12 +2170,12 @@ mod tests {
                             message = from_host.next() => {
                                 host_seen = tokio::time::Instant::now();
                                 let Some(Ok(message)) = message else { break };
-                                if message.is_binary() && !task_blackhole.load(Ordering::SeqCst) && to_viewer.send(message).await.is_err() { break; }
+                                if message.is_binary() && !task_blackhole.load(Ordering::SeqCst) && (ice || !is_ice(&message)) && to_viewer.send(message).await.is_err() { break; }
                             }
                             message = from_viewer.next() => {
                                 viewer_seen = tokio::time::Instant::now();
                                 let Some(Ok(message)) = message else { break };
-                                if message.is_binary() && !task_blackhole.load(Ordering::SeqCst) && to_host.send(message).await.is_err() { break; }
+                                if message.is_binary() && !task_blackhole.load(Ordering::SeqCst) && (ice || !is_ice(&message)) && to_host.send(message).await.is_err() { break; }
                             }
                             _ = tokio::time::sleep_until(host_seen.min(viewer_seen) + idle) => {
                                 task_idle.store(true, Ordering::SeqCst);
@@ -2031,6 +2195,12 @@ mod tests {
 
             /// Keep both sockets open but stop forwarding: a silently dead peer.
             fn blackhole(&self) { self.blackhole.store(true, Ordering::SeqCst); }
+        }
+
+        /// ICE candidates are the only unsealed control frames in a session.
+        fn is_ice(message: &Message) -> bool {
+            let data = message.clone().into_data();
+            matches!(protocol::frame::unwrap(&data), Some((Tag::Control, body)) if matches!(Control::from_bytes(body), Some(Control::Ice { .. })))
         }
 
         fn spawn_host(ws: WebSocketStream<DuplexStream>, timings: SessionTimings, ready: Option<oneshot::Sender<DataHandle>>) -> JoinHandle<SessionResult<()>> {
@@ -2098,6 +2268,33 @@ mod tests {
             })
             .await
             .expect("the host answers a keyframe request");
+            host.abort();
+            viewer.abort();
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn relayed_viewer_measures_the_rtt_through_the_host() {
+            let timings = SessionTimings::default();
+            let (_relay, host_ws, viewer_ws) = TestRelay::start_with(Duration::from_secs(3600), false).await;
+            let host = spawn_host(host_ws, timings, None);
+            let (frame_tx, mut frames) = mpsc::channel(64);
+            let (_input, input_rx) = mpsc::channel(4);
+            let (ready_tx, ready_rx) = oneshot::channel();
+            let viewer = tokio::spawn(async move {
+                run_viewer_session_inner(viewer_ws, PASSWORD, SESSION, frame_tx, input_rx, Some(ready_tx), None, None, None, timings).await
+            });
+            let handle = timeout(Duration::from_secs(20), ready_rx).await.unwrap().unwrap();
+            let rtt = timeout(Duration::from_secs(5), async {
+                loop {
+                    while frames.try_recv().is_ok() {}
+                    if let Some(rtt) = handle.link.rtt(Instant::now()) { break rtt; }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("the viewer measures an RTT");
+            assert_eq!(handle.link.path, transport::MediaPath::Relay);
+            assert!(rtt < Duration::from_secs(1), "{rtt:?}");
             host.abort();
             viewer.abort();
         }
