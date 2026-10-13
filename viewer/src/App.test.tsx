@@ -7,7 +7,7 @@ const { listeners, mocks } = vi.hoisted(() => {
   const listeners = new Map<string, (payload: unknown) => void>();
   const on = (name: string) => (handler: (payload: unknown) => void) => { listeners.set(name, handler); return Promise.resolve(() => {}); };
   const mocks = {
-    onStatusChanged: on("status_changed"), onIncomingRequest: on("incoming_request"), onSessionStarted: on("session_started"),
+    onStatusChanged: on("status_changed"), onViewerStatus: on("viewer_status"), onIncomingRequest: on("incoming_request"), onSessionStarted: on("session_started"),
     onSessionEnded: on("session_ended"), onError: on("error"),
     startVideo: () => () => {}, requestKeyframe: vi.fn(), onAudioFrame: on("audio_frame"), onMonitorList: on("monitor_list"), onLinkStats: on("link_stats"),
     onFileOffer: on("file_offer"), onFileProgress: on("file_progress"), onFileDone: on("file_done"), onFileError: on("file_error"),
@@ -53,6 +53,18 @@ describe("App", () => {
     expect(screen.queryByText("Encrypted")).toBeNull();
     emit("session_started", { role: "viewer", remote_id: "987654321" });
     expect(await screen.findByRole("toolbar", { name: "Session controls" })).toBeTruthy();
+  });
+
+  it("shows the viewer session's own status, not the host's", async () => {
+    await startConnecting();
+    emit("viewer_status", { state: "in_session" });
+    emit("session_started", { role: "viewer", remote_id: "987654321" });
+    const toolbar = await screen.findByRole("toolbar", { name: "Session controls" });
+    const before = toolbar.innerHTML;
+    emit("status_changed", { state: "connecting" });
+    expect(toolbar.innerHTML).toBe(before);
+    emit("viewer_status", { state: "connecting" });
+    expect(toolbar.innerHTML).not.toBe(before);
   });
 
   it("returns home with the error visible when the host declines", async () => {

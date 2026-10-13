@@ -15,6 +15,7 @@ export default function App() {
   const [screen, setScreen] = useState<Screen>("home");
   const screenRef = useRef<Screen>("home");
   const [status, setStatus] = useState<api.Status>("offline");
+  const [viewerStatus, setViewerStatus] = useState<api.Status>("connecting");
   const [request, setRequest] = useState<api.IncomingRequest | null>(null);
   const [session, setSession] = useState<api.SessionStarted | null>(null);
   const [target, setTarget] = useState("");
@@ -58,6 +59,7 @@ export default function App() {
         setStatus(state);
         if (state === "online") setNotice(null);
       }),
+      api.onViewerStatus(({ state }) => { if (active) setViewerStatus(state); }),
       api.onIncomingRequest((payload) => {
         if (!active) return;
         setRequest(payload);
@@ -101,7 +103,7 @@ export default function App() {
   } else if (screen === "connecting") {
     content = <Connecting remoteId={target} onCancel={handleCancel} />;
   } else if (screen === "session" && session) {
-    content = <Session remoteId={session.remote_id} role={session.role} status={status} onDisconnect={handleDisconnect} />;
+    content = <Session remoteId={session.remote_id} role={session.role} status={session.role === "viewer" ? viewerStatus : status} onDisconnect={handleDisconnect} />;
   } else {
     content = <Home status={status} initialTargetId={target} onConnect={handleConnect} onOpenPermissions={() => go("permissions")} />;
   }

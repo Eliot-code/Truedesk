@@ -105,7 +105,9 @@ function toBase64(bytes: Uint8Array): string {
 }
 
 const on = <T>(event: string, handler: (payload: T) => void): Promise<UnlistenFn> => listen<T>(event, ({ payload }) => handler(payload));
+/** Hosting presence only; an outgoing session reports through onViewerStatus. */
 export const onStatusChanged = (handler: (payload: StatusChanged) => void) => on("status_changed", handler);
+export const onViewerStatus = (handler: (payload: StatusChanged) => void) => on("viewer_status", handler);
 export const onIncomingRequest = (handler: (payload: IncomingRequest) => void) => on("incoming_request", handler);
 export const onSessionStarted = (handler: (payload: SessionStarted) => void) => on("session_started", handler);
 export const onSessionEnded = (handler: (payload: SessionEnded) => void) => on("session_ended", handler);

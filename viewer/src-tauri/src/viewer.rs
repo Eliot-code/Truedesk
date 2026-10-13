@@ -110,13 +110,7 @@ pub(crate) fn connect(
             return Err(error.to_string());
         }
     }
-    emit(
-        &app,
-        "status_changed",
-        StatusEvent {
-            state: "connecting",
-        },
-    );
+    emit(&app, VIEWER_STATUS, StatusEvent { state: "connecting" });
     let (relay_urls, viewer_id) = {
         let mut state = state.lock();
         (state.config.config.relay_urls.clone(), state.config.ensure_identity())
@@ -147,7 +141,7 @@ pub(crate) fn connect(
             let mut session_started = false;
             loop {
                 if task_viewer_stop.load(Ordering::Relaxed) { break Ok(()); }
-                emit(&task_app, "status_changed", StatusEvent { state: "connecting" });
+                emit(&task_app, VIEWER_STATUS, StatusEvent { state: "connecting" });
                 // Set once this attempt streams video; only used to restart the
                 // reconnect window, never to infer an auth failure.
                 let media_received = Arc::new(AtomicBool::new(false));
@@ -247,7 +241,7 @@ pub(crate) fn connect(
                     // Ends with this attempt; a reconnect reports its own path.
                     let _link_stats = AbortOnDrop::new(spawn_link_stats(task_app.clone(), handle.link.clone()));
                     activate_data_channel(&task_app, handle, target.clone());
-                    emit(&task_app, "status_changed", StatusEvent { state: "in_session" });
+                    emit(&task_app, VIEWER_STATUS, StatusEvent { state: "in_session" });
                     if !session_started {
                         emit(
                             &task_app,
@@ -336,7 +330,6 @@ pub(crate) fn connect(
                 },
             },
         );
-        emit(&task_app, "status_changed", StatusEvent { state: host_status() });
     }));
     let installed = {
         let mut runtime_state = state.lock();

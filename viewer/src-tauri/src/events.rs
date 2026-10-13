@@ -124,10 +124,13 @@ pub(crate) struct FileError {
 
 /// Lifecycle events that also go to the log file, so a bug report can include
 /// what happened. Media and progress events are too frequent to log.
-pub(crate) const LOGGED_EVENTS: &[&str] = &["status_changed", "session_started", "session_ended", "incoming_request", "error", "file_error"];
+pub(crate) const LOGGED_EVENTS: &[&str] = &["status_changed", VIEWER_STATUS, "session_started", "session_ended", "incoming_request", "error", "file_error"];
 
-/// Last hosting presence sent to the UI. Viewer sessions share the status
-/// badge, so when one ends it restores this instead of guessing.
+/// The outgoing (viewer) session's own status. `status_changed` is only ever
+/// the host's presence, so a host hiccup never shows up in a viewer session.
+pub(crate) const VIEWER_STATUS: &str = "viewer_status";
+
+/// Last hosting presence sent to the UI, read by the tray.
 static HOST_STATUS: std::sync::Mutex<&str> = std::sync::Mutex::new("offline");
 
 pub(crate) fn emit_host_status(app: &AppHandle, state: &'static str) {
@@ -157,7 +160,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn viewer_sessions_restore_the_last_host_status() {
+    fn remembers_the_last_host_status() {
         remember_host_status("online");
         assert_eq!(host_status(), "online");
         remember_host_status("offline");
