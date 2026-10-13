@@ -216,8 +216,12 @@ pub(crate) fn connect(
             let monitor_app = task_app.clone();
             let _monitor_task = AbortOnDrop::new(tauri::async_runtime::spawn(async move {
                 while let Some(body) = monitor_rx.recv().await {
-                    if let Some(Control::MonitorList { monitors }) = Control::from_bytes(&body) {
-                        emit(&monitor_app, "monitor_list", MonitorListEvent { monitors });
+                    match Control::from_bytes(&body) {
+                        Some(Control::MonitorList { monitors }) => emit(&monitor_app, "monitor_list", MonitorListEvent { monitors }),
+                        Some(Control::VirtualDisplaySupport { max }) => emit(&monitor_app, "virtual_display_support", VirtualDisplaySupportEvent { max }),
+                        Some(Control::VirtualDisplayAdded { id }) => emit(&monitor_app, "virtual_display_added", VirtualDisplayAddedEvent { id }),
+                        Some(Control::VirtualDisplayRefused { code }) => emit(&monitor_app, "virtual_display_refused", VirtualDisplayRefusedEvent { code }),
+                        _ => {}
                     }
                 }
             }));
@@ -369,6 +373,26 @@ pub(crate) async fn select_monitor(state: tauri::State<'_, AppState>, id: u32) -
     let sealer = sealer.ok_or_else(|| "control channel is not ready".to_owned())?;
     let body = Control::SelectMonitor { id }.to_bytes();
     let sealed = lock_unpoisoned(&sealer).seal(&[Tag::Control as u8], &body);
+    sender.send_frame(Tag::Control, &sealed).await.map_err(|error| error.to_string())
+}
+
+/// Asks the host for a virtual display of `width` x `height` pixels. The
+/// answer arrives as `virtual_display_added` or `virtual_display_refused`.
+#[tauri::command]
+pub(crate) async fn add_virtual_display(state: tauri::State<'_, AppState>, width: u32, height: u32, hidpi: bool) -> Result<(), String> {
+    send_control(&state, Control::AddVirtualDisplay { width, height, hidpi }).await
+}
+
+#[tauri::command]
+pub(crate) async fn remove_virtual_display(state: tauri::State<'_, AppState>, id: u32) -> Result<(), String> {
+    send_control(&state, Control::RemoveVirtualDisplay { id }).await
+}
+
+async fn send_control(state: &tauri::State<'_, AppState>, control: Control) -> Result<(), String> {
+    let (sender, sealer) = { let state = state.lock(); (state.control_sender.clone(), state.control_sealer.clone()) };
+    let sender = sender.ok_or_else(|| "no active viewer session".to_owned())?;
+    let sealer = sealer.ok_or_else(|| "control channel is not ready".to_owned())?;
+    let sealed = lock_unpoisoned(&sealer).seal(&[Tag::Control as u8], &control.to_bytes());
     sender.send_frame(Tag::Control, &sealed).await.map_err(|error| error.to_string())
 }
 

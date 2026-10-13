@@ -80,6 +80,7 @@ export default function App() {
         go("home");
       }),
       api.onError(({ message }) => active && notify(friendlyError(message))),
+      api.onHostNotice(({ message }) => active && notify(message, "info")),
     ]);
 
     return () => {

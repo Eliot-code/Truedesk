@@ -258,6 +258,7 @@ fn get_config(state: tauri::State<'_, AppState>) -> AppConfig {
         relay_urls: state.config.config.relay_urls.clone(),
         recent_ids: state.config.config.recent_ids.clone(),
         clipboard_sync: state.config.config.clipboard_sync,
+        allow_virtual_displays: state.config.config.allow_virtual_displays,
     }
 }
 #[tauri::command]
@@ -500,6 +501,12 @@ fn set_clipboard_sync(state: tauri::State<'_, AppState>, enabled: bool) {
     }
 }
 
+/// Applies from the next session on.
+#[tauri::command]
+fn set_allow_virtual_displays(state: tauri::State<'_, AppState>, enabled: bool) -> Result<(), String> {
+    state.lock().config.set_allow_virtual_displays(enabled).map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 fn set_audio_muted(state: tauri::State<'_, AppState>, muted: bool) {
     state.lock().audio_muted.store(muted, Ordering::Relaxed);
@@ -657,6 +664,9 @@ pub fn run() {
             stop_video,
             request_keyframe,
             set_clipboard_sync,
+            set_allow_virtual_displays,
+            add_virtual_display,
+            remove_virtual_display,
             set_audio_muted,
             send_file,
             respond_file,

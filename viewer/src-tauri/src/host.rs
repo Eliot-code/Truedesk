@@ -61,6 +61,7 @@ pub(crate) struct HostSessionParams {
     pub(crate) totp_secret: Option<String>,
     /// Why unattended access is on but can't be used for this session.
     pub(crate) unattended_problem: Option<String>,
+    pub(crate) allow_virtual_displays: bool,
 }
 
 pub(crate) fn host_session_params(s: &mut RuntimeState) -> HostSessionParams {
@@ -71,7 +72,8 @@ pub(crate) fn host_session_params(s: &mut RuntimeState) -> HostSessionParams {
     let unattended_enabled = check.ready();
     let twofa_enabled = unattended_enabled && s.config.config.unattended_twofa_enabled;
     let password = check.password.unwrap_or_else(|| current_password(s));
-    HostSessionParams { password, unattended_enabled, twofa_enabled, totp_secret: check.totp_secret, unattended_problem: check.problem }
+    let allow_virtual_displays = s.config.config.allow_virtual_displays;
+    HostSessionParams { password, unattended_enabled, twofa_enabled, totp_secret: check.totp_secret, unattended_problem: check.problem, allow_virtual_displays }
 }
 
 /// Wakes hosting loops when the saved relay list or the device ID changes,
@@ -343,7 +345,7 @@ pub(crate) async fn run_paired_host_session(
     // when host-core asks for approval.
     let authenticated = Arc::new(AtomicBool::new(false));
     let authenticated_flag = authenticated.clone();
-    let HostSessionParams { password, unattended_enabled, twofa_enabled, totp_secret, unattended_problem } = params;
+    let HostSessionParams { password, unattended_enabled, twofa_enabled, totp_secret, unattended_problem, allow_virtual_displays } = params;
     if let Some(problem) = unattended_problem {
         // This connection will need approval; say why before the prompt.
         emit(app, "error", ErrorEvent { message: problem });
@@ -390,8 +392,11 @@ pub(crate) async fn run_paired_host_session(
         }
         allowed
     };
-    let mut session = Box::pin(host_core::roles::run_default_host_session_with_data_and_accept_and_2fa(
-        ws, &password, &ice_session, unattended_enabled, twofa_enabled, totp_secret.as_deref(), approve, data_ready_tx,
+    let mut displays = host_core::roles::HostDisplays::platform(allow_virtual_displays);
+    let notice_app = app.clone();
+    displays.notify = Some(Arc::new(move |notice| emit(&notice_app, "host_notice", HostNoticeEvent { message: display_notice(notice) })));
+    let mut session = Box::pin(host_core::roles::run_default_host_session_with_displays(
+        ws, &password, &ice_session, unattended_enabled, twofa_enabled, totp_secret.as_deref(), approve, data_ready_tx, displays,
     ));
     let mut streamed = false;
     let result = tokio::select! {
@@ -430,6 +435,16 @@ pub(crate) async fn run_paired_host_session(
     clear_data_channel(app);
     let dropped = streamed && matches!(result, Some(Err(_)));
     HostSessionEnd { stopped: result.is_none(), authenticated: authenticated.load(Ordering::Relaxed), dropped }
+}
+
+/// What the host user is told when a session changes its displays.
+fn display_notice(notice: host_core::roles::DisplayNotice) -> &'static str {
+    use host_core::roles::DisplayNotice;
+    match notice {
+        DisplayNotice::HeadlessAdded => "No screen is connected, so OpenDesk added a virtual display for this session.",
+        DisplayNotice::ViewerAdded => "The viewer added a virtual display. It goes away when the session ends.",
+        DisplayNotice::ViewerRemoved => "The viewer removed a virtual display.",
+    }
 }
 
 /// Best-effort sealed `Control::Bye` on the active session's control channel.

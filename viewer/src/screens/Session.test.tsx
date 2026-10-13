@@ -2,7 +2,12 @@
 import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { startVideo, requestKeyframe, closeDecoder, onAudioFrame, onMonitorList, onLinkStats, onFileOffer, onFileProgress, onFileDone, onFileError, onFileDrop, pickFile, startRecording, appendRecording, finishRecording, sendFile, respondFile, sendInput, selectMonitor, setAudioMuted, setClipboardSync, getConfig, decode } = vi.hoisted(() => ({
+const { onVirtualDisplaySupport, onVirtualDisplayAdded, onVirtualDisplayRefused, addVirtualDisplay, removeVirtualDisplay, startVideo, requestKeyframe, closeDecoder, onAudioFrame, onMonitorList, onLinkStats, onFileOffer, onFileProgress, onFileDone, onFileError, onFileDrop, pickFile, startRecording, appendRecording, finishRecording, sendFile, respondFile, sendInput, selectMonitor, setAudioMuted, setClipboardSync, getConfig, decode } = vi.hoisted(() => ({
+  onVirtualDisplaySupport: vi.fn<(handler: (payload: { max: number }) => void) => Promise<() => void>>(() => Promise.resolve(vi.fn())),
+  onVirtualDisplayAdded: vi.fn<(handler: (payload: { id: number }) => void) => Promise<() => void>>(() => Promise.resolve(vi.fn())),
+  onVirtualDisplayRefused: vi.fn<(handler: (payload: { code: string }) => void) => Promise<() => void>>(() => Promise.resolve(vi.fn())),
+  addVirtualDisplay: vi.fn(() => Promise.resolve()),
+  removeVirtualDisplay: vi.fn(() => Promise.resolve()),
   onFileDrop: vi.fn(() => Promise.resolve(vi.fn())),
   pickFile: vi.fn(),
   startRecording: vi.fn(() => Promise.resolve(3)),
@@ -12,7 +17,7 @@ const { startVideo, requestKeyframe, closeDecoder, onAudioFrame, onMonitorList, 
   requestKeyframe: vi.fn(() => Promise.resolve()),
   closeDecoder: vi.fn(),
   onAudioFrame: vi.fn(() => Promise.resolve(vi.fn())),
-  onMonitorList: vi.fn<(handler: (payload: { monitors: { id: number; name: string; width: number; height: number; is_primary: boolean }[] }) => void) => Promise<() => void>>(() => Promise.resolve(vi.fn())),
+  onMonitorList: vi.fn<(handler: (payload: { monitors: { id: number; name: string; width: number; height: number; is_primary: boolean; is_virtual?: boolean }[] }) => void) => Promise<() => void>>(() => Promise.resolve(vi.fn())),
   onLinkStats: vi.fn<(handler: (payload: { path: "direct" | "relay"; rtt_ms: number | null }) => void) => Promise<() => void>>(() => Promise.resolve(vi.fn())),
   onFileOffer: vi.fn(() => Promise.resolve(vi.fn())),
   onFileProgress: vi.fn(() => Promise.resolve(vi.fn())),
@@ -24,11 +29,11 @@ const { startVideo, requestKeyframe, closeDecoder, onAudioFrame, onMonitorList, 
   selectMonitor: vi.fn(() => Promise.resolve()),
   setAudioMuted: vi.fn(() => Promise.resolve()),
   setClipboardSync: vi.fn(() => Promise.resolve()),
-  getConfig: vi.fn(() => Promise.resolve({ relay_url: "", relay_urls: [], recent_ids: [], clipboard_sync: false })),
+  getConfig: vi.fn(() => Promise.resolve({ relay_url: "", relay_urls: [], recent_ids: [], clipboard_sync: false, allow_virtual_displays: true })),
   decode: vi.fn(),
 }));
 
-vi.mock("../lib/api", () => ({ startVideo, requestKeyframe, onAudioFrame, onMonitorList, onLinkStats, onFileOffer, onFileProgress, onFileDone, onFileError, onFileDrop, pickFile, startRecording, appendRecording, finishRecording, sendFile, respondFile, sendInput, selectMonitor, setAudioMuted, setClipboardSync, getConfig }));
+vi.mock("../lib/api", () => ({ onVirtualDisplaySupport, onVirtualDisplayAdded, onVirtualDisplayRefused, addVirtualDisplay, removeVirtualDisplay, startVideo, requestKeyframe, onAudioFrame, onMonitorList, onLinkStats, onFileOffer, onFileProgress, onFileDone, onFileError, onFileDrop, pickFile, startRecording, appendRecording, finishRecording, sendFile, respondFile, sendInput, selectMonitor, setAudioMuted, setClipboardSync, getConfig }));
 vi.mock("../lib/decode", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/decode")>()),
   makeDecoder: vi.fn(() => ({ push: decode, close: closeDecoder })),
@@ -142,6 +147,34 @@ describe("Session viewer transport", () => {
     // Unplugged: the host went back to the main display.
     act(() => list({ monitors: [monitor(1), monitor(3)] }));
     expect(select().value).toBe("1");
+  });
+
+  it("adds a virtual display sized to the window, follows it, and removes it", async () => {
+    const notify = vi.fn();
+    const view = render(<NotifyContext.Provider value={notify}><Session remoteId="123" role="viewer" status="in_session" onDisconnect={vi.fn()} /></NotifyContext.Provider>);
+    const last = <T,>(mock: { mock: { calls: T[][] } }) => mock.mock.calls[mock.mock.calls.length - 1][0];
+    const list = last(onMonitorList);
+    const monitor = (id: number, is_virtual = false) => ({ id, name: `D${id}`, width: 0, height: 0, is_primary: id === 1, is_virtual });
+    act(() => list({ monitors: [monitor(1)] }));
+    const select = () => view.getByRole("combobox", { name: "Monitor" }) as HTMLSelectElement;
+    // Nothing to add until the host offers it.
+    expect(view.queryByRole("option", { name: "Add display…" })).toBeNull();
+    act(() => last(onVirtualDisplaySupport)({ max: 1 }));
+    vi.stubGlobal("devicePixelRatio", 2);
+    vi.stubGlobal("innerWidth", 1440);
+    vi.stubGlobal("innerHeight", 900);
+    fireEvent.change(select(), { target: { value: "add-display" } });
+    expect(addVirtualDisplay).toHaveBeenLastCalledWith(2880, 1800, true);
+    vi.unstubAllGlobals();
+    act(() => list({ monitors: [monitor(1), monitor(7, true)] }));
+    act(() => last(onVirtualDisplayAdded)({ id: 7 }));
+    expect(select().value).toBe("7");
+    // At the host's limit.
+    expect(view.queryByRole("option", { name: "Add display…" })).toBeNull();
+    fireEvent.click(view.getByRole("button", { name: "Remove display" }));
+    expect(removeVirtualDisplay).toHaveBeenLastCalledWith(7);
+    act(() => last(onVirtualDisplayRefused)({ code: "failed" }));
+    await waitFor(() => expect(notify).toHaveBeenCalledWith("The other computer couldn't add a virtual display."));
   });
 
   it("shows link reports in the toolbar and clears them while reconnecting", () => {

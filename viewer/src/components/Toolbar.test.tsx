@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import Toolbar, { monitorName } from "./Toolbar";
+import Toolbar, { monitorName, virtualDisplaySize } from "./Toolbar";
 
 describe("monitorName", () => {
   it("turns Windows device paths into Display N", () => {
@@ -11,6 +11,53 @@ describe("monitorName", () => {
   it("keeps readable names and falls back to the position", () => {
     expect(monitorName("Built-in Retina Display", 0)).toBe("Built-in Retina Display");
     expect(monitorName("  ", 2)).toBe("Display 3");
+  });
+});
+
+describe("virtualDisplaySize", () => {
+  it("uses device pixels, caps at 3840x2160 and keeps sizes even", () => {
+    expect(virtualDisplaySize(1440, 900, 2)).toEqual({ width: 2880, height: 1800, hidpi: true });
+    expect(virtualDisplaySize(1281, 721, 1)).toEqual({ width: 1280, height: 720, hidpi: false });
+    expect(virtualDisplaySize(2560, 1440, 2)).toEqual({ width: 3840, height: 2160, hidpi: true });
+    expect(virtualDisplaySize(3440, 1440, 1)).toEqual({ width: 3440, height: 1440, hidpi: false });
+    // Ultra-wide at 2x: limited by width.
+    expect(virtualDisplaySize(3440, 1440, 2)).toEqual({ width: 3840, height: 1606, hidpi: true });
+    expect(virtualDisplaySize(800, 600, Number.NaN)).toEqual({ width: 800, height: 600, hidpi: false });
+  });
+});
+
+describe("monitor picker", () => {
+  afterEach(cleanup);
+  const monitors = [
+    { id: 1, name: "Built-in", width: 0, height: 0, is_primary: true },
+    { id: 5, name: "OpenDesk Virtual Display", width: 0, height: 0, is_primary: false, is_virtual: true },
+  ];
+
+  it("offers Add display only when the host supports it", () => {
+    const onAddDisplay = vi.fn();
+    const onMonitorChange = vi.fn();
+    const { rerender } = render(<Toolbar remoteId="1" onDisconnect={vi.fn()} monitors={monitors.slice(0, 1)} />);
+    expect(screen.queryByRole("option", { name: "Add display…" })).toBeNull();
+    rerender(<Toolbar remoteId="1" onDisconnect={vi.fn()} monitors={monitors.slice(0, 1)} canAddDisplay onAddDisplay={onAddDisplay} onMonitorChange={onMonitorChange} />);
+    fireEvent.change(screen.getByRole("combobox", { name: "Monitor" }), { target: { value: "add-display" } });
+    expect(onAddDisplay).toHaveBeenCalledOnce();
+    expect(onMonitorChange).not.toHaveBeenCalled();
+  });
+
+  it("offers Remove only while a virtual display is shown", () => {
+    const onRemoveDisplay = vi.fn();
+    const { rerender } = render(<Toolbar remoteId="1" onDisconnect={vi.fn()} monitors={monitors} selectedMonitor={1} onRemoveDisplay={onRemoveDisplay} />);
+    expect(screen.queryByRole("button", { name: "Remove display" })).toBeNull();
+    expect(screen.getByRole("option", { name: /Virtual/ })).toBeTruthy();
+    rerender(<Toolbar remoteId="1" onDisconnect={vi.fn()} monitors={monitors} selectedMonitor={5} onRemoveDisplay={onRemoveDisplay} />);
+    fireEvent.click(screen.getByRole("button", { name: "Remove display" }));
+    expect(onRemoveDisplay).toHaveBeenCalledWith(5);
+  });
+
+  it("is hidden from the host side", () => {
+    render(<Toolbar remoteId="1" role="host" onDisconnect={vi.fn()} monitors={monitors} selectedMonitor={5} canAddDisplay />);
+    expect(screen.queryByRole("combobox", { name: "Monitor" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Remove display" })).toBeNull();
   });
 });
 

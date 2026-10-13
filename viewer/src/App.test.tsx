@@ -10,6 +10,7 @@ const { listeners, mocks } = vi.hoisted(() => {
     onStatusChanged: on("status_changed"), onViewerStatus: on("viewer_status"), onIncomingRequest: on("incoming_request"), onSessionStarted: on("session_started"),
     onSessionEnded: on("session_ended"), onError: on("error"),
     startVideo: () => () => {}, requestKeyframe: vi.fn(), onAudioFrame: on("audio_frame"), onMonitorList: on("monitor_list"), onLinkStats: on("link_stats"),
+    onVirtualDisplaySupport: on("virtual_display_support"), onVirtualDisplayAdded: on("virtual_display_added"), onVirtualDisplayRefused: on("virtual_display_refused"), onHostNotice: on("host_notice"),
     onFileOffer: on("file_offer"), onFileProgress: on("file_progress"), onFileDone: on("file_done"), onFileError: on("file_error"),
     onFileDrop: on("drop"), onPasswordRotated: on("password_rotated"), onIdentityChanged: on("identity_changed"),
     onIdentityConflicts: on("identity_conflicts"), getIdentityConflicts: () => Promise.resolve([]),
@@ -40,7 +41,7 @@ describe("App", () => {
     mocks.connect.mockResolvedValue(undefined);
     mocks.disconnect.mockResolvedValue(undefined);
     mocks.getIdentity.mockResolvedValue({ id: "123456789", password: "654321" });
-    mocks.getConfig.mockResolvedValue({ relay_url: "wss://relay", relay_urls: ["wss://relay"], recent_ids: [], clipboard_sync: false });
+    mocks.getConfig.mockResolvedValue({ relay_url: "wss://relay", relay_urls: ["wss://relay"], recent_ids: [], clipboard_sync: false, allow_virtual_displays: true });
     mocks.getUnattendedStatus.mockResolvedValue({ enabled: false, has_password: false, twofa_enabled: false, ready: false, problem: null });
     mocks.listContacts.mockResolvedValue([]);
     mocks.listAllowed.mockResolvedValue([]);

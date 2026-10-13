@@ -17,6 +17,7 @@ pub(crate) struct AppConfig {
     pub(crate) relay_urls: Vec<String>,
     pub(crate) recent_ids: Vec<String>,
     pub(crate) clipboard_sync: bool,
+    pub(crate) allow_virtual_displays: bool,
 }
 #[derive(Serialize)]
 pub(crate) struct UnattendedStatus {
@@ -93,6 +94,16 @@ pub(crate) fn b64(bytes: &[u8]) -> String {
 }
 #[derive(Serialize, Clone)]
 pub(crate) struct MonitorListEvent { pub(crate) monitors: Vec<MonitorInfo> }
+/// The host lets the viewer add up to `max` virtual displays.
+#[derive(Serialize, Clone)]
+pub(crate) struct VirtualDisplaySupportEvent { pub(crate) max: u32 }
+#[derive(Serialize, Clone)]
+pub(crate) struct VirtualDisplayAddedEvent { pub(crate) id: u32 }
+#[derive(Serialize, Clone)]
+pub(crate) struct VirtualDisplayRefusedEvent { pub(crate) code: String }
+/// Something the host user should know about, shown as an info toast.
+#[derive(Serialize, Clone)]
+pub(crate) struct HostNoticeEvent { pub(crate) message: &'static str }
 /// The viewer's media path ("direct" or "relay") and its latest measured
 /// round trip. `rtt_ms` stays `None` until a real sample exists, and for
 /// hosts too old to report one.

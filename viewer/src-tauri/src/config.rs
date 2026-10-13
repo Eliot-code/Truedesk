@@ -54,7 +54,15 @@ pub struct Config {
     /// it shares clipboard contents with the remote peer in both directions.
     #[serde(default)]
     pub clipboard_sync: bool,
+    /// Viewers may add virtual displays during a session (macOS), and a
+    /// computer with no screen gets one. On by default: it gives a viewer
+    /// nothing their control of the mouse and keyboard doesn't, and the
+    /// displays go when the session ends.
+    #[serde(default = "default_true")]
+    pub allow_virtual_displays: bool,
 }
+
+fn default_true() -> bool { true }
 
 impl Default for Config {
     fn default() -> Self {
@@ -73,6 +81,7 @@ impl Default for Config {
             unattended_enabled: false,
             unattended_twofa_enabled: false,
             clipboard_sync: false,
+            allow_virtual_displays: true,
         }
     }
 }
@@ -263,6 +272,11 @@ impl ConfigStore {
 
     pub fn set_clipboard_sync(&mut self, enabled: bool) -> io::Result<()> {
         self.config.clipboard_sync = enabled;
+        self.save()
+    }
+
+    pub fn set_allow_virtual_displays(&mut self, enabled: bool) -> io::Result<()> {
+        self.config.allow_virtual_displays = enabled;
         self.save()
     }
 }
@@ -680,6 +694,16 @@ mod tests {
         assert!(write_atomic(&dir.join("missing-dir").join("x.json"), b"x").is_err());
         assert_eq!(fs::read(&path).unwrap(), b"new");
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn virtual_displays_are_allowed_by_default_even_in_old_configs() {
+        assert!(Config::default().allow_virtual_displays);
+        let old: Config = serde_json::from_str(r#"{"id":"123456789","relay_url":"wss://x","allow_list":[],"recent_ids":[]}"#).unwrap();
+        assert!(old.allow_virtual_displays);
+        let off = Config { allow_virtual_displays: false, ..Config::default() };
+        let decoded: Config = serde_json::from_str(&serde_json::to_string(&off).unwrap()).unwrap();
+        assert!(!decoded.allow_virtual_displays);
     }
 
     #[test]

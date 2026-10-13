@@ -14,6 +14,10 @@ interface ToolbarProps {
   monitors?: MonitorInfo[];
   selectedMonitor?: number;
   onMonitorChange?: (id: number) => void;
+  /** The host offers virtual displays and this session may add another. */
+  canAddDisplay?: boolean;
+  onAddDisplay?: () => void;
+  onRemoveDisplay?: (id: number) => void;
   audioMuted?: boolean;
   onAudioMutedChange?: (muted: boolean) => void;
   recordingActive?: boolean;
@@ -47,6 +51,7 @@ const icons = {
   sound: <Icon>{speaker}<path d="M16 9a5 5 0 0 1 0 6" /><path d="M19.364 18.364a9 9 0 0 0 0-12.728" /></Icon>,
   muted: <Icon>{speaker}<line x1="22" x2="16" y1="9" y2="15" /><line x1="16" x2="22" y1="9" y2="15" /></Icon>,
   files: <Icon><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" /></Icon>,
+  remove: <Icon><rect width="20" height="14" x="2" y="3" rx="2" /><line x1="9" x2="15" y1="10" y2="10" /><line x1="12" x2="12" y1="17" y2="21" /></Icon>,
   record: <Icon><circle cx="12" cy="12" r="7" fill="currentColor" stroke="none" /></Icon>,
   stop: <Icon><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none" /></Icon>,
 };
@@ -57,6 +62,27 @@ export function monitorName(name: string, index: number): string {
   if (device) return `Display ${device[1]}`;
   return name.trim() || `Display ${index + 1}`;
 }
+
+/** Largest virtual display a viewer asks for. */
+export const MAX_DISPLAY = { width: 3840, height: 2160 } as const;
+
+/**
+ * Size of a virtual display that fills a `width` x `height` (CSS pixel)
+ * window at `ratio` device pixels per CSS pixel: shrunk to fit 3840x2160
+ * with its shape kept, and even on both sides. On a high-density screen
+ * the host makes it HiDPI, so text keeps its usual size.
+ */
+export function virtualDisplaySize(width: number, height: number, ratio: number): { width: number; height: number; hidpi: boolean } {
+  const scale = Number.isFinite(ratio) && ratio > 0 ? ratio : 1;
+  let pixelsW = Math.max(1, Math.round(width * scale));
+  let pixelsH = Math.max(1, Math.round(height * scale));
+  const shrink = Math.min(1, MAX_DISPLAY.width / pixelsW, MAX_DISPLAY.height / pixelsH);
+  pixelsW = Math.floor(pixelsW * shrink);
+  pixelsH = Math.floor(pixelsH * shrink);
+  return { width: pixelsW - (pixelsW % 2), height: pixelsH - (pixelsH % 2), hidpi: scale >= 1.5 };
+}
+
+const ADD_DISPLAY = "add-display";
 
 function formatDuration(seconds: number): string {
   const minutes = Math.floor(seconds / 60).toString().padStart(2, "0");
@@ -87,7 +113,7 @@ export function LinkBadge({ link }: { link: LinkStats }) {
 
 const connectionLabels: Record<Status, string> = { in_session: "Connected", connecting: "Reconnecting", online: "Connected", offline: "Disconnected" };
 
-export default function Toolbar({ remoteId, role = "viewer", status = "in_session", link, clipboardSync = true, onClipboardSyncChange = () => {}, onDisconnect, monitors = [], selectedMonitor, onMonitorChange = () => {}, audioMuted = false, onAudioMutedChange = () => {}, recordingActive = false, recordingElapsed = 0, onRecordingToggle = () => {}, filesOpen = false, onFilesToggle = () => {} }: ToolbarProps) {
+export default function Toolbar({ remoteId, role = "viewer", status = "in_session", link, clipboardSync = true, onClipboardSyncChange = () => {}, onDisconnect, monitors = [], selectedMonitor, onMonitorChange = () => {}, canAddDisplay = false, onAddDisplay = () => {}, onRemoveDisplay = () => {}, audioMuted = false, onAudioMutedChange = () => {}, recordingActive = false, recordingElapsed = 0, onRecordingToggle = () => {}, filesOpen = false, onFilesToggle = () => {} }: ToolbarProps) {
   const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
@@ -102,6 +128,7 @@ export default function Toolbar({ remoteId, role = "viewer", status = "in_sessio
   };
 
   const viewer = role === "viewer";
+  const selectedVirtual = monitors.find((monitor) => monitor.id === (selectedMonitor ?? monitors[0]?.id) && monitor.is_virtual);
   const clipboard = <IconButton label="Sync clipboard" pressed={clipboardSync} title={clipboardSync ? "Clipboard sync is on. Click to turn it off." : "Clipboard sync is off. Click to turn it on."} onClick={() => onClipboardSyncChange(!clipboardSync)}text="Clipboard" icon={icons.clipboard} />;
 
   return (
@@ -118,10 +145,12 @@ export default function Toolbar({ remoteId, role = "viewer", status = "in_sessio
           {viewer && monitors.length > 0 && <label className="session-toolbar__select-chip">
             <span className="sr-only">Monitor</span>
             {icons.monitor}
-            <select aria-label="Monitor" value={selectedMonitor ?? monitors[0].id} onChange={(event) => onMonitorChange(Number(event.target.value))}>
-              {monitors.map((monitor, index) => <option key={monitor.id} value={monitor.id}>{monitorName(monitor.name, index)}{monitor.width && monitor.height ? ` · ${monitor.width}×${monitor.height}` : ""}{monitor.is_primary ? " · Primary" : ""}</option>)}
+            <select aria-label="Monitor" value={selectedMonitor ?? monitors[0].id} onChange={(event) => { if (event.target.value === ADD_DISPLAY) onAddDisplay(); else onMonitorChange(Number(event.target.value)); }}>
+              {monitors.map((monitor, index) => <option key={monitor.id} value={monitor.id}>{monitorName(monitor.name, index)}{monitor.width && monitor.height ? ` · ${monitor.width}×${monitor.height}` : ""}{monitor.is_primary ? " · Primary" : ""}{monitor.is_virtual ? " · Virtual" : ""}</option>)}
+              {canAddDisplay && <option value={ADD_DISPLAY}>Add display…</option>}
             </select>
           </label>}
+          {viewer && selectedVirtual && <IconButton label="Remove display" text="Remove" title="Remove this virtual display from the other computer" icon={icons.remove} onClick={() => onRemoveDisplay(selectedVirtual.id)} />}
           {clipboard}
           {viewer && <>
             <IconButton label="Mute audio" pressed={audioMuted} title={audioMuted ? "Audio is muted. Click to unmute." : "Audio is on. Click to mute."} onClick={() => onAudioMutedChange(!audioMuted)} text={audioMuted ? "Muted" : "Sound"} icon={audioMuted ? icons.muted : icons.sound} />

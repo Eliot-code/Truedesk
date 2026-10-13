@@ -44,6 +44,14 @@ Run the relay where both machines can reach it, then point both apps at it
 | 14 | Linux only: in a session with no keyring running (no GNOME Keyring or KWallet), save unattended access | Saving fails with "couldn't … system keyring" and a hint; if it was already on, the card says it isn't working and connections need accept |
 | 15 | Copy the host's `config.json` to the other machine, restart the app there | It shows a different ID from the host; both stay online |
 | 16 | On the host, **Get a new ID**, confirm | The ID changes and the host is online under it; the old ID no longer connects |
+| 17 | Mac host: in the viewer's monitor menu pick **Add display…** | The host shows "The viewer added a virtual display"; the viewer switches to a new display about the size of its window, and clicks land where they should on it |
+| 18 | Pick **Add display…** again, then once more | A second display is added; the third try says the session can't add more |
+| 19 | With a virtual display shown, click **Remove**, then end the session with another still added | The stream goes back to the main display and the removed one disappears; after Disconnect the host has no extra displays left (System Settings → Displays) |
+| 20 | Untick **Let viewers add virtual displays** on the host, reconnect | The viewer's monitor menu has no **Add display…** |
+| 21 | Headless host (no monitor or dummy plug), then connect. Mac: with the setting on, and again with it off | Setting on: the viewer sees a 1920x1080 virtual display. Off, or a Windows host: the viewer stops with "That computer has no screen connected…" instead of the Screen Recording message |
+
+`cargo run -p host-core --example virtual_display` on a Mac adds a 1280x720
+display and a 2560x1440 HiDPI one for two seconds each and removes them.
 
 macOS asks for **Screen Recording** and **Accessibility** permission the first
 time; restart the app after granting them. When you report an issue, include

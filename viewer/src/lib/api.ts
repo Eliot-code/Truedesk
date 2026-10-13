@@ -8,7 +8,7 @@ export type Status = "offline" | "online" | "connecting" | "in_session";
 export interface Identity { id: string; password: string }
 /** A relay refusing this device's ID: another device's ID there ("taken"), or a copy of this device online with it ("in_use"). */
 export interface IdentityConflict { relay: string; kind: "taken" | "in_use"; message: string }
-export interface AppConfig { relay_url: string; relay_urls: string[]; recent_ids: string[]; clipboard_sync: boolean }
+export interface AppConfig { relay_url: string; relay_urls: string[]; recent_ids: string[]; clipboard_sync: boolean; allow_virtual_displays: boolean }
 /** `ready` means the keyring answered and connections skip approval; `problem` says why not when it is on. */
 export interface UnattendedStatus { enabled: boolean; has_password: boolean; twofa_enabled: boolean; ready: boolean; problem: string | null }
 export interface PermissionStatus { screen_recording: boolean; accessibility: boolean }
@@ -24,7 +24,8 @@ export interface FileDone { id: number; path?: string | null }
 export interface FileError { id: number; message: string }
 export interface Contact { id: string; alias: string; last_connected: number | null }
 export interface TotpEnrollment { uri: string; secret: string; qr_width: number; qr_modules: boolean[] }
-export interface MonitorInfo { id: number; name: string; width: number; height: number; is_primary: boolean }
+/** `is_virtual`: a virtual display this session added, which the viewer may remove. */
+export interface MonitorInfo { id: number; name: string; width: number; height: number; is_primary: boolean; is_virtual?: boolean }
 /** Media path of a viewer session and its measured round trip; `rtt_ms` is null until there is a real sample. */
 export interface LinkStats { path: "direct" | "relay"; rtt_ms: number | null }
 
@@ -67,6 +68,9 @@ export const disconnect = () => invoke<void>("disconnect");
 export const sendInput = (bytes: Uint8Array) => invoke<void>("send_input", { bytes: Array.from(bytes) });
 export const selectMonitor = (id: number) => invoke<void>("select_monitor", { id });
 export const requestKeyframe = () => invoke<void>("request_keyframe");
+export const addVirtualDisplay = (width: number, height: number, hidpi: boolean) => invoke<void>("add_virtual_display", { width, height, hidpi });
+export const removeVirtualDisplay = (id: number) => invoke<void>("remove_virtual_display", { id });
+export const setAllowVirtualDisplays = (enabled: boolean) => invoke<void>("set_allow_virtual_displays", { enabled });
 /**
  * Stream video frame messages (raw bytes: header plus access unit, see
  * video.ts) to `handler` over a binary channel. Call the returned function to
@@ -121,6 +125,12 @@ export const onSessionStarted = (handler: (payload: SessionStarted) => void) => 
 export const onSessionEnded = (handler: (payload: SessionEnded) => void) => on("session_ended", handler);
 export const onError = (handler: (payload: ErrorEvent) => void) => on("error", handler);
 export const onMonitorList = (handler: (payload: { monitors: MonitorInfo[] }) => void) => on("monitor_list", handler);
+/** The host lets this viewer add up to `max` virtual displays; hosts that don't never send it. */
+export const onVirtualDisplaySupport = (handler: (payload: { max: number }) => void) => on("virtual_display_support", handler);
+export const onVirtualDisplayAdded = (handler: (payload: { id: number }) => void) => on("virtual_display_added", handler);
+export const onVirtualDisplayRefused = (handler: (payload: { code: string }) => void) => on("virtual_display_refused", handler);
+/** Something the host user should know, e.g. that the viewer added a display. */
+export const onHostNotice = (handler: (payload: { message: string }) => void) => on("host_notice", handler);
 export const onLinkStats = (handler: (payload: LinkStats) => void) => on("link_stats", handler);
 export const onAudioFrame = (handler: (frame: AudioFrame) => void) => on("audio_frame", handler);
 export const onFileOffer = (handler: (payload: FileOffer) => void) => on("file_offer", handler);

@@ -2,9 +2,20 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import * as api from "../lib/api";
 import { makeDecoder } from "../lib/decode";
 import { attachInput } from "../lib/input";
-import Toolbar from "../components/Toolbar";
+import Toolbar, { virtualDisplaySize } from "../components/Toolbar";
 import FileTransfer from "../components/FileTransfer";
 import { friendlyError, useNotify } from "../lib/notify";
+
+/** Why the host didn't add or remove a virtual display. */
+export function virtualDisplayRefusal(code: string): string {
+  switch (code) {
+    case "limit": return "This session already has as many virtual displays as it can add. Remove one first.";
+    case "not_allowed": return "The other computer doesn't allow adding virtual displays.";
+    case "failed": return "The other computer couldn't add a virtual display.";
+    case "unknown_display": return "That virtual display is already gone.";
+    default: return `The other computer couldn't change its displays (${code}).`;
+  }
+}
 
 /** Decode a base64 IPC payload into bytes (audio arrives as base64, not number[]). */
 function b64ToBytes(b64: string): Uint8Array {
@@ -39,6 +50,8 @@ export default function Session({ remoteId, role, status = "in_session", onDisco
   const [monitors, setMonitors] = useState<api.MonitorInfo[]>([]);
   const [selectedMonitor, setSelectedMonitor] = useState<number>();
   const [link, setLink] = useState<api.LinkStats>();
+  // Set once the host says it offers virtual displays (older hosts never do).
+  const [virtualMax, setVirtualMax] = useState<number>();
   const toggleClipboardSync = (enabled: boolean) => {
     setClipboardSync(enabled);
     void api.setClipboardSync(enabled).catch((error: unknown) => { setClipboardSync(!enabled); notify(friendlyError(error)); });
@@ -65,6 +78,17 @@ export default function Session({ remoteId, role, status = "in_session", onDisco
 
   useEffect(() => {
     if (role !== "viewer") return;
+    const listeners = Promise.all([
+      api.onVirtualDisplaySupport(({ max }) => setVirtualMax(max)),
+      // The host already switched to it; the list naming it came first.
+      api.onVirtualDisplayAdded(({ id }) => setSelectedMonitor(id)),
+      api.onVirtualDisplayRefused(({ code }) => notify(virtualDisplayRefusal(code))),
+    ]);
+    return () => { void listeners.then((stops) => stops.forEach((stop) => stop())); };
+  }, [role, notify]);
+
+  useEffect(() => {
+    if (role !== "viewer") return;
     let stop: (() => void) | undefined;
     const listener = api.onLinkStats(setLink);
     void listener.then((unlisten) => { stop = unlisten; });
@@ -72,12 +96,23 @@ export default function Session({ remoteId, role, status = "in_session", onDisco
   }, [role]);
 
   // A reconnect may land on the other path; show nothing until it reports.
-  useEffect(() => { if (status !== "in_session") setLink(undefined); }, [status]);
+  useEffect(() => { if (status !== "in_session") { setLink(undefined); setVirtualMax(undefined); } }, [status]);
 
   const chooseMonitor = (id: number) => {
     setSelectedMonitor(id);
     void api.selectMonitor(id).catch((error: unknown) => notify(friendlyError(error)));
   };
+
+  const addDisplay = () => {
+    const { width, height, hidpi } = virtualDisplaySize(window.innerWidth, window.innerHeight, window.devicePixelRatio);
+    void api.addVirtualDisplay(width, height, hidpi).catch((error: unknown) => notify(friendlyError(error)));
+  };
+
+  const removeDisplay = (id: number) => {
+    void api.removeVirtualDisplay(id).catch((error: unknown) => notify(friendlyError(error)));
+  };
+
+  const canAddDisplay = virtualMax !== undefined && monitors.filter((monitor) => monitor.is_virtual).length < virtualMax;
 
   const toggleAudioMuted = (muted: boolean) => {
     setAudioMuted(muted);
@@ -199,7 +234,7 @@ export default function Session({ remoteId, role, status = "in_session", onDisco
     <main className={`session-screen session-screen--${role}`}>
       {role === "viewer" && <canvas ref={canvasRef} className="session-canvas" tabIndex={0} aria-label="Remote screen" />}
       {role === "host" && <div className="session-host-overlay"><span className="eyebrow">OPENDESK · SECURE SESSION</span><h1>You are being controlled by {remoteId}</h1><p>Your screen is shared for this session.</p></div>}
-      <Toolbar remoteId={remoteId} role={role} status={status} link={link} monitors={monitors} selectedMonitor={selectedMonitor} onMonitorChange={chooseMonitor} clipboardSync={clipboardSync} onClipboardSyncChange={toggleClipboardSync} audioMuted={audioMuted} onAudioMutedChange={toggleAudioMuted} recordingActive={recordingActive} recordingElapsed={recordingElapsed} onRecordingToggle={() => void toggleRecording()} filesOpen={filesOpen} onFilesToggle={() => setFilesOpen((open) => !open)} onDisconnect={onDisconnect} />
+      <Toolbar remoteId={remoteId} role={role} status={status} link={link} monitors={monitors} selectedMonitor={selectedMonitor} onMonitorChange={chooseMonitor} canAddDisplay={canAddDisplay} onAddDisplay={addDisplay} onRemoveDisplay={removeDisplay} clipboardSync={clipboardSync} onClipboardSyncChange={toggleClipboardSync} audioMuted={audioMuted} onAudioMutedChange={toggleAudioMuted} recordingActive={recordingActive} recordingElapsed={recordingElapsed} onRecordingToggle={() => void toggleRecording()} filesOpen={filesOpen} onFilesToggle={() => setFilesOpen((open) => !open)} onDisconnect={onDisconnect} />
       {role === "viewer" && <FileTransfer open={filesOpen} onOpenChange={onFilesOpenChange} />}
     </main>
   );

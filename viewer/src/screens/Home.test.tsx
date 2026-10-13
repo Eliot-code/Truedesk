@@ -7,13 +7,13 @@ import { NotifyContext } from "../lib/notify";
 
 vi.mock("../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
-  return { ...actual, getIdentity: vi.fn(), getConfig: vi.fn(), getUnattendedStatus: vi.fn(), listContacts: vi.fn(), listAllowed: vi.fn(), startHosting: vi.fn(), closeKeepsRunning: vi.fn(), quitApp: vi.fn(), connect: vi.fn(), setUnattendedAccess: vi.fn(), setUnattended2fa: vi.fn(), confirmUnattended2fa: vi.fn(), rotatePassword: vi.fn(), addContact: vi.fn(), getStartAtSignIn: vi.fn(), setStartAtSignIn: vi.fn(), onIdentityChanged: vi.fn(), resetIdentity: vi.fn(), getIdentityConflicts: vi.fn(), onIdentityConflicts: vi.fn() };
+  return { ...actual, getIdentity: vi.fn(), getConfig: vi.fn(), getUnattendedStatus: vi.fn(), listContacts: vi.fn(), listAllowed: vi.fn(), startHosting: vi.fn(), closeKeepsRunning: vi.fn(), quitApp: vi.fn(), connect: vi.fn(), setUnattendedAccess: vi.fn(), setUnattended2fa: vi.fn(), confirmUnattended2fa: vi.fn(), rotatePassword: vi.fn(), addContact: vi.fn(), getStartAtSignIn: vi.fn(), setStartAtSignIn: vi.fn(), onIdentityChanged: vi.fn(), resetIdentity: vi.fn(), getIdentityConflicts: vi.fn(), onIdentityConflicts: vi.fn(), setAllowVirtualDisplays: vi.fn() };
 });
 describe("Home", () => {
   afterEach(cleanup);
   beforeEach(() => {
     vi.mocked(api.getIdentity).mockResolvedValue({ id: "123456789", password: "654321" });
-    vi.mocked(api.getConfig).mockResolvedValue({ relay_url: "wss://relay", relay_urls: ["wss://relay"], recent_ids: [], clipboard_sync: false });
+    vi.mocked(api.getConfig).mockResolvedValue({ relay_url: "wss://relay", relay_urls: ["wss://relay"], recent_ids: [], clipboard_sync: false, allow_virtual_displays: true });
     vi.mocked(api.getUnattendedStatus).mockResolvedValue({ enabled: false, has_password: false, twofa_enabled: false, ready: false, problem: null });
     vi.mocked(api.listContacts).mockResolvedValue([]);
     vi.mocked(api.listAllowed).mockResolvedValue([]);
@@ -33,6 +33,18 @@ describe("Home", () => {
     act(() => handler({ id: "987654321" }));
     expect(await screen.findByText("987654321")).toBeTruthy();
   });
+  it("saves the virtual display setting and undoes a failed save", async () => {
+    vi.mocked(api.setAllowVirtualDisplays).mockResolvedValueOnce(undefined).mockRejectedValueOnce("disk full");
+    render(<Home status="online" onConnect={vi.fn()} incomingRequest={null} onDismissRequest={vi.fn()} />);
+    const toggle = () => screen.getByRole("checkbox", { name: "Let viewers add virtual displays" }) as HTMLInputElement;
+    await waitFor(() => expect(toggle().checked).toBe(true));
+    fireEvent.click(toggle());
+    expect(api.setAllowVirtualDisplays).toHaveBeenLastCalledWith(false);
+    expect(toggle().checked).toBe(false);
+    fireEvent.click(toggle());
+    await waitFor(() => expect(toggle().checked).toBe(false));
+  });
+
   it("offers to start hosting only while offline", async () => {
     const { rerender } = render(<Home status="offline" onConnect={vi.fn()} />);
     await screen.findByText("123456789");
