@@ -55,7 +55,7 @@ export default function ConnectForm({ viewerId, relay: savedRelay, defaultRelay,
           YOUR ID <span className="web-own-id">{formatId(viewerId)}</span>
         </div>
       </header>
-      <section className="hero">
+      <section className="hero web-hero">
         <span className="eyebrow">BROWSER VIEWER</span>
         <h1>Control a computer from here.</h1>
         <p>Enter the ID and password shown in OpenDesk on the other computer. Nothing to install.</p>
@@ -76,7 +76,7 @@ export default function ConnectForm({ viewerId, relay: savedRelay, defaultRelay,
             <p className="caption">Use the same relay as the other computer. Default: <span className="mono">{defaultRelay}</span></p>
           </details>
         </form>
-        <p className="caption">
+        <p className="caption web-reassure">
           Everything you see and do stays encrypted all the way to the other computer. The relay only passes sealed data through &mdash; it can't read your screen or what you type.
           For sound, file transfer and clipboard sharing, use the desktop app.
         </p>

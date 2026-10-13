@@ -75,7 +75,7 @@ export default function Session({ remoteId, status, monitors, controls, onDiscon
   const overlay = overlays[status];
 
   return (
-    <main ref={screenRef} className="session-screen">
+    <main ref={screenRef} className="session-screen web-session">
       <canvas ref={canvasRef} className="session-canvas" tabIndex={0} aria-label="Remote screen" />
       {overlay && (
         <div className="session-host-overlay web-overlay" aria-live="polite">
