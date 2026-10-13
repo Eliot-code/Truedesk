@@ -194,6 +194,20 @@ async fn a_parked_host_that_disconnects_is_unregistered() {
 }
 
 #[tokio::test]
+async fn data_a_host_sends_before_pairing_reaches_the_viewer() {
+    let addr = relay::spawn_test_server().await;
+    let url = format!("ws://{addr}/ws");
+    let mut host = register(&url, &"00".repeat(32)).await;
+    let early = frame::wrap(Tag::Video, b"sent-while-parked");
+    host.send(Message::Binary(early.clone().into())).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let mut viewer = viewer_connect(&url).await;
+    assert!(matches!(first_control(&mut viewer).await, Some(Control::Paired { .. })));
+    let got = tokio::time::timeout(std::time::Duration::from_secs(2), viewer.next()).await.unwrap().unwrap().unwrap();
+    assert_eq!(got.into_data(), early);
+}
+
+#[tokio::test]
 async fn copies_of_one_device_fighting_over_an_id_get_id_in_use() {
     let addr = relay::spawn_test_server().await;
     let url = format!("ws://{addr}/ws");

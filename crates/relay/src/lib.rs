@@ -348,20 +348,31 @@ async fn handle(socket: WebSocket, state: RelayState, addr: IpAddr, guard: Optio
             (host_tx, host_close_tx, None)
         }
         Ok(Bridge::HostRegistered { peer_id, notify_rx }) => {
-            let peer = tokio::select! {
-                // A pairing wins over anything the host sends in reply to it.
-                biased;
-                result = tokio::time::timeout(state.config.pair_timeout, notify_rx) => result.ok().and_then(Result::ok),
-                _ = shutdown.changed() => { state.registry.unregister(&peer_id, &my_tx); writer.abort(); log_event("connection_close", addr, "shutdown"); return; }
-                // A parked host sends nothing until it is paired, so this
-                // only ends when it goes away. Dropping the registration then
-                // keeps viewers off a dead socket, and lets the host's next
-                // registration in without counting as a takeover.
-                () = parked_host_gone(&mut stream) => { state.registry.unregister(&peer_id, &my_tx); writer.abort(); log_event("connection_close", addr, "host_left"); return; }
+            let pairing = tokio::time::timeout(state.config.pair_timeout, notify_rx);
+            tokio::pin!(pairing);
+            // Watch the parked socket so a host that goes away is dropped at
+            // once: viewers don't pair with a dead socket, and the host's
+            // next registration doesn't count as a takeover.
+            let mut early = Vec::new();
+            let mut watching = true;
+            let peer = loop {
+                tokio::select! {
+                    biased;
+                    result = &mut pairing => break result.ok().and_then(Result::ok),
+                    _ = shutdown.changed() => { state.registry.unregister(&peer_id, &my_tx); writer.abort(); log_event("connection_close", addr, "shutdown"); return; }
+                    left = watch_parked_host(&mut stream, &mut early), if watching => {
+                        if left { state.registry.unregister(&peer_id, &my_tx); writer.abort(); log_event("connection_close", addr, "host_left"); return; }
+                        // Too much early data: leave the rest in the socket.
+                        watching = false;
+                    }
+                }
             };
             let Some((peer, peer_close_tx, requester_id)) = peer else { state.registry.unregister(&peer_id, &my_tx); writer.abort(); log_event("pairing_failure", addr, "pair_timeout"); return; };
             let _ = my_tx.send(session::paired_frame("host", &requester_id)).await;
             log_event("pairing_success", addr, "host");
+            for frame in early {
+                if !bytes.allow(frame.len()) || peer.send(frame).await.is_err() { break; }
+            }
             (peer, peer_close_tx, Some(peer_id))
         }
         Err(error) => {
@@ -415,10 +426,24 @@ async fn forward_rest(stream: &mut futures_util::stream::SplitStream<WebSocket>,
     }
 }
 
-/// Resolves when a parked host's socket closes or sends a data frame, which
-/// it must not do before it is paired.
-async fn parked_host_gone(stream: &mut futures_util::stream::SplitStream<WebSocket>) {
-    while let Some(Ok(Message::Ping(_) | Message::Pong(_))) = stream.next().await {}
+/// Data a parked host may send before it is paired (some start their
+/// handshake right away), held for the viewer.
+const MAX_EARLY_BYTES: usize = 256 * 1024;
+
+/// Reads a parked host's socket, keeping data frames in `early`. Returns
+/// `true` when the host went away, `false` once `early` is full.
+async fn watch_parked_host(stream: &mut futures_util::stream::SplitStream<WebSocket>, early: &mut Vec<Vec<u8>>) -> bool {
+    loop {
+        match stream.next().await {
+            Some(Ok(Message::Binary(frame))) => {
+                let held: usize = early.iter().map(Vec::len).sum();
+                if held + frame.len() > MAX_EARLY_BYTES { return false; }
+                early.push(Vec::from(frame));
+            }
+            Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return true,
+            Some(Ok(_)) => {}
+        }
+    }
 }
 
 fn close_peer(peer_close_tx: &CloseOutbound) {
