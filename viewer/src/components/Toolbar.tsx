@@ -25,14 +25,20 @@ interface ToolbarProps {
   onRecordingToggle?: () => void;
   filesOpen?: boolean;
   onFilesToggle?: () => void;
+  chatOpen?: boolean;
+  onChatToggle?: () => void;
+  chatUnread?: number;
+  viewOnly?: boolean;
+  onViewOnlyChange?: (viewOnly: boolean) => void;
 }
 
-interface IconButtonProps { label: string; text: string; icon: ReactNode; onClick?: () => void; title?: string; pressed?: boolean; expanded?: boolean; tone?: "danger" }
+interface IconButtonProps { label: string; text: string; icon: ReactNode; onClick?: () => void; title?: string; pressed?: boolean; expanded?: boolean; tone?: "danger"; badge?: number }
 
-function IconButton({ label, text, icon, onClick, title, pressed, expanded, tone }: IconButtonProps) {
+function IconButton({ label, text, icon, onClick, title, pressed, expanded, tone, badge }: IconButtonProps) {
   return (
     <button className="session-toolbar__icon" type="button" aria-label={label} aria-pressed={pressed} aria-expanded={expanded} data-tone={tone} onClick={onClick} title={title ?? label}>
       {icon}
+      {badge !== undefined && badge > 0 && <span className="session-toolbar__badge" aria-label={`${badge} unread`}>{badge > 99 ? "99+" : badge}</span>}
       <span className="session-toolbar__icon-text" aria-hidden="true">{text}</span>
     </button>
   );
@@ -54,6 +60,8 @@ const icons = {
   remove: <Icon><rect width="20" height="14" x="2" y="3" rx="2" /><line x1="9" x2="15" y1="10" y2="10" /><line x1="12" x2="12" y1="17" y2="21" /></Icon>,
   record: <Icon><circle cx="12" cy="12" r="7" fill="currentColor" stroke="none" /></Icon>,
   stop: <Icon><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none" /></Icon>,
+  chat: <Icon><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z" /></Icon>,
+  eye: <Icon><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0" /><circle cx="12" cy="12" r="3" /></Icon>,
 };
 
 /** Readable monitor name: Windows reports device paths like `\\.\DISPLAY2`. */
@@ -113,7 +121,7 @@ export function LinkBadge({ link }: { link: LinkStats }) {
 
 const connectionLabels: Record<Status, string> = { in_session: "Connected", connecting: "Reconnecting", online: "Connected", offline: "Disconnected" };
 
-export default function Toolbar({ remoteId, role = "viewer", status = "in_session", link, clipboardSync = true, onClipboardSyncChange = () => {}, onDisconnect, monitors = [], selectedMonitor, onMonitorChange = () => {}, canAddDisplay = false, onAddDisplay = () => {}, onRemoveDisplay = () => {}, audioMuted = false, onAudioMutedChange = () => {}, recordingActive = false, recordingElapsed = 0, onRecordingToggle = () => {}, filesOpen = false, onFilesToggle = () => {} }: ToolbarProps) {
+export default function Toolbar({ remoteId, role = "viewer", status = "in_session", link, clipboardSync = true, onClipboardSyncChange = () => {}, onDisconnect, monitors = [], selectedMonitor, onMonitorChange = () => {}, canAddDisplay = false, onAddDisplay = () => {}, onRemoveDisplay = () => {}, audioMuted = false, onAudioMutedChange = () => {}, recordingActive = false, recordingElapsed = 0, onRecordingToggle = () => {}, filesOpen = false, onFilesToggle = () => {}, chatOpen = false, onChatToggle = () => {}, chatUnread = 0, viewOnly = false, onViewOnlyChange = () => {} }: ToolbarProps) {
   const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
@@ -155,6 +163,8 @@ export default function Toolbar({ remoteId, role = "viewer", status = "in_sessio
           {viewer && <>
             <IconButton label="Mute audio" pressed={audioMuted} title={audioMuted ? "Audio is muted. Click to unmute." : "Audio is on. Click to mute."} onClick={() => onAudioMutedChange(!audioMuted)} text={audioMuted ? "Muted" : "Sound"} icon={audioMuted ? icons.muted : icons.sound} />
             <IconButton label="Files" pressed={filesOpen} expanded={filesOpen} title={filesOpen ? "Hide file transfer" : "Send or receive files"} onClick={onFilesToggle} text="Files" icon={icons.files} />
+            <IconButton label="Chat" pressed={chatOpen} expanded={chatOpen} badge={chatUnread} title={chatOpen ? "Hide chat" : "Open chat"} onClick={onChatToggle} text="Chat" icon={icons.chat} />
+            <IconButton label="View only" pressed={viewOnly} title={viewOnly ? "View only is on. Click to send input again." : "View only is off. Click to stop sending input."} onClick={() => onViewOnlyChange(!viewOnly)} text="View only" icon={icons.eye} />
             {recordingActive && <span className="session-toolbar__recording-status" aria-label="Recording elapsed"><span className="session-toolbar__recording-dot" aria-hidden="true" />{formatDuration(recordingElapsed)}</span>}
             <IconButton label={recordingActive ? "Stop recording" : "Record"} text={recordingActive ? "Stop" : "Record"} icon={recordingActive ? icons.stop : icons.record} tone="danger" onClick={onRecordingToggle} />
           </>}
