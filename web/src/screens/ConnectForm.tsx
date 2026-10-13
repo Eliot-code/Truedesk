@@ -58,7 +58,7 @@ export default function ConnectForm({ viewerId, relay: savedRelay, defaultRelay,
       <section className="hero web-hero">
         <span className="eyebrow">BROWSER VIEWER</span>
         <h1>Control a computer from here.</h1>
-        <p>Enter the ID and password shown in OpenDesk on the other computer. Nothing to install.</p>
+        <p>Enter the ID and password shown in OpenDesk on the other computer. Nothing to install. If that computer has unattended access turned on, use its unattended password, not the one on screen.</p>
       </section>
       <section className="card connect-card web-connect-card">
         {unsupported && <p className="message" role="alert">{unsupported}</p>}
