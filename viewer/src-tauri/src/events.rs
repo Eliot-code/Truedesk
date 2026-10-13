@@ -71,6 +71,19 @@ pub(crate) fn b64(bytes: &[u8]) -> String {
 }
 #[derive(Serialize, Clone)]
 pub(crate) struct MonitorListEvent { pub(crate) monitors: Vec<MonitorInfo> }
+/// The viewer's media path ("direct" or "relay") and its latest measured
+/// round trip. `rtt_ms` stays `None` until a real sample exists, and for
+/// hosts too old to report one.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LinkStatsEvent { pub(crate) path: &'static str, pub(crate) rtt_ms: Option<u32> }
+
+impl LinkStatsEvent {
+    pub(crate) fn new(link: &host_core::transport::LinkStatus, now: Instant) -> Self {
+        // Nearest ms, but a sub-millisecond LAN reads as 1 ms rather than 0.
+        let rtt_ms = link.rtt(now).map(|rtt| u32::try_from((rtt.as_micros() + 500) / 1_000).unwrap_or(u32::MAX).max(1));
+        Self { path: link.path.as_str(), rtt_ms }
+    }
+}
 #[derive(Serialize, Clone)]
 pub(crate) struct AudioFrameEvent { pub(crate) sample_rate: u32, pub(crate) channels: u8, pub(crate) samples: String }
 #[derive(Serialize, Clone)]
@@ -139,5 +152,20 @@ mod tests {
         assert_eq!(host_status(), "online");
         remember_host_status("offline");
         assert_eq!(host_status(), "offline");
+    }
+
+    #[test]
+    fn link_stats_report_the_path_and_only_real_rtt_samples() {
+        use host_core::transport::{LinkStatus, MediaPath, RttMeter};
+        let meter = Arc::new(RttMeter::default());
+        let link = LinkStatus::new(MediaPath::Relay, Arc::clone(&meter));
+        let now = Instant::now();
+        assert_eq!(LinkStatsEvent::new(&link, now), LinkStatsEvent { path: "relay", rtt_ms: None });
+        meter.record(Duration::from_micros(14_200), now);
+        assert_eq!(LinkStatsEvent::new(&link, now).rtt_ms, Some(14));
+        meter.record(Duration::from_micros(300), now);
+        assert_eq!(LinkStatsEvent::new(&link, now).rtt_ms, Some(1));
+        let direct = LinkStatus::new(MediaPath::Direct, Arc::new(RttMeter::default()));
+        assert_eq!(serde_json::to_string(&LinkStatsEvent::new(&direct, now)).unwrap(), r#"{"path":"direct","rtt_ms":null}"#);
     }
 }

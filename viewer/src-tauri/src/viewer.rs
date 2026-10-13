@@ -62,6 +62,20 @@ impl VideoSink {
     }
 }
 
+/// How often the session toolbar's connection badge is refreshed.
+const LINK_STATS_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Sends the session's path and RTT to the UI until aborted.
+fn spawn_link_stats(app: AppHandle, link: host_core::transport::LinkStatus) -> tauri::async_runtime::JoinHandle<()> {
+    tauri::async_runtime::spawn(async move {
+        let mut ticks = tokio::time::interval(LINK_STATS_INTERVAL);
+        loop {
+            ticks.tick().await;
+            emit(&app, "link_stats", LinkStatsEvent::new(&link, Instant::now()));
+        }
+    })
+}
+
 #[tauri::command]
 pub(crate) fn start_video(sink: tauri::State<'_, VideoSink>, channel: Channel<InvokeResponseBody>) {
     sink.attach(channel);
@@ -230,6 +244,8 @@ pub(crate) fn connect(
             }));
             match data_ready_rx.await {
                 Ok(handle) => {
+                    // Ends with this attempt; a reconnect reports its own path.
+                    let _link_stats = AbortOnDrop::new(spawn_link_stats(task_app.clone(), handle.link.clone()));
                     activate_data_channel(&task_app, handle, target.clone());
                     emit(&task_app, "status_changed", StatusEvent { state: "in_session" });
                     if !session_started {
