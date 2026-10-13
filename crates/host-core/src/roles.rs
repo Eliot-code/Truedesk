@@ -17,7 +17,7 @@ use protocol::{
     Tag,
 };
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, error::Error, fmt::Display, future::Future, sync::{atomic::{AtomicU32, AtomicU64, Ordering}, Arc, Mutex, OnceLock}, time::{Duration, Instant}};
+use std::{collections::HashMap, error::Error, fmt::Display, future::Future, sync::{atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering}, Arc, Mutex, OnceLock}, time::{Duration, Instant}};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::WebSocketStream;
@@ -412,6 +412,26 @@ fn even_frame(frame: encode::RawFrame) -> Option<encode::RawFrame> {
     })
 }
 
+/// Host-enforced gates for what a connected viewer may do, shared with the
+/// caller (the app) so it can flip them live during a session. The host, not
+/// the viewer, honours these, so a malicious viewer cannot bypass them. Every
+/// gate defaults to enabled.
+#[derive(Clone)]
+pub struct SessionGates {
+    /// Inject the viewer's remote mouse/keyboard input. When off, input is
+    /// dropped host-side before it reaches the OS.
+    pub control: Arc<AtomicBool>,
+    /// Send host system audio to the viewer. When off, captured audio frames
+    /// are dropped before they are sealed and sent.
+    pub audio: Arc<AtomicBool>,
+}
+
+impl Default for SessionGates {
+    fn default() -> Self {
+        Self { control: Arc::new(AtomicBool::new(true)), audio: Arc::new(AtomicBool::new(true)) }
+    }
+}
+
 /// Run a host session after relay pairing.
 ///
 /// The encoder factory receives the dimensions of the first usable captured
@@ -496,6 +516,7 @@ where
         ws, password, ice_session, || Some(capturer), encoder_factory,
         move || Box::new(injector) as Box<dyn InputInjector>,
         unattended_enabled, twofa_enabled, totp_secret, approve, data_ready, SessionTimings::default(), HostDisplays::default(),
+        SessionGates::default(),
     ).await
 }
 
@@ -505,6 +526,7 @@ async fn run_host_session_with_data_and_accept_and_2fa_with_factory<S, C, E, F, 
     encoder_factory: F, injector_factory: IF, unattended_enabled: bool,
     twofa_enabled: bool, totp_secret: Option<&str>, approve: A,
     data_ready: Option<oneshot::Sender<DataHandle>>, timings: SessionTimings, displays: HostDisplays,
+    gates: SessionGates,
 )-> SessionResult<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -685,8 +707,8 @@ where
     let inject_tx = spawn_injection_thread(injector_factory, Arc::clone(&dims), Arc::clone(&display))?;
     // Aborting the forwarder on exit drops the last injection sender, which
     // ends the injection thread together with the session.
-    let mut input_forwarder = AbortOnDrop(tokio::spawn(forward_input(transport_rx, opener, inject_tx)));
-    let mut media = AbortOnDrop(tokio::spawn(send_media(transport_tx, sealer, audio_rx, Arc::clone(&video.units))));
+    let mut input_forwarder = AbortOnDrop(tokio::spawn(forward_input(transport_rx, opener, inject_tx, gates.control)));
+    let mut media = AbortOnDrop(tokio::spawn(send_media(transport_tx, sealer, audio_rx, Arc::clone(&video.units), gates.audio)));
     // The viewer keepalives on the relay socket even when media is direct, so
     // silence there means the viewer is gone (a direct transport may never
     // report a dead peer on its own).
@@ -812,12 +834,16 @@ async fn send_media(
     mut sealer: Sealer,
     mut audio_rx: mpsc::Receiver<protocol::audio::AudioFrame>,
     units: Arc<UnitSlot>,
+    audio_allowed: Arc<AtomicBool>,
 ) -> SessionResult<()> {
     let mut video_ready = false;
     loop {
         tokio::select! {
             biased;
             Some(audio_frame) = audio_rx.recv() => {
+                // Host-enforced mute: drain the frame but never send it so no
+                // host audio reaches the viewer while the gate is off.
+                if !audio_allowed.load(Ordering::Relaxed) { continue; }
                 let sealed = sealer.seal(&[Tag::Audio as u8], &audio_frame.to_bytes());
                 let _ = transport_tx.send(Tag::Audio, &sealed).await;
             },
@@ -1281,6 +1307,7 @@ async fn forward_input(
     mut transport_rx: Box<dyn TransportReceiver>,
     mut opener: Opener,
     inject_tx: mpsc::Sender<InputEvent>,
+    control_allowed: Arc<AtomicBool>,
 ) -> InputForwardEnd {
     let mut pending_move: Option<InputEvent> = None;
     loop {
@@ -1295,6 +1322,9 @@ async fn forward_input(
                 if tag != Tag::Input { continue; }
                 let Some(plaintext) = opener.open(&[Tag::Input as u8], &body) else { continue };
                 let Some((event, _timestamp_us)) = InputEvent::from_bytes(&plaintext) else { continue };
+                // Host-enforced control gate: decrypt to keep the opener's nonce
+                // sequence in step, then drop the event so nothing is injected.
+                if !control_allowed.load(Ordering::Relaxed) { pending_move = None; continue; }
                 if matches!(event, InputEvent::MouseMove { .. }) {
                     if pending_move.is_some() {
                         pending_move = Some(event);
@@ -1772,6 +1802,7 @@ where
         ws, password, ice_session, ScapCapturer::create,
         default_encoder,
         default_injector, false, false, None, || async { true }, None, SessionTimings::default(), HostDisplays::default(),
+        SessionGates::default(),
     )
     .await
 }
@@ -1821,17 +1852,19 @@ where
 {
     run_default_host_session_with_displays(
         ws, password, ice_session, unattended_enabled, twofa_enabled, totp_secret, approve, data_ready,
-        HostDisplays::platform(false),
+        HostDisplays::platform(false), SessionGates::default(),
     ).await
 }
 
 /// Like [`run_default_host_session_with_data_and_accept_and_2fa`], with
-/// the host's virtual display settings.
+/// the host's virtual display settings and host-enforced viewer permission
+/// gates (control/audio), which the caller may flip live during the session.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_default_host_session_with_displays<S, A, Fut>(
     ws: WebSocketStream<S>, password: &str, ice_session: &str,
     unattended_enabled: bool, twofa_enabled: bool, totp_secret: Option<&str>,
     approve: A, data_ready: oneshot::Sender<DataHandle>, displays: HostDisplays,
+    gates: SessionGates,
 ) -> SessionResult<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -1852,6 +1885,7 @@ where
         Some(data_ready),
         SessionTimings::default(),
         displays,
+        gates,
     )
     .await
 }
@@ -2004,7 +2038,7 @@ mod tests {
         let (wire_tx, wire_rx) = mpsc::channel(16);
         // Capacity 1 and no consumer yet: the queue is full after one event.
         let (inject_tx, mut inject_rx) = mpsc::channel(1);
-        let forwarder = tokio::spawn(forward_input(Box::new(ChannelReceiver(wire_rx)), Opener::new(host_recv), inject_tx));
+        let forwarder = tokio::spawn(forward_input(Box::new(ChannelReceiver(wire_rx)), Opener::new(host_recv), inject_tx, Arc::new(AtomicBool::new(true))));
 
         let key = |code| InputEvent::Key { code, down: true, modifiers: 0 };
         let mv = |x| InputEvent::MouseMove { x, y: x };
@@ -2031,11 +2065,45 @@ mod tests {
         let shared = [6u8; 32];
         let (viewer_send, _) = derive_keys(&shared, false);
         let (_, host_recv) = derive_keys(&shared, true);
-        let forwarder = tokio::spawn(forward_input(Box::new(ChannelReceiver(wire_rx)), Opener::new(host_recv), inject_tx));
+        let forwarder = tokio::spawn(forward_input(Box::new(ChannelReceiver(wire_rx)), Opener::new(host_recv), inject_tx, Arc::new(AtomicBool::new(true))));
         let event = InputEvent::Key { code: 65, down: true, modifiers: 0 };
         let sealed = Sealer::new(viewer_send).seal(&[Tag::Input as u8], &event.to_bytes(0));
         wire_tx.send((Tag::Input, sealed)).await.unwrap();
         assert_eq!(timeout(Duration::from_secs(1), forwarder).await.unwrap().unwrap(), InputForwardEnd::InjectorGone);
+    }
+
+    #[test]
+    fn session_gates_default_to_enabled() {
+        let gates = SessionGates::default();
+        assert!(gates.control.load(Ordering::Relaxed));
+        assert!(gates.audio.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn forward_input_drops_events_while_control_is_gated_off() {
+        let shared = [9u8; 32];
+        let (viewer_send, _) = derive_keys(&shared, false);
+        let (_, host_recv) = derive_keys(&shared, true);
+        let mut viewer_sealer = Sealer::new(viewer_send);
+        let (wire_tx, wire_rx) = mpsc::channel(16);
+        let (inject_tx, mut inject_rx) = mpsc::channel(4);
+        let control = Arc::new(AtomicBool::new(false));
+        let forwarder = tokio::spawn(forward_input(Box::new(ChannelReceiver(wire_rx)), Opener::new(host_recv), inject_tx, Arc::clone(&control)));
+
+        let key = |code| InputEvent::Key { code, down: true, modifiers: 0 };
+        // Gated off: this event must never reach the injector.
+        let sealed = viewer_sealer.seal(&[Tag::Input as u8], &key(65).to_bytes(0));
+        wire_tx.send((Tag::Input, sealed)).await.unwrap();
+        assert!(timeout(Duration::from_millis(200), inject_rx.recv()).await.is_err());
+
+        // Turning the gate back on resumes injection.
+        control.store(true, Ordering::Relaxed);
+        let sealed = viewer_sealer.seal(&[Tag::Input as u8], &key(66).to_bytes(0));
+        wire_tx.send((Tag::Input, sealed)).await.unwrap();
+        assert_eq!(timeout(Duration::from_secs(1), inject_rx.recv()).await.unwrap().unwrap(), key(66));
+
+        drop(wire_tx);
+        assert_eq!(timeout(Duration::from_secs(1), forwarder).await.unwrap().unwrap(), InputForwardEnd::PeerGone);
     }
 
     #[test]
@@ -2574,7 +2642,7 @@ mod tests {
                     ws, PASSWORD, SESSION, || Some(FakeCapturer::new(64, 64)),
                     |width, height| H264Encoder::new(width, height, 15, 1_000_000),
                     || Box::new(NoopInjector::default()) as Box<dyn InputInjector>,
-                    false, false, None, approve, ready, timings, HostDisplays::default(),
+                    false, false, None, approve, ready, timings, HostDisplays::default(), SessionGates::default(),
                 ).await
             })
         }
@@ -2771,7 +2839,7 @@ mod tests {
                     host_ws, PASSWORD, SESSION, || None::<FakeCapturer>,
                     |width, height| H264Encoder::new(width, height, 15, 1_000_000),
                     || Box::new(NoopInjector::default()) as Box<dyn InputInjector>,
-                    false, false, None, || async { true }, None, timings, HostDisplays::default(),
+                    false, false, None, || async { true }, None, timings, HostDisplays::default(), SessionGates::default(),
                 ).await
             });
             let viewer = spawn_viewer(viewer_ws, timings);
@@ -2857,7 +2925,7 @@ mod tests {
                     ws, PASSWORD, SESSION, || Some(capturer),
                     |width, height| H264Encoder::new(width, height, 15, 1_000_000),
                     || Box::new(NoopInjector::default()) as Box<dyn InputInjector>,
-                    false, false, None, || async { true }, None, timings, displays,
+                    false, false, None, || async { true }, None, timings, displays, SessionGates::default(),
                 ).await
             })
         }
