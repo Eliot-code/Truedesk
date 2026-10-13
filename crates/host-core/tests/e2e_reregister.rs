@@ -82,7 +82,7 @@ async fn host_reregisters_with_same_token_after_session_drop() {
     let token = "ab".repeat(32);
 
     // 1. Host registers; the first viewer pairs and a session streams.
-    let mut host_ws = register_host(&urls, HOST_ID, &token).await.expect("first registration");
+    let (_, mut host_ws) = register_host(&urls, HOST_ID, &token).await.expect("first registration");
     let viewer_ws = viewer_pair(&url, "555555555").await.expect("first viewer pairs");
     let pairing = timeout(Duration::from_secs(5), await_pairing(&mut host_ws))
         .await
@@ -102,8 +102,8 @@ async fn host_reregisters_with_same_token_after_session_drop() {
 
     // 3. The host re-registers with the same ID and token (accepted under the
     //    relay's ownership lease); a different token still cannot take the ID.
-    let mut host_ws = register_host(&urls, HOST_ID, &token).await.expect("re-registration");
-    let mut squatter = register_host(&urls, HOST_ID, &"cd".repeat(32)).await.expect("squatter connects");
+    let (_, mut host_ws) = register_host(&urls, HOST_ID, &token).await.expect("re-registration");
+    let (_, mut squatter) = register_host(&urls, HOST_ID, &"cd".repeat(32)).await.expect("squatter connects");
     let rejected = timeout(Duration::from_secs(5), await_pairing(&mut squatter))
         .await
         .expect("squatter closed")
@@ -122,6 +122,35 @@ async fn host_reregisters_with_same_token_after_session_drop() {
     viewer.abort();
 }
 
+/// The app only treats an ID as accepted once the relay has had time to
+/// reject it, and tells a foreign ID from a copy of this device.
+#[tokio::test(flavor = "multi_thread")]
+async fn settling_tells_accepted_taken_and_in_use_apart() {
+    let addr = relay::spawn_test_server().await;
+    let urls = vec![format!("ws://{addr}/ws")];
+    let settle = Duration::from_millis(300);
+    let token = "ab".repeat(32);
+    let (url, mut owner) = register_host(&urls, HOST_ID, &token).await.expect("register");
+    assert_eq!(url, urls[0]);
+    assert_eq!(relay_client::settle_registration(&mut owner, settle).await, Ok(None));
+
+    let (_, mut squatter) = register_host(&urls, HOST_ID, &"cd".repeat(32)).await.expect("squatter connects");
+    let taken = relay_client::settle_registration(&mut squatter, settle).await.expect_err("taken");
+    assert!(relay_client::is_id_taken(&taken) && !relay_client::is_id_in_use(&taken), "{taken}");
+
+    // A copy of this device keeps taking the registration over.
+    let mut copies = vec![owner];
+    let in_use = loop {
+        let (_, mut copy) = register_host(&urls, HOST_ID, &token).await.expect("copy connects");
+        match relay_client::settle_registration(&mut copy, settle).await {
+            Ok(None) => copies.push(copy),
+            other => break other.expect_err("refused"),
+        }
+        assert!(copies.len() < 10, "the relay never refused the copies");
+    };
+    assert!(relay_client::is_id_in_use(&in_use) && !relay_client::is_id_taken(&in_use), "{in_use}");
+}
+
 /// Pair a host that rejects after the key exchange with a viewer and return
 /// the viewer's error, which must arrive promptly as an explicit rejection
 /// rather than a generic close.
@@ -132,7 +161,7 @@ async fn viewer_rejection(
 ) -> host_core::roles::ViewerSessionError {
     let addr = relay::spawn_test_server().await;
     let url = format!("ws://{addr}/ws");
-    let mut host_ws = register_host(std::slice::from_ref(&url), HOST_ID, &"ab".repeat(32)).await.expect("register");
+    let (_, mut host_ws) = register_host(std::slice::from_ref(&url), HOST_ID, &"ab".repeat(32)).await.expect("register");
     let viewer_ws = viewer_pair(&url, "555555555").await.expect("viewer pairs");
     await_pairing(&mut host_ws).await.expect("host paired");
     let host = tokio::spawn(async move {

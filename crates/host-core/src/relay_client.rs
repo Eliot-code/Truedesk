@@ -5,7 +5,7 @@
 #![allow(clippy::result_large_err)]
 
 use futures_util::{SinkExt, StreamExt};
-use protocol::{control::{Control, ERROR_ID_TAKEN}, frame, Tag};
+use protocol::{control::{Control, ERROR_ID_IN_USE, ERROR_ID_TAKEN}, frame, Tag};
 use tokio::net::TcpStream;
 use tokio::time::{timeout, Duration};
 use tokio_tungstenite::{connect_async_with_config, tungstenite::Message, MaybeTlsStream, WebSocketStream};
@@ -83,12 +83,28 @@ pub struct Pairing {
 }
 
 /// Connect to the first reachable relay and register `peer_id` with `token`.
-/// The relay does not acknowledge registration; a rejection surfaces as the
-/// socket closing in [`await_pairing`].
-pub async fn register_host(urls: &[String], peer_id: &str, token: &str) -> Result<RelayWebSocket, String> {
-    let (_, mut ws) = connect_best(urls).await?;
+/// Returns the relay's URL with the socket. The relay does not acknowledge
+/// registration; a rejection surfaces as the socket closing in
+/// [`await_pairing`] (see [`settle_registration`]).
+pub async fn register_host(urls: &[String], peer_id: &str, token: &str) -> Result<(String, RelayWebSocket), String> {
+    let (url, mut ws) = connect_best(urls).await?;
     register(&mut ws, peer_id, token).await.map_err(|error| error.to_string())?;
-    Ok(ws)
+    Ok((url, ws))
+}
+
+/// How long a registration must stay open before it counts as accepted.
+/// Relays reject a registration as soon as it arrives, so this only has to
+/// cover a round trip.
+pub const REGISTRATION_SETTLE: Duration = Duration::from_secs(2);
+
+/// Wait up to `settle` for the relay to reject a fresh registration. `Ok(None)`
+/// means it is still parked, so the relay accepted it; a viewer that pairs in
+/// the meantime is returned as `Ok(Some(_))`.
+pub async fn settle_registration(ws: &mut RelayWebSocket, settle: Duration) -> Result<Option<Pairing>, String> {
+    match timeout(settle, await_pairing(ws)).await {
+        Ok(result) => result.map(Some),
+        Err(_) => Ok(None),
+    }
 }
 
 /// Wait on a registered host socket until the relay pairs a viewer with it.
@@ -109,6 +125,9 @@ pub async fn await_pairing(ws: &mut RelayWebSocket) -> Result<Pairing, String> {
             Some(Control::Error { code }) if code == ERROR_ID_TAKEN => Err(format!(
                 "relay rejected registration ({ERROR_ID_TAKEN}): this ID is registered to another device"
             )),
+            Some(Control::Error { code }) if code == ERROR_ID_IN_USE => Err(format!(
+                "relay rejected registration ({ERROR_ID_IN_USE}): another computer is online with this ID"
+            )),
             Some(Control::Error { code }) => Err(format!("relay rejected registration ({code})")),
             _ => Err("invalid pairing message".into()),
         };
@@ -119,6 +138,12 @@ pub async fn await_pairing(ws: &mut RelayWebSocket) -> Result<Pairing, String> {
 /// registration because the ID belongs to a different token.
 pub fn is_id_taken(error: &str) -> bool {
     error.contains(ERROR_ID_TAKEN)
+}
+
+/// True when an [`await_pairing`] error means another live connection with
+/// the same ID and token keeps taking the registration: a copy of this device.
+pub fn is_id_in_use(error: &str) -> bool {
+    error.contains(ERROR_ID_IN_USE)
 }
 
 /// Ask the relay to connect this WebSocket to a registered peer.
