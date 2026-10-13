@@ -49,7 +49,11 @@ export interface Environment {
 }
 
 const OPEN = 1;
-/** How often session timers (keepalive, deadlines) run. */
+/**
+ * How often session timers (keepalive, deadlines) run. Browsers throttle
+ * timers in background tabs to about once a minute, longer than the host's
+ * dead-peer limit, so every incoming message also runs them.
+ */
 const TICK_MS = 1000;
 
 export class Connection {
@@ -104,7 +108,11 @@ export class Connection {
     };
     socket.onmessage = (event) => {
       if (this.socket !== socket || !(event.data instanceof ArrayBuffer)) return;
-      viewer.receive(new Uint8Array(event.data), this.now());
+      const now = this.now();
+      viewer.receive(new Uint8Array(event.data), now);
+      // The host sends at least a keepalive every 15 s, so this keeps ours
+      // going while the interval below is throttled.
+      viewer.tick(now);
       this.drain();
     };
     // An error is always followed by a close.

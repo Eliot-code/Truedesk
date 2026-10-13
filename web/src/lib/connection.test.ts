@@ -86,6 +86,27 @@ describe("Connection", () => {
     expect(ended).toEqual([]);
   });
 
+  it("keeps sending keepalives when background timers are throttled", () => {
+    const { core, connection, advance } = setup();
+    let due = 15_000;
+    core.setup = (viewer) => {
+      viewer.onTick = (now) => {
+        if (now < due) return [];
+        due = now + 15_000;
+        return [{ kind: "send", bytes: [0x01, 0x4b] }];
+      };
+    };
+    connection.start();
+    const socket = FakeSocket.all[0];
+    socket.open();
+    // No timer runs (a hidden tab), but the host's own keepalives still arrive.
+    for (let i = 0; i < 4; i++) {
+      advance(15_000);
+      socket.message([0]);
+    }
+    expect(socket.sent.filter((bytes) => bytes[1] === 0x4b)).toHaveLength(4);
+  });
+
   it("says goodbye to the host on disconnect", () => {
     const { connection, ended } = setup();
     connection.start();

@@ -11,6 +11,8 @@ export class FakeViewer implements Viewer {
   freed = false;
   /** What `receive` queues, per call. */
   onReceive: (message: Uint8Array) => Queued[] = () => [];
+  /** What `tick` queues, given the time. */
+  onTick: (now: number) => Queued[] = () => [];
 
   constructor(readonly password: string, readonly authCode: string) {}
 
@@ -22,7 +24,7 @@ export class FakeViewer implements Viewer {
     this.closedCalls += 1;
     this.events.push({ kind: "ended", text: "connection closed during session" });
   }
-  tick() {}
+  tick(now: number) { this.events.push(...this.onTick(now)); }
   nextEvent(): ViewerEvent | undefined {
     const next = this.events.shift();
     if (!next) return undefined;
