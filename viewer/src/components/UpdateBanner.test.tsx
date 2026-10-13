@@ -6,7 +6,7 @@ const { check, relaunch } = vi.hoisted(() => ({ check: vi.fn(), relaunch: vi.fn(
 vi.mock("@tauri-apps/plugin-updater", () => ({ check }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch }));
 
-import UpdateBanner, { CHECK_INTERVAL_MS } from "./UpdateBanner";
+import UpdateBanner, { CHECK_INTERVAL_MS, CHECK_TIMEOUT_MS, DOWNLOAD_STALL_MS, DOWNLOAD_TIMEOUT_MS } from "./UpdateBanner";
 
 type DownloadEvent = { event: "Started"; data: { contentLength?: number } } | { event: "Progress"; data: { chunkLength: number } } | { event: "Finished" };
 
@@ -98,6 +98,49 @@ describe("UpdateBanner", () => {
     expect(console.warn).toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(relaunch).toHaveBeenCalledTimes(1));
+  });
+
+  it("puts time limits on the check and the download", async () => {
+    const update = fakeUpdate();
+    check.mockResolvedValue(update);
+    render(<UpdateBanner enabled visible />);
+    fireEvent.click(await screen.findByRole("button", { name: "Install and restart" }));
+    await waitFor(() => expect(relaunch).toHaveBeenCalledTimes(1));
+    expect(check).toHaveBeenCalledWith({ timeout: CHECK_TIMEOUT_MS });
+    expect(update.download).toHaveBeenCalledWith(expect.any(Function), { timeout: DOWNLOAD_TIMEOUT_MS });
+  });
+
+  it("can cancel a download and ignores it if it finishes later", async () => {
+    const update = fakeUpdate();
+    let finish: () => void = () => {};
+    update.download.mockImplementation(() => new Promise<void>((resolve) => { finish = resolve; }));
+    check.mockResolvedValue(update);
+    render(<UpdateBanner enabled visible />);
+    fireEvent.click(await screen.findByRole("button", { name: "Install and restart" }));
+    expect(await screen.findByText(/Downloading/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.getByText("Update available: v0.1.0-beta.5")).toBeTruthy();
+    await act(async () => { finish(); });
+    expect(update.install).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Install and restart" })).toBeTruthy();
+  });
+
+  it("gives up on a download that stops making progress", async () => {
+    vi.useFakeTimers();
+    const update = fakeUpdate();
+    update.download.mockImplementation(async (onEvent?: (event: DownloadEvent) => void) => {
+      onEvent?.({ event: "Started", data: { contentLength: 100 } });
+      await new Promise(() => {});
+    });
+    check.mockResolvedValue(update);
+    render(<UpdateBanner enabled visible />);
+    await act(async () => { await Promise.resolve(); });
+    fireEvent.click(screen.getByRole("button", { name: "Install and restart" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(DOWNLOAD_STALL_MS - 1); });
+    expect(screen.getByText(/Downloading/)).toBeTruthy();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(screen.getByText("The update didn't install. Try again later.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
   });
 
   it("remembers a dismissed version and checks again later", async () => {

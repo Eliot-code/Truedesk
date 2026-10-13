@@ -4,6 +4,12 @@ import { relaunch } from "@tauri-apps/plugin-process";
 
 /** How often a running app looks for a new release. */
 export const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+/** Limit for the update check request. */
+export const CHECK_TIMEOUT_MS = 30 * 1000;
+/** Limit for the whole download request, slow links included. */
+export const DOWNLOAD_TIMEOUT_MS = 20 * 60 * 1000;
+/** Give up when no data has arrived for this long. */
+export const DOWNLOAD_STALL_MS = 60 * 1000;
 
 type Phase = "available" | "downloading" | "ready" | "installing" | "failed";
 
@@ -24,6 +30,8 @@ export default function UpdateBanner({ enabled, visible }: UpdateBannerProps) {
   const [phase, setPhase] = useState<Phase>("available");
   const [progress, setProgress] = useState<number | null>(null);
   const updateRef = useRef<Update | null>(null);
+  // Bumped by Cancel so a download that finishes later is ignored.
+  const attemptRef = useRef(0);
   const dismissed = useRef<string | null>(null);
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
@@ -34,7 +42,7 @@ export default function UpdateBanner({ enabled, visible }: UpdateBannerProps) {
     const run = async () => {
       if (updateRef.current) return;
       try {
-        const found = await check();
+        const found = await check({ timeout: CHECK_TIMEOUT_MS });
         if (!found) return;
         if (!active || found.version === dismissed.current) { void found.close().catch(() => {}); return; }
         updateRef.current = found;
@@ -59,27 +67,49 @@ export default function UpdateBanner({ enabled, visible }: UpdateBannerProps) {
   const start = useCallback(async () => {
     const target = updateRef.current;
     if (!target) return;
+    const attempt = ++attemptRef.current;
+    const current = () => attemptRef.current === attempt;
+    let stallTimer: number | undefined;
     try {
       if (phase === "ready") { await restart(target); return; }
       setPhase("downloading");
       setProgress(null);
       let total = 0;
       let received = 0;
-      await target.download((event) => {
+      let stall: (error: Error) => void = () => {};
+      const stalled = new Promise<never>((_, reject) => { stall = reject; });
+      const arm = () => {
+        window.clearTimeout(stallTimer);
+        stallTimer = window.setTimeout(() => stall(new Error("update download stalled")), DOWNLOAD_STALL_MS);
+      };
+      arm();
+      await Promise.race([stalled, target.download((event) => {
+        arm();
+        if (!current()) return;
         if (event.event === "Started") total = event.data.contentLength ?? 0;
         else if (event.event === "Progress" && total > 0) {
           received += event.data.chunkLength;
           setProgress(Math.min(100, Math.round((received / total) * 100)));
         }
-      });
+      }, { timeout: DOWNLOAD_TIMEOUT_MS })]);
+      window.clearTimeout(stallTimer);
+      if (!current()) return;
       // A session may have started while downloading; restart once it ends.
       if (!visibleRef.current) { setPhase("ready"); return; }
       await restart(target);
     } catch (error) {
+      window.clearTimeout(stallTimer);
+      if (!current()) return;
       console.warn("Update install failed:", error);
       setPhase("failed");
     }
   }, [phase, restart]);
+
+  const cancel = () => {
+    attemptRef.current += 1;
+    setPhase("available");
+    setProgress(null);
+  };
 
   const dismiss = () => {
     const target = updateRef.current;
@@ -91,7 +121,6 @@ export default function UpdateBanner({ enabled, visible }: UpdateBannerProps) {
   };
 
   if (!update || !visible) return null;
-  const busy = phase === "downloading" || phase === "installing";
   let text = `Update available: v${update.version}`;
   if (phase === "downloading") text = progress === null ? "Downloading update…" : `Downloading update… ${progress}%`;
   else if (phase === "installing") text = "Installing update…";
@@ -102,8 +131,11 @@ export default function UpdateBanner({ enabled, visible }: UpdateBannerProps) {
   return (
     <div className="update-banner" role="status">
       <span className="update-banner__text">{text}</span>
-      {!busy && <button className="update-banner__action" type="button" onClick={() => void start()}>{action}</button>}
-      {!busy && <button className="toast__dismiss" type="button" onClick={dismiss} aria-label="Dismiss update">×</button>}
+      {phase === "downloading" && <button className="update-banner__action" type="button" onClick={cancel}>Cancel</button>}
+      {phase !== "downloading" && phase !== "installing" && <>
+        <button className="update-banner__action" type="button" onClick={() => void start()}>{action}</button>
+        <button className="toast__dismiss" type="button" onClick={dismiss} aria-label="Dismiss update">×</button>
+      </>}
     </div>
   );
 }
