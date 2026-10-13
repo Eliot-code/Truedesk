@@ -179,7 +179,9 @@ section { padding: clamp(56px, 8vw, 88px) 0; }
 .download:hover { transform: translateY(-3px); box-shadow: var(--shadow-md); }
 @media (prefers-reduced-motion: reduce) { .download:hover { transform: none; } }
 .download h3 { font-size: 1.2rem; margin-bottom: 6px; }
-.download > p { color: var(--muted); font-size: 0.92rem; }
+.download > p { color: var(--muted); font-size: 0.92rem; line-height: 1.45; }
+/* Reserve two lines so the download buttons align across cards. */
+@media (min-width: 860px) { .download > p { min-height: 2.9em; } }
 .download__files { list-style: none; display: grid; gap: 10px; padding: 0; margin: 0; }
 .download__files li { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
 .download__detail { color: var(--muted); font: 0.78rem var(--mono); }
