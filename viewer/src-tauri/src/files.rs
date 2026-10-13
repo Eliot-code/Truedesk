@@ -130,6 +130,8 @@ async fn receive_offer(
                 .lock()
                 .pending_file_requests
                 .insert(id, decision_tx);
+            // A host started at sign-in may be hidden in the tray.
+            startup::reveal_if_hidden(&pending_app);
             emit(
                 &pending_app,
                 "file_offer",

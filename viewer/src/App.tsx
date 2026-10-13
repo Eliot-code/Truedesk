@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Home from "./screens/Home";
 import Connecting from "./screens/Connecting";
 import IncomingRequest from "./screens/IncomingRequest";
+import IncomingFiles from "./components/IncomingFiles";
 import Permissions from "./screens/Permissions";
 import Session from "./screens/Session";
 import Toast from "./components/Toast";
@@ -112,6 +113,7 @@ export default function App() {
     {content}
     <Toast notice={notice} onDismiss={dismiss} />
     <UpdateBanner enabled={!import.meta.env.DEV} visible={screen === "home" && !request} />
+    {session?.role === "host" && <IncomingFiles />}
     {request && <IncomingRequest peerId={request.peer_id} known={request.known} onResolved={() => setRequest(null)} />}
   </NotifyContext.Provider>;
 }

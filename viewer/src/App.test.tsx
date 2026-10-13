@@ -14,7 +14,7 @@ const { listeners, mocks } = vi.hoisted(() => {
     onFileDrop: on("drop"), onPasswordRotated: on("password_rotated"), onIdentityChanged: on("identity_changed"),
     permissionStatus: vi.fn(), connect: vi.fn(), disconnect: vi.fn(),
     getIdentity: vi.fn(), getConfig: vi.fn(), getUnattendedStatus: vi.fn(), listContacts: vi.fn(), listAllowed: vi.fn(), startHosting: vi.fn(), getStartAtSignIn: vi.fn(), closeKeepsRunning: vi.fn(),
-    sendInput: vi.fn(), respondToRequest: vi.fn(),
+    sendInput: vi.fn(), respondToRequest: vi.fn(), respondFile: vi.fn(),
   };
   return { listeners, mocks };
 });
@@ -66,6 +66,23 @@ describe("App", () => {
     expect(toolbar.innerHTML).toBe(before);
     emit("viewer_status", { state: "connecting" });
     expect(toolbar.innerHTML).not.toBe(before);
+  });
+
+  it("asks the host user about a file the viewer sends", async () => {
+    mocks.respondFile.mockResolvedValue(undefined);
+    render(<App />);
+    await screen.findByText("123456789");
+    emit("session_started", { role: "host", remote_id: "987654321" });
+    await screen.findByText(/You are being controlled by 987654321/);
+    emit("file_offer", { id: 4, name: "notes.txt", size: 2048, from: "987654321" });
+    const dialog = await screen.findByRole("dialog", { name: "Accept this file?" });
+    expect(dialog.textContent).toContain("notes.txt");
+    expect(dialog.textContent).toContain("2 KB");
+    fireEvent.click(screen.getByRole("button", { name: "Accept" }));
+    await waitFor(() => expect(mocks.respondFile).toHaveBeenCalledWith(4, true));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Accept this file?" })).toBeNull());
+    emit("file_done", { id: 4, path: "/home/me/Downloads/notes.txt" });
+    expect((await screen.findByRole("status")).textContent).toContain("Saved notes.txt to /home/me/Downloads/notes.txt");
   });
 
   it("returns home with the error visible when the host declines", async () => {
