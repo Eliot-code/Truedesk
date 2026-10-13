@@ -34,6 +34,13 @@ const TICK: Duration = Duration::from_millis(5);
 const REPORT_INTERVAL: Duration = Duration::from_millis(100);
 /// Retransmissions one NACK packet can queue.
 const MAX_RESENDS_PER_NACK: usize = 512;
+/// A peer with feedback sends a report every 100 ms (host) or answers each
+/// one (viewer); this much silence means the path is gone.
+const FEEDBACK_SILENCE: Duration = Duration::from_secs(8);
+/// A host without feedback sends video even on a static screen (repeated
+/// frames, a keyframe every 2 s), so this much media silence also means the
+/// path is gone.
+const MEDIA_SILENCE: Duration = Duration::from_secs(15);
 
 /// Keys for the sealed feedback channel of a direct session.
 #[derive(Clone)]
@@ -55,20 +62,79 @@ impl FeedbackKeys {
 }
 
 /// Carries sealed protocol frames over application-level UDP fragmentation.
+///
+/// With feedback keys the receiver closes once the peer goes silent (see
+/// [`PathWatch`]), so the session ends and the viewer reconnects instead of
+/// showing a frozen picture. Keepalives go over the relay socket, so nothing
+/// else notices a dead UDP path.
 pub struct DirectTransport {
     pub(crate) conn: Arc<dyn Conn + Send + Sync>,
     feedback: Option<FeedbackKeys>,
+    silence: SilenceLimits,
 }
 
 impl DirectTransport {
     /// A transport without feedback: paced sending and beta.4-compatible
     /// receiving, no retransmission or bitrate adaptation.
     pub(crate) fn new(conn: Arc<dyn Conn + Send + Sync>) -> Self {
-        Self { conn, feedback: None }
+        Self { conn, feedback: None, silence: SilenceLimits::default() }
     }
 
     pub(crate) fn with_feedback(conn: Arc<dyn Conn + Send + Sync>, keys: FeedbackKeys) -> Self {
-        Self { conn, feedback: Some(keys) }
+        Self { conn, feedback: Some(keys), silence: SilenceLimits::default() }
+    }
+
+    #[cfg(test)]
+    fn with_silence_limits(mut self, silence: SilenceLimits) -> Self {
+        self.silence = silence;
+        self
+    }
+}
+
+/// How long a direct path may stay silent before it counts as dead.
+#[derive(Debug, Clone, Copy)]
+struct SilenceLimits {
+    feedback: Duration,
+    media: Duration,
+}
+
+impl Default for SilenceLimits {
+    fn default() -> Self { Self { feedback: FEEDBACK_SILENCE, media: MEDIA_SILENCE } }
+}
+
+/// Decides when a silent direct path is dead. Only peers that talk all the
+/// time are judged: one that sent feedback, or (on the viewer) a host
+/// without feedback that sent media. A viewer without feedback only sends
+/// input, so the host never judges it; a dead path then ends on the
+/// viewer's side.
+struct PathWatch {
+    limits: SilenceLimits,
+    /// This side receives media (the viewer).
+    media_receiver: bool,
+    last_heard: Instant,
+    feedback: bool,
+    media: bool,
+}
+
+impl PathWatch {
+    fn new(now: Instant, limits: SilenceLimits, media_receiver: bool) -> Self {
+        Self { limits, media_receiver, last_heard: now, feedback: false, media: false }
+    }
+
+    fn heard(&mut self, now: Instant, feedback: bool) {
+        self.last_heard = now;
+        if feedback { self.feedback = true } else { self.media = true }
+    }
+
+    fn dead(&self, now: Instant) -> bool {
+        let limit = if self.feedback {
+            self.limits.feedback
+        } else if self.media_receiver && self.media {
+            self.limits.media
+        } else {
+            return false;
+        };
+        now.saturating_duration_since(self.last_heard) >= limit
     }
 }
 
@@ -102,8 +168,9 @@ impl Transport for DirectTransport {
             estimator: AimdEstimator::default(),
             last_counts: RecvStats::default(),
         });
+        let watch = feedback.as_ref().map(|state| PathWatch::new(Instant::now(), self.silence, !state.media_sender));
         let writer = tokio::spawn(run_writer(Arc::clone(&self.conn), Arc::clone(&shared)));
-        let reader = tokio::spawn(run_reader(self.conn, Arc::clone(&shared), deliver, feedback));
+        let reader = tokio::spawn(run_reader(self.conn, Arc::clone(&shared), deliver, feedback, watch));
         (
             Box::new(DirectSender { shared, _writer: AbortOnDrop(writer) }),
             Box::new(DirectReceiver { messages, _reader: AbortOnDrop(reader) }),
@@ -353,8 +420,9 @@ impl FeedbackState {
         }
     }
 
-    async fn on_datagram(&mut self, now: Instant, datagram: &[u8], tracker: &mut ReceiveTracker, conn: &(dyn Conn + Send + Sync), shared: &Shared) {
-        let Some(feedback) = Feedback::open(&mut self.opener, datagram) else { return };
+    /// Handles a feedback datagram; returns whether it was genuine.
+    async fn on_datagram(&mut self, now: Instant, datagram: &[u8], tracker: &mut ReceiveTracker, conn: &(dyn Conn + Send + Sync), shared: &Shared) -> bool {
+        let Some(feedback) = Feedback::open(&mut self.opener, datagram) else { return false };
         match feedback {
             Feedback::SenderReport { send_time_us, rtt_us } => {
                 if !tracker.is_ordered() {
@@ -414,6 +482,7 @@ impl FeedbackState {
                 }
             }
         }
+        true
     }
 
     async fn on_tick(&mut self, now: Instant, tracker: &mut ReceiveTracker, conn: &(dyn Conn + Send + Sync), shared: &Shared) {
@@ -448,12 +517,14 @@ fn loss_fraction(before: RecvStats, after: RecvStats) -> f64 {
 }
 
 /// Receives datagrams: media fragments go to reassembly, feedback to
-/// [`FeedbackState`]; complete messages go to the receiver handle.
+/// [`FeedbackState`]; complete messages go to the receiver handle. Ends,
+/// closing the receiver, when `watch` finds the path dead.
 async fn run_reader(
     conn: Arc<dyn Conn + Send + Sync>,
     shared: Arc<Shared>,
     deliver: mpsc::Sender<Vec<u8>>,
     mut feedback: Option<FeedbackState>,
+    mut watch: Option<PathWatch>,
 ) {
     let mut tracker = ReceiveTracker::new();
     let mut buf = vec![0u8; 65_535];
@@ -467,15 +538,23 @@ async fn run_reader(
                 let datagram = &buf[..len];
                 if feedback::is_feedback(datagram) {
                     if let Some(state) = feedback.as_mut() {
-                        state.on_datagram(now, datagram, &mut tracker, conn.as_ref(), &shared).await;
+                        if state.on_datagram(now, datagram, &mut tracker, conn.as_ref(), &shared).await {
+                            if let Some(watch) = watch.as_mut() { watch.heard(now, true); }
+                        }
                     }
                 } else {
                     tracker.push(now, datagram);
+                    if let Some(watch) = watch.as_mut() { watch.heard(now, false); }
                 }
             }
             _ = tick.tick(), if feedback.is_some() => {
+                let now = Instant::now();
+                if watch.as_ref().is_some_and(|watch| watch.dead(now)) {
+                    log::warn!("direct transport: nothing from the peer for too long; closing the path");
+                    return;
+                }
                 if let Some(state) = feedback.as_mut() {
-                    state.on_tick(Instant::now(), &mut tracker, conn.as_ref(), &shared).await;
+                    state.on_tick(now, &mut tracker, conn.as_ref(), &shared).await;
                 }
             }
         }
@@ -492,6 +571,7 @@ async fn run_reader(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::time::timeout;
     use webrtc_util::conn::conn_pipe::pipe;
 
     #[tokio::test]
@@ -562,16 +642,21 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), sender.ready_for_video()).await.unwrap();
     }
 
-    /// A UDP socket that silently drops a share of the datagrams it sends.
+    /// A UDP socket that silently drops a share of the datagrams it sends,
+    /// or all of them once cut.
     struct LossyConn {
         socket: tokio::net::UdpSocket,
         drop_per_mille: u64,
         rng: std::sync::atomic::AtomicU64,
+        cut: std::sync::atomic::AtomicBool,
     }
 
     impl LossyConn {
         fn drops(&self) -> bool {
             use std::sync::atomic::Ordering;
+            if self.cut.load(Ordering::Relaxed) {
+                return true;
+            }
             // xorshift64: deterministic per seed.
             let mut x = self.rng.load(Ordering::Relaxed);
             x ^= x << 13;
@@ -604,7 +689,7 @@ mod tests {
         let viewer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         host.connect(viewer.local_addr().unwrap()).await.unwrap();
         viewer.connect(host.local_addr().unwrap()).await.unwrap();
-        let wrap = |socket, seed| Arc::new(LossyConn { socket, drop_per_mille, rng: std::sync::atomic::AtomicU64::new(seed) });
+        let wrap = |socket, seed| Arc::new(LossyConn { socket, drop_per_mille, rng: std::sync::atomic::AtomicU64::new(seed), cut: Default::default() });
         (wrap(host, 0x9E37_79B9_7F4A_7C15), wrap(viewer, 0xD1B5_4A32_D192_ED03))
     }
 
@@ -729,6 +814,65 @@ mod tests {
         let viewer = viewer.expect("viewer has an RTT");
         assert!(viewer < Duration::from_millis(100), "{viewer:?}");
         assert!(host.is_some());
+    }
+
+    #[test]
+    fn path_watch_judges_only_peers_that_keep_talking() {
+        let limits = SilenceLimits { feedback: Duration::from_secs(8), media: Duration::from_secs(15) };
+        let start = Instant::now();
+        let later = |secs| start + Duration::from_secs(secs);
+
+        // Nothing heard yet: an old viewer only sends input, so no verdict.
+        let mut host = PathWatch::new(start, limits, false);
+        assert!(!host.dead(later(60)));
+        host.heard(later(1), false);
+        assert!(!host.dead(later(60)), "input silence is not a dead path");
+        // Feedback comes every 100 ms, so its silence is.
+        host.heard(later(2), true);
+        assert!(!host.dead(later(9)));
+        assert!(host.dead(later(10)));
+
+        // A viewer of a host without feedback waits out the media limit: those
+        // hosts send frames even on a static screen.
+        let mut viewer = PathWatch::new(start, limits, true);
+        assert!(!viewer.dead(later(60)), "nothing arrived yet");
+        viewer.heard(later(1), false);
+        assert!(!viewer.dead(later(15)));
+        assert!(viewer.dead(later(16)));
+    }
+
+    const SHORT: SilenceLimits = SilenceLimits { feedback: Duration::from_millis(300), media: Duration::from_millis(300) };
+
+    #[tokio::test]
+    async fn a_dead_direct_path_closes_both_receivers() {
+        let shared = [13u8; 32];
+        let (host_conn, viewer_conn) = lossy_pair(0).await;
+        let (_host_tx, mut host_rx) =
+            DirectTransport::with_feedback(Arc::clone(&host_conn) as _, FeedbackKeys::derive(&shared, true)).with_silence_limits(SHORT).into_split();
+        let (_viewer_tx, mut viewer_rx) =
+            DirectTransport::with_feedback(Arc::clone(&viewer_conn) as _, FeedbackKeys::derive(&shared, false)).with_silence_limits(SHORT).into_split();
+        // Reports flow while the path is up, with no media at all.
+        assert!(timeout(Duration::from_millis(700), host_rx.recv()).await.is_err(), "a quiet but healthy path stays open");
+
+        for conn in [&host_conn, &viewer_conn] {
+            conn.cut.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        let (host, viewer) = tokio::join!(
+            timeout(Duration::from_secs(2), host_rx.recv()),
+            timeout(Duration::from_secs(2), viewer_rx.recv()),
+        );
+        assert_eq!(host.expect("host still waits on a dead path"), None);
+        assert_eq!(viewer.expect("viewer still waits on a dead path"), None);
+    }
+
+    #[tokio::test]
+    async fn a_quiet_old_viewer_keeps_the_host_path_open() {
+        let shared = [14u8; 32];
+        let (host_conn, viewer_conn) = lossy_pair(0).await;
+        let (_host_tx, mut host_rx) =
+            DirectTransport::with_feedback(host_conn, FeedbackKeys::derive(&shared, true)).with_silence_limits(SHORT).into_split();
+        let (_viewer_tx, _viewer_rx) = DirectTransport::new(viewer_conn).into_split();
+        assert!(timeout(Duration::from_millis(900), host_rx.recv()).await.is_err());
     }
 
     #[tokio::test]
