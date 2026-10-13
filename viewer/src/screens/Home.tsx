@@ -178,6 +178,7 @@ export default function Home({ status, onConnect, onOpenPermissions, initialTarg
     if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
     return `${Math.floor(seconds / 86400)}d ago`;
   };
+  const startHosting = () => { void api.startHosting().catch((error: unknown) => setMessage(friendlyError(error))); };
   const copyId = async () => {
     if (!identity) return;
     try { await navigator.clipboard.writeText(identity.id); setMessage("ID copied.", "info"); } catch { setMessage("Could not copy ID."); }
@@ -188,7 +189,7 @@ export default function Home({ status, onConnect, onOpenPermissions, initialTarg
   };
 
   return <main className="app-shell">
-    <header className="topbar"><div className="brand"><span className="lock-glyph" aria-hidden="true">⌑</span> OpenDesk</div><div className="topbar-actions"><button className="quiet-button" type="button" onClick={onOpenPermissions}>Permissions</button><div className="status" data-status={status}><span className="status-dot" aria-hidden="true" /><span>{statusLabels[status]}</span></div></div></header>
+    <header className="topbar"><div className="brand"><span className="lock-glyph" aria-hidden="true">⌑</span> OpenDesk</div><div className="topbar-actions"><button className="quiet-button" type="button" onClick={onOpenPermissions}>Permissions</button><div className="status" data-status={status}><span className="status-dot" aria-hidden="true" /><span>{statusLabels[status]}</span></div>{status === "offline" && <button className="quiet-button" type="button" onClick={startHosting}>Start hosting</button>}</div></header>
     <section className="hero"><span className="eyebrow">PERSONAL DEVICE ACCESS</span><h1>Remote access, end to end.</h1><p>Share your ID to let someone help you, or enter another device's ID to control it.</p></section>
     <div className="cards">
       <section className="card identity-card"><span className="eyebrow">YOUR ID</span><div className="id-row"><strong className="mono identity-value">{identity?.id ?? "—"}</strong><button className="icon-button" type="button" onClick={() => void copyId()} aria-label="Copy device ID">⧉</button></div><div className="password-row"><label htmlFor="device-password">SESSION PASSWORD</label><div className="password-control"><input id="device-password" className="mono password-value" type={showPassword ? "text" : "password"} value={identity?.password ?? ""} readOnly aria-label="Session password" /><button className="quiet-button" type="button" onClick={() => setShowPassword((shown) => !shown)} aria-label={showPassword ? "Hide password" : "Show password"}>{showPassword ? "Hide" : "Show"}</button><button className="icon-button" type="button" onClick={() => void copyPassword()} aria-label="Copy password">⧉</button><button className="quiet-button" type="button" onClick={() => void rotate()}>Rotate</button></div></div><p className="caption">Share your ID and password to let someone control this device.</p></section>

@@ -29,6 +29,15 @@ describe("Home", () => {
     act(() => handler({ id: "987654321" }));
     expect(await screen.findByText("987654321")).toBeTruthy();
   });
+  it("offers to start hosting only while offline", async () => {
+    const { rerender } = render(<Home status="offline" onConnect={vi.fn()} />);
+    await screen.findByText("123456789");
+    const before = vi.mocked(api.startHosting).mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: "Start hosting" }));
+    expect(api.startHosting).toHaveBeenCalledTimes(before + 1);
+    rerender(<Home status="online" onConnect={vi.fn()} />);
+    expect(screen.queryByRole("button", { name: "Start hosting" })).toBeNull();
+  });
   it("reveals the session password on demand", async () => {
     render(<Home status="online" onConnect={vi.fn()} incomingRequest={null} onDismissRequest={vi.fn()} />);
     const field = await screen.findByLabelText("Session password") as HTMLInputElement;
