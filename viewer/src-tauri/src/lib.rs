@@ -553,6 +553,10 @@ fn disconnect(state: tauri::State<'_, AppState>, app: AppHandle) {
 pub fn run() {
     let background = startup::launched_in_background(std::env::args_os().skip(1));
     let app = tauri::Builder::default()
+        // Must be registered first. A second launch would register the same
+        // device ID and fight the running host, so it just brings the
+        // existing window forward and exits.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| startup::show_main_window(app)))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         // Checks the manifest in `plugins.updater` (tauri.conf.json); the
