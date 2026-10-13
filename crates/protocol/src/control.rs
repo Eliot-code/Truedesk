@@ -75,6 +75,10 @@ pub enum Control {
     /// Host → viewer: an add or remove request failed; `code` is one of
     /// [`VIRTUAL_DISPLAY_LIMIT`] and friends, or a newer code.
     VirtualDisplayRefused { code: String },
+    /// Viewer → host: deliver the secure attention sequence (Ctrl+Alt+Del) on
+    /// the host, so the viewer can reach the Windows security screen. Hosts
+    /// that can't honor it ignore it; beta.5 peers can't parse it.
+    RequestSecureAttention,
 }
 
 /// `VirtualDisplayRefused` codes.
@@ -283,6 +287,7 @@ mod tests {
             Control::RemoveVirtualDisplay { id: 3 },
             Control::VirtualDisplayAdded { id: 3 },
             Control::VirtualDisplayRefused { code: VIRTUAL_DISPLAY_FAILED.into() },
+            Control::RequestSecureAttention,
         ] {
             assert!(beta5::from_bytes(&newer.to_bytes()).is_none(), "{newer:?}");
         }
