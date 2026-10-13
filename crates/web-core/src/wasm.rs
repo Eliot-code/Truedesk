@@ -1,0 +1,113 @@
+//! JavaScript bindings. Calls return nothing; events queue up and the page
+//! drains them with `nextEvent`.
+
+use crate::{reconnect, Event, ViewerSession};
+use std::collections::VecDeque;
+use std::time::Duration;
+use wasm_bindgen::prelude::*;
+
+#[wasm_bindgen]
+pub struct Viewer {
+    session: ViewerSession,
+    events: VecDeque<Event>,
+}
+
+/// One queued event. `kind` is "send", "authenticated", "video", "monitors"
+/// or "ended"; `bytes` is set for send and video, `text` for monitors and ended.
+#[wasm_bindgen]
+pub struct ViewerEvent {
+    kind: &'static str,
+    bytes: Vec<u8>,
+    text: String,
+}
+
+#[wasm_bindgen]
+impl ViewerEvent {
+    #[wasm_bindgen(getter)]
+    pub fn kind(&self) -> String { self.kind.to_owned() }
+
+    /// Moves the bytes out; a second call returns an empty array.
+    #[wasm_bindgen(js_name = takeBytes)]
+    pub fn take_bytes(&mut self) -> Vec<u8> { std::mem::take(&mut self.bytes) }
+
+    #[wasm_bindgen(getter)]
+    pub fn text(&self) -> String { self.text.clone() }
+}
+
+impl From<Event> for ViewerEvent {
+    fn from(event: Event) -> Self {
+        let (kind, bytes, text) = match event {
+            Event::Send(bytes) => ("send", bytes, String::new()),
+            Event::Authenticated => ("authenticated", Vec::new(), String::new()),
+            Event::Video(bytes) => ("video", bytes, String::new()),
+            Event::Monitors(json) => ("monitors", Vec::new(), json),
+            Event::Ended(message) => ("ended", Vec::new(), message),
+        };
+        Self { kind, bytes, text }
+    }
+}
+
+#[wasm_bindgen]
+impl Viewer {
+    #[wasm_bindgen(constructor)]
+    pub fn new(password: &str, auth_code: &str) -> Viewer {
+        Viewer { session: ViewerSession::new(password, auth_code), events: VecDeque::new() }
+    }
+
+    pub fn receive(&mut self, message: &[u8], now_ms: f64) {
+        let events = self.session.receive(message, now_ms);
+        self.events.extend(events);
+    }
+
+    pub fn closed(&mut self) {
+        let events = self.session.closed();
+        self.events.extend(events);
+    }
+
+    pub fn tick(&mut self, now_ms: f64) {
+        let events = self.session.tick(now_ms);
+        self.events.extend(events);
+    }
+
+    #[wasm_bindgen(js_name = nextEvent)]
+    pub fn next_event(&mut self) -> Option<ViewerEvent> { self.events.pop_front().map(Into::into) }
+
+    pub fn input(&mut self, event: &[u8]) -> Option<Vec<u8>> { self.session.input(event) }
+
+    #[wasm_bindgen(js_name = requestKeyframe)]
+    pub fn request_keyframe(&mut self) -> Option<Vec<u8>> { self.session.request_keyframe() }
+
+    #[wasm_bindgen(js_name = selectMonitor)]
+    pub fn select_monitor(&mut self, id: u32) -> Option<Vec<u8>> { self.session.select_monitor(id) }
+
+    pub fn bye(&mut self) -> Option<Vec<u8>> { self.session.bye() }
+}
+
+#[wasm_bindgen(js_name = connectFrame)]
+pub fn connect_frame(target: &str, viewer_id: &str) -> Result<Vec<u8>, JsError> {
+    crate::connect_frame(target, viewer_id).map_err(|error| JsError::new(&error))
+}
+
+/// What to do after a failed attempt. `retry` false means stop and show `message`.
+#[wasm_bindgen]
+pub struct Step {
+    pub retry: bool,
+    #[wasm_bindgen(js_name = delayMs)]
+    pub delay_ms: f64,
+    message: String,
+}
+
+#[wasm_bindgen]
+impl Step {
+    #[wasm_bindgen(getter)]
+    pub fn message(&self) -> String { self.message.clone() }
+}
+
+#[wasm_bindgen(js_name = afterFailure)]
+pub fn after_failure(message: &str, session_started: bool, attempt: u32, outage_ms: f64) -> Step {
+    let outage = Duration::from_millis(outage_ms.max(0.0) as u64);
+    match reconnect::after_failure(message, session_started, attempt, outage) {
+        reconnect::NextStep::Retry { delay, notice } => Step { retry: true, delay_ms: delay.as_millis() as f64, message: notice },
+        reconnect::NextStep::Stop { message } => Step { retry: false, delay_ms: 0.0, message },
+    }
+}

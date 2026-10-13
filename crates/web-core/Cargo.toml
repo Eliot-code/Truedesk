@@ -1,0 +1,28 @@
+[package]
+name = "web-core"
+version = "0.1.0"
+publish = false
+license = "AGPL-3.0-only"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+protocol = { path = "../protocol" }
+serde_json = { workspace = true }
+
+# The browser build. wasm-bindgen is pinned exactly: the CLI that generates
+# the JS glue must be the same version. getrandom is only named to turn on
+# its browser backend (crypto.getRandomValues) for both versions in the tree.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.129"
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom = { version = "0.4", features = ["wasm_js"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+host-core = { path = "../host-core" }
+relay = { path = "../relay" }
+tokio = { workspace = true }
+tokio-tungstenite = "0.30"
+futures-util = "0.3"
