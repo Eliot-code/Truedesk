@@ -69,7 +69,7 @@ For local development, run `cargo run -p relay`, use
 ## Browser viewer
 
 If you can't install anything on the computer you're sitting at, open
-<https://treeot.github.io/opendesk/>, enter the other computer's ID and
+<https://opendesk.treeot.dev>, enter the other computer's ID and
 password (and its 2FA code, if it asks for one), and connect. The other
 computer still needs the desktop app to host.
 
