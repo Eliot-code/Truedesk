@@ -388,6 +388,13 @@ pub(crate) async fn remove_virtual_display(state: tauri::State<'_, AppState>, id
     send_control(&state, Control::RemoveVirtualDisplay { id }).await
 }
 
+/// Ask the host to deliver Ctrl+Alt+Del on its side, so the viewer can reach
+/// the Windows security screen. Hosts that can't honor it ignore it.
+#[tauri::command]
+pub(crate) async fn send_secure_attention(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    send_control(&state, Control::RequestSecureAttention).await
+}
+
 async fn send_control(state: &tauri::State<'_, AppState>, control: Control) -> Result<(), String> {
     let (sender, sealer) = { let state = state.lock(); (state.control_sender.clone(), state.control_sealer.clone()) };
     let sender = sender.ok_or_else(|| "no active viewer session".to_owned())?;

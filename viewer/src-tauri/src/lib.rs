@@ -687,6 +687,7 @@ pub fn run() {
             set_allow_virtual_displays,
             add_virtual_display,
             remove_virtual_display,
+            send_secure_attention,
             vdriver::virtual_display_driver_status,
             vdriver::install_virtual_display_driver,
             vdriver::uninstall_virtual_display_driver,
