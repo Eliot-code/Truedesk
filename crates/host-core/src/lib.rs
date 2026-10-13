@@ -8,5 +8,6 @@ pub mod inject;
 pub mod relay_client;
 pub mod reconnect;
 pub mod roles;
+pub mod secure_attention;
 pub mod transport;
 pub mod vdisplay;

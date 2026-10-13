@@ -745,6 +745,11 @@ where
                         let _ = sender.send_frame(Tag::Control, &seal_control(&control_sealer, &reply)).await;
                     }
                     Some(Control::RequestKeyframe) => video.send(VideoCommand::RequestKeyframe),
+                    Some(Control::RequestSecureAttention) => {
+                        if let Err(error) = crate::secure_attention::deliver() {
+                            log::debug!("ignoring secure attention request: {error}");
+                        }
+                    }
                     Some(Control::Ping { sent_us }) => {
                         let _ = sender.send_frame(Tag::Control, &seal_control(&control_sealer, &Control::Pong { sent_us })).await;
                     }
