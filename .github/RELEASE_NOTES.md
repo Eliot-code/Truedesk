@@ -2,18 +2,19 @@ Beta build for testing. Expect rough edges, and please report what breaks.
 
 ## What's new
 
-- The app now updates itself. Install this version by hand once; after that,
-  new versions show an "Update available" banner on the home screen.
-- Clicks land in the right place on Retina Macs and on secondary monitors.
-- Video holds up better on Wi-Fi and slow links: lost packets are resent and
-  the bitrate drops when the connection struggles.
-- Smoother video: 60 fps, sharper picture, no flicker.
-- Clearer messages when the other device is busy, offline, or can't share
-  its screen. Reconnecting after a network drop works again.
+- **Text chat** during a session, with a chat button in the toolbar.
+- **View only:** a toggle that lets you watch without sending any input.
+- **Virtual displays:** add a screen to a computer that has none, or a second
+  screen sized to your window, on macOS and Windows.
+- **Connection badge:** the toolbar shows Direct or Relayed and the latency.
+- Steadier sessions: clearer messages when a computer is busy, offline or has
+  no screen, and better recovery after a network drop or a display change.
+- Your ID stays yours: a cloned or taken ID is detected, with a warning and a
+  one-click way to get a new one.
 
-Update both computers: most of the speed-up is on the computer being viewed.
-On macOS, you may need to grant Screen Recording and Accessibility again
-after installing or updating.
+If you installed beta.5, this one arrives as an "Update available" banner on
+the home screen. On macOS you may need to grant Screen Recording and
+Accessibility again after updating.
 
 ## Install
 
