@@ -169,7 +169,10 @@ async fn run_wrong_password_session() {
         !matches!(result, Ok(Some(_))),
         "wrong password must not produce media"
     );
-    viewer.abort();
+    // The host's confirmation must reach the viewer before the host hangs
+    // up, or the viewer reads a dropped connection and keeps retrying.
+    let error = timeout(Duration::from_secs(5), viewer).await.unwrap().unwrap().unwrap_err();
+    assert!(error.to_string().contains("key confirmation failed"), "got: {error}");
     host.abort();
 }
 

@@ -250,6 +250,15 @@ async fn send_rejection(sender: &transport::reliable::ReliableSender, sealer: &S
     }
 }
 
+/// Writes out everything already queued, then waits briefly so the relay
+/// can forward it before the socket closes. Bounded (~200 ms) like
+/// [`send_rejection`].
+async fn drain_before_close(sender: &transport::reliable::ReliableSender) {
+    if matches!(tokio::time::timeout(Duration::from_millis(150), sender.flush()).await, Ok(Ok(()))) {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 fn split_session_control(mut rx: mpsc::Receiver<Vec<u8>>, session: String) -> (mpsc::Receiver<Vec<u8>>, mpsc::Receiver<Vec<u8>>) {
     let (ice_tx, ice_rx) = mpsc::channel(64);
     let (session_tx, session_rx) = mpsc::channel(64);
@@ -420,7 +429,13 @@ where
     loop {
         match tokio::time::timeout_at(kex_deadline, recv_control(&mut control_rx)).await.ok().flatten() {
             Some(body) => if let Some((KEX_CONFIRM, tag)) = parse_kex(&body) {
-                if !protocol::pake::verify_peer(&shared, false, tag) { return Err(Box::new(SessionError("key confirmation failed"))); }
+                if !protocol::pake::verify_peer(&shared, false, tag) {
+                    // Let our confirmation out first: without it the viewer
+                    // reads a dropped connection and retries instead of
+                    // reporting the wrong password.
+                    drain_before_close(&sender).await;
+                    return Err(Box::new(SessionError("key confirmation failed")));
+                }
                 break;
             },
             None => return Err(Box::new(SessionError("connection closed during KEX confirmation"))),
@@ -1112,7 +1127,10 @@ where
     loop {
         match tokio::time::timeout_at(kex_deadline, recv_control(&mut control_rx)).await.ok().flatten() {
             Some(body) => if let Some((KEX_CONFIRM, tag)) = parse_kex(&body) {
-                if !protocol::pake::verify_peer(&shared, true, tag) { return Err("key confirmation failed".to_owned()); }
+                if !protocol::pake::verify_peer(&shared, true, tag) {
+                    drain_before_close(&sender).await;
+                    return Err("key confirmation failed".to_owned());
+                }
                 break;
             },
             None => return Err("connection closed during KEX confirmation".to_owned()),
@@ -1940,6 +1958,35 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
         slot.put(vec![9]);
         assert_eq!(timeout(Duration::from_secs(1), consumer).await.unwrap().unwrap(), vec![9]);
+    }
+
+    #[tokio::test]
+    async fn host_confirmation_reaches_a_viewer_with_the_wrong_password() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::{protocol::Role, Message};
+        let (viewer_ws, host_ws) = tokio::io::duplex(64 * 1024);
+        let mut viewer_ws = WebSocketStream::from_raw_socket(viewer_ws, Role::Client, None).await;
+        let host_ws = WebSocketStream::from_raw_socket(host_ws, Role::Server, None).await;
+        // The wrong-password viewer's message and confirmation arrive at
+        // once, so the host fails verification right after queueing its own.
+        let (_, msg) = protocol::pake::start(b"wrong", false);
+        for body in [kex_body(KEX_MSG, &msg), kex_body(KEX_CONFIRM, &[0u8; 32])] {
+            viewer_ws.send(Message::Binary(protocol::frame::wrap(Tag::Kex, &body).into())).await.unwrap();
+        }
+        let host = run_host_session(
+            host_ws, "right", "s", crate::capture::FakeCapturer::new(32, 32),
+            |width, height| crate::encode::H264Encoder::new(width, height, 15, 1_000_000),
+            crate::inject::NoopInjector::default(),
+        ).await;
+        assert!(host.is_err());
+        let mut confirmed = false;
+        while let Ok(Some(Ok(message))) = timeout(Duration::from_secs(1), viewer_ws.next()).await {
+            let data = message.into_data();
+            if let Some((Tag::Kex, body)) = protocol::frame::unwrap(&data) {
+                confirmed |= matches!(parse_kex(body), Some((KEX_CONFIRM, _)));
+            }
+        }
+        assert!(confirmed, "the viewer must get the host's confirmation, not a bare close");
     }
 
     #[tokio::test]

@@ -9,7 +9,7 @@ use super::TransportError;
 use futures_util::{SinkExt, StreamExt};
 use protocol::{frame, Tag};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use std::collections::VecDeque;
 use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
@@ -72,6 +72,9 @@ pub struct ReliableSender {
 struct Outgoing {
     bytes: Vec<u8>,
     _video_permit: Option<OwnedSemaphorePermit>,
+    /// Set by [`ReliableSender::flush`]: signalled once everything queued
+    /// before it has been written.
+    written: Option<oneshot::Sender<()>>,
 }
 
 /// The right to queue one video frame (see [`MAX_VIDEO_IN_FLIGHT`]).
@@ -83,7 +86,7 @@ impl ReliableSender {
             let permit = self.video_permit().await?;
             return self.send_video(permit, body).await;
         }
-        self.queue(Outgoing { bytes: frame::wrap(tag, body), _video_permit: None }).await
+        self.queue(Outgoing { bytes: frame::wrap(tag, body), _video_permit: None, written: None }).await
     }
 
     /// Waits until fewer than [`MAX_VIDEO_IN_FLIGHT`] video frames are
@@ -98,7 +101,17 @@ impl ReliableSender {
 
     /// Queues a video frame using a permit from [`Self::video_permit`].
     pub async fn send_video(&self, permit: VideoPermit, body: &[u8]) -> Result<(), TransportError> {
-        self.queue(Outgoing { bytes: frame::wrap(Tag::Video, body), _video_permit: Some(permit.0) }).await
+        self.queue(Outgoing { bytes: frame::wrap(Tag::Video, body), _video_permit: Some(permit.0), written: None }).await
+    }
+
+    /// Waits until every frame queued before this call has been written to
+    /// the socket. Call it before dropping the channel when the last frames
+    /// matter (a rejection, a key confirmation), since dropping aborts the
+    /// writer and discards whatever is still queued.
+    pub async fn flush(&self) -> Result<(), TransportError> {
+        let (written, done) = oneshot::channel();
+        self.queue(Outgoing { bytes: Vec::new(), _video_permit: None, written: Some(written) }).await?;
+        done.await.map_err(|_| TransportError::Closed)
     }
 
     async fn queue(&self, outgoing: Outgoing) -> Result<(), TransportError> {
@@ -126,7 +139,11 @@ where
         let writer_task = tokio::spawn(async move {
             let mut sink = sink;
             // Each frame's video permit (if any) drops after it is written.
-            while let Some(Outgoing { bytes, _video_permit }) = writer_rx.recv().await {
+            while let Some(Outgoing { bytes, _video_permit, written }) = writer_rx.recv().await {
+                if let Some(written) = written {
+                    let _ = written.send(());
+                    continue;
+                }
                 if sink.send(Message::Binary(bytes.into())).await.is_err() {
                     break;
                 }
@@ -290,6 +307,24 @@ mod tests {
     use super::*;
     use tokio::time::{timeout, Duration};
     use tokio_tungstenite::{tungstenite::protocol::Role, WebSocketStream};
+
+    #[tokio::test]
+    async fn flush_delivers_queued_frames_before_the_channel_is_dropped() {
+        let (left, right) = tokio::io::duplex(64 * 1024);
+        let left = WebSocketStream::from_raw_socket(left, Role::Client, None).await;
+        let right = WebSocketStream::from_raw_socket(right, Role::Server, None).await;
+        let a = ReliableChannel::spawn(left);
+        let mut b = ReliableChannel::spawn(right);
+        let mut control = b.take_control_rx().unwrap();
+        let sender = a.sender();
+        for i in 0..32u8 { sender.send_frame(Tag::Kex, &[i; 512]).await.unwrap(); }
+        sender.flush().await.unwrap();
+        drop(a);
+        for i in 0..32u8 {
+            let body = timeout(Duration::from_secs(1), control.recv()).await.unwrap().unwrap();
+            assert_eq!(body, vec![i; 512]);
+        }
+    }
 
     #[tokio::test]
     async fn interleaved_data_and_media_are_demultiplexed_without_send_stall() {
