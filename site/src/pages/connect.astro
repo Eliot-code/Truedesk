@@ -1,0 +1,26 @@
+---
+import Viewer from "../viewer/Viewer";
+
+// The viewer loads its WebAssembly core from this origin and talks to a
+// wss:// relay. Nothing else.
+Astro.csp.insertScriptResource("'wasm-unsafe-eval'");
+Astro.csp.insertDirective("connect-src 'self' wss:");
+---
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="color-scheme" content="dark" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <title>OpenDesk browser viewer</title>
+    <meta name="description" content="View and control a computer running OpenDesk from your browser." />
+  </head>
+  <body>
+    <div id="root">
+      <Viewer client:only="react" />
+    </div>
+    <noscript>The browser viewer needs JavaScript.</noscript>
+  </body>
+</html>

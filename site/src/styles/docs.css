@@ -1,0 +1,31 @@
+/* Starlight theme: the app's cyan accent and dark greys. */
+:root {
+  --sl-color-accent-low: #083344;
+  --sl-color-accent: #22d3ee;
+  --sl-color-accent-high: #a5f3fc;
+  --sl-color-white: #f3f7fa;
+  --sl-color-gray-1: #e2e8ee;
+  --sl-color-gray-2: #c3cad5;
+  --sl-color-gray-3: #9aa5b4;
+  --sl-color-gray-4: #5f6b7a;
+  --sl-color-gray-5: #2a3240;
+  --sl-color-gray-6: #141922;
+  --sl-color-black: #0b0e12;
+}
+
+:root[data-theme="light"] {
+  --sl-color-accent-low: #cffafe;
+  --sl-color-accent: #0e7490;
+  --sl-color-accent-high: #164e63;
+  --sl-color-white: #0b0e12;
+  --sl-color-gray-1: #1f2630;
+  --sl-color-gray-2: #353f4c;
+  --sl-color-gray-3: #4a5563;
+  --sl-color-gray-4: #7b8796;
+  --sl-color-gray-5: #c3cad5;
+  --sl-color-gray-6: #eef2f5;
+  --sl-color-gray-7: #f6f8fa;
+  --sl-color-black: #ffffff;
+}
+
+.site-title img { width: auto; height: 1.5rem; }

@@ -1,0 +1,228 @@
+---
+import Site from "../layouts/Site.astro";
+import { latestRelease, RELEASES_URL } from "../lib/release";
+
+const release = await latestRelease();
+const platforms = [
+  { key: "mac", name: "macOS", note: "Apple silicon, macOS 12.3 or later. No Intel build yet." },
+  { key: "windows", name: "Windows", note: "Windows 10 (1803) or later, 64-bit." },
+  { key: "linux", name: "Linux", note: "x86_64. Screen sharing goes through PipeWire and the desktop portal." },
+] as const;
+---
+<Site
+  title="OpenDesk: self-hosted, end-to-end encrypted remote desktop"
+  description="Open-source remote desktop for Windows, macOS, Linux and the browser. You run the relay; the screen and input are encrypted end to end so the relay can't read them."
+>
+  <section class="hero">
+    <div class="wrap hero__grid">
+      <div class="hero__copy">
+        <p class="eyebrow">Open source · Self-hosted · Beta</p>
+        <h1>Remote desktop through a relay that can't see your screen.</h1>
+        <p class="lede">
+          OpenDesk lets you view and control another computer over the internet.
+          You run the relay. The two computers encrypt the screen, input, sound
+          and files between themselves, so the relay only passes along bytes it
+          can't read.
+        </p>
+        <div class="actions">
+          <a class="button button--primary" href="#download">Download</a>
+          <a class="button button--secondary" href="/connect/">Open the browser viewer</a>
+        </div>
+        <p class="hint">
+          For Windows, macOS and Linux. The browser viewer controls a computer
+          that runs the app, without installing anything.
+        </p>
+      </div>
+
+      <figure class="mock" aria-labelledby="mock-caption">
+        <div class="mock__window" aria-hidden="true">
+          <div class="mock__bar"><span></span><span></span><span></span></div>
+          <div class="mock__body">
+            <div class="mock__card">
+              <span class="mock__label">Your ID</span>
+              <span class="mock__id">482 913 075</span>
+              <span class="mock__label">Session password</span>
+              <span class="mock__field">••••••••••</span>
+            </div>
+            <div class="mock__card">
+              <span class="mock__label">Control a remote device</span>
+              <span class="mock__field mock__field--id">731 204 586</span>
+              <span class="mock__field">••••••••••</span>
+              <span class="mock__button">Connect</span>
+            </div>
+          </div>
+          <div class="mock__toolbar">
+            <span class="mock__dot"></span>
+            <span class="mock__mono">731 204 586</span>
+            <span class="mock__badge">Direct · 18 ms</span>
+            <span class="mock__tools">Fullscreen Clipboard Sound Files Record</span>
+            <span class="mock__disconnect">Disconnect</span>
+          </div>
+        </div>
+        <figcaption id="mock-caption">
+          The home screen shows this computer's ID and a one-time password.
+          During a session, the toolbar shows whether the connection is direct or relayed.
+        </figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section class="band" aria-labelledby="how-title">
+    <div class="wrap">
+      <h2 id="how-title">How a session works</h2>
+      <figure class="diagram">
+        <svg viewBox="0 0 720 250" role="img" aria-labelledby="diagram-title diagram-desc">
+          <title id="diagram-title">Host, relay and viewer</title>
+          <desc id="diagram-desc">
+            The host and the viewer each open an outbound wss connection on port 443 to the relay.
+            They try a direct UDP path between themselves. If that fails, the same encrypted
+            traffic goes through the relay, which cannot decrypt it.
+          </desc>
+          <defs>
+            <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0 0 10 5 0 10z" class="diagram__arrowhead" />
+            </marker>
+          </defs>
+          <rect x="10" y="150" width="190" height="80" rx="10" class="diagram__box" />
+          <text x="105" y="185" class="diagram__title">Host</text>
+          <text x="105" y="208" class="diagram__note">shares its screen</text>
+
+          <rect x="520" y="150" width="190" height="80" rx="10" class="diagram__box" />
+          <text x="615" y="185" class="diagram__title">Viewer</text>
+          <text x="615" y="208" class="diagram__note">app or browser</text>
+
+          <rect x="265" y="10" width="190" height="80" rx="10" class="diagram__box diagram__box--relay" />
+          <text x="360" y="45" class="diagram__title">Your relay</text>
+          <text x="360" y="68" class="diagram__note">forwards sealed bytes</text>
+
+          <path d="M150 150 Q170 90 262 62" class="diagram__line" marker-end="url(#arrow)" />
+          <path d="M570 150 Q550 90 458 62" class="diagram__line" marker-end="url(#arrow)" />
+          <text x="70" y="110" class="diagram__label">outbound wss://</text>
+          <text x="650" y="110" class="diagram__label">outbound wss://</text>
+
+          <path d="M204 190 H516" class="diagram__line diagram__line--direct" marker-start="url(#arrow)" marker-end="url(#arrow)" />
+          <text x="360" y="180" class="diagram__label diagram__label--accent">direct UDP when the network allows</text>
+          <text x="360" y="212" class="diagram__label">ChaCha20-Poly1305 either way</text>
+        </svg>
+      </figure>
+      <ol class="steps">
+        <li>
+          <h3>Share an ID and password</h3>
+          <p>The computer you want to reach shows a 9-digit ID and a password that changes after every session.</p>
+        </li>
+        <li>
+          <h3>Agree on a key</h3>
+          <p>The other side enters both. SPAKE2 turns the password into a key that only the two computers know. The password never crosses the network.</p>
+        </li>
+        <li>
+          <h3>Connect the shortest way</h3>
+          <p>They try a direct UDP path first. If a firewall blocks it, the same encrypted traffic goes through the relay instead.</p>
+        </li>
+      </ol>
+    </div>
+  </section>
+
+  <section aria-labelledby="features-title">
+    <div class="wrap">
+      <h2 id="features-title">What you get</h2>
+      <ul class="features">
+        <li>
+          <h3>Your own relay</h3>
+          <p>One small Rust service. The Docker Compose setup puts Caddy in front, which gets the HTTPS certificate for you.</p>
+        </li>
+        <li>
+          <h3>End-to-end encryption</h3>
+          <p>A key per session from SPAKE2, ChaCha20-Poly1305 on every frame and keystroke. TLS protects the connection to the relay on top of that.</p>
+        </li>
+        <li>
+          <h3>No open ports</h3>
+          <p>Both computers connect out to the relay on port 443. No port forwarding, no inbound firewall rules.</p>
+        </li>
+        <li>
+          <h3>Direct when it can be</h3>
+          <p>ICE finds a direct UDP path between the computers. The session toolbar says Direct or Relayed and shows the round trip.</p>
+        </li>
+        <li>
+          <h3>The usual tools</h3>
+          <p>System sound, text clipboard sync, file transfer with a consent prompt, session recording, and a picker for each monitor.</p>
+        </li>
+        <li>
+          <h3>Unattended access</h3>
+          <p>A fixed password for your own machines, an optional code from an authenticator app, and start at sign-in so a restart doesn't lock you out.</p>
+        </li>
+        <li>
+          <h3>Open source</h3>
+          <p>AGPL-3.0. Rust for the relay, crypto and capture; Tauri and React for the app. Read it, build it, run your own.</p>
+        </li>
+        <li>
+          <h3>Any desktop, plus a browser</h3>
+          <p>One app hosts and views on Windows, macOS and Linux. A browser can view and control without installing anything.</p>
+        </li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="band" id="download" aria-labelledby="download-title">
+    <div class="wrap">
+      <h2 id="download-title">Download</h2>
+      <p class="section-lede">
+        {release
+          ? <>Newest build: <a href={release.url}>{release.tag}</a>{release.prerelease ? " (beta)" : ""}. </>
+          : <>Get the newest build from the <a href={RELEASES_URL}>releases page</a>. </>}
+        Install it on both computers. The app connects to the project's test relay out of the box;
+        you can <a href="/docs/self-hosting/">point it at your own</a>.
+      </p>
+      <div class="downloads">
+        {platforms.map((platform) => {
+          const files = release?.[platform.key] ?? [];
+          return (
+            <section class="download" aria-labelledby={`dl-${platform.key}`}>
+              <h3 id={`dl-${platform.key}`}>{platform.name}</h3>
+              <p>{platform.note}</p>
+              <ul class="download__files">
+                {files.length > 0
+                  ? files.map((file, index) => (
+                      <li>
+                        <a class={index === 0 ? "button button--primary" : "button button--quiet"} href={file.url}>{file.label}</a>
+                        <span class="download__detail">{file.detail}</span>
+                      </li>
+                    ))
+                  : <li><a class="button button--primary" href={RELEASES_URL}>Get it on GitHub</a></li>}
+              </ul>
+            </section>
+          );
+        })}
+      </div>
+      <div class="notice">
+        <p>
+          <strong>These builds are not code-signed.</strong> The first time you open the app,
+          macOS Gatekeeper and Windows SmartScreen will warn you. <a href="/docs/getting-started/">Getting started</a>
+          shows how to get past each warning. All builds and their changelogs are on the
+          <a href={RELEASES_URL}>releases page</a>.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section aria-labelledby="limits-title">
+    <div class="wrap two-col">
+      <div>
+        <h2 id="limits-title">Before you rely on it</h2>
+        <ul class="plain-list">
+          <li>OpenDesk is in beta. Most testing has happened on macOS; Windows and Linux hosting is less mature.</li>
+          <li>The browser viewer always goes through the relay and has no sound, file transfer, clipboard sync or recording.</li>
+          <li>Linux hosts on Wayland have limited input support.</li>
+          <li>The relay can't read your session, but it does see who connects to whom, when, and how much data flows. <a href="/docs/security/">Security model</a></li>
+        </ul>
+      </div>
+      <div>
+        <h2>Run a relay in a few minutes</h2>
+        <p>On any server with Docker and a DNS name:</p>
+        <pre class="code"><code>git clone https://github.com/treeot/opendesk.git
+cd opendesk
+DOMAIN=relay.example.com docker compose up -d</code></pre>
+        <p>Then set each app's relay to <code>wss://relay.example.com/ws</code>. <a href="/docs/self-hosting/">Self-hosting guide</a></p>
+      </div>
+    </div>
+  </section>
+</Site>
