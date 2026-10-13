@@ -94,6 +94,16 @@ describe("App", () => {
     expect((screen.getByPlaceholderText("000 000 000") as HTMLInputElement).value).toBe("987654321");
   });
 
+  it("closes an incoming request that ended before it was answered", async () => {
+    render(<App />);
+    await screen.findByPlaceholderText("000 000 000");
+    emit("incoming_request", { peer_id: "111222333", fingerprint: "pending", known: false });
+    expect(await screen.findByRole("dialog", { name: "Allow remote control?" })).toBeTruthy();
+    emit("error", { message: "nobody answered the connection request" });
+    emit("session_ended", { reason: "host session ended" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
   it("cancels a pending connection", async () => {
     await startConnecting();
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));

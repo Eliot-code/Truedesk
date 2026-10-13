@@ -68,6 +68,8 @@ pub mod reject_code {
     /// The host accepted the viewer but cannot capture its screen (missing
     /// OS permission). Retrying will not help until someone fixes the host.
     pub const CAPTURE_UNAVAILABLE: &str = "capture_unavailable";
+    /// Nobody answered the connection request on the host in time.
+    pub const NO_ANSWER: &str = "no_answer";
 }
 
 const REJECTION_PREFIX: &str = "session rejected by host: ";
@@ -131,6 +133,7 @@ pub fn auth_failure_message(error: &str, after_session: bool) -> String {
         Some(reject_code::TWOFA_INVALID) => {
             "The 2FA code was rejected (wrong, expired, or already used). Enter the current code and connect again.".to_owned()
         }
+        Some(reject_code::NO_ANSWER) => "Nobody answered the connection request on the other device. Try again when someone is there.".to_owned(),
         Some(reject_code::CAPTURE_UNAVAILABLE) => {
             "The other device can't share its screen. On that device, allow Screen Recording for OpenDesk, restart it, and connect again.".to_owned()
         }
@@ -299,6 +302,7 @@ mod tests {
         assert!(auth_failure_message(&rejection_error(reject_code::TWOFA_REQUIRED), false).contains("requires a two-factor code"));
         assert!(auth_failure_message(&rejection_error(reject_code::TWOFA_INVALID), true).contains("Reconnect needs a fresh 2FA code"));
         assert!(auth_failure_message(&rejection_error(reject_code::TWOFA_INVALID), false).contains("already used"));
+        assert!(auth_failure_message(&rejection_error(reject_code::NO_ANSWER), false).contains("Nobody answered"));
         assert!(auth_failure_message("key confirmation failed", false).contains("check the password"));
     }
 

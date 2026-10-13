@@ -358,6 +358,8 @@ pub(crate) async fn run_paired_host_session(
         emit(&approve_app, "incoming_request", IncomingRequest {
             peer_id: peer_id.clone(), fingerprint: "pending".into(), known,
         });
+        // host-core drops this wait when the viewer leaves or nobody answers
+        // in time; the session_ended that follows closes the prompt.
         let allowed = decision_rx.await.unwrap_or(false);
         if allowed {
             emit_host_status(&approve_app, "in_session");

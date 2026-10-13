@@ -175,15 +175,22 @@ pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 /// considered gone and the session ends. Three missed keepalives.
 pub const DEAD_PEER_TIMEOUT: Duration = Duration::from_secs(45);
 
+/// How long a connection request waits for the host user. The viewer sits
+/// on its "Connecting" screen meanwhile, and the host takes no other viewer
+/// until the request is answered: a minute is enough to notice the prompt
+/// and walk over, without locking the host out for long when nobody is there.
+pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Liveness timings of a session; tests shorten them.
 #[derive(Debug, Clone, Copy)]
 struct SessionTimings {
     keepalive: Duration,
     dead_peer: Duration,
+    approval: Duration,
 }
 
 impl Default for SessionTimings {
-    fn default() -> Self { Self { keepalive: KEEPALIVE_INTERVAL, dead_peer: DEAD_PEER_TIMEOUT } }
+    fn default() -> Self { Self { keepalive: KEEPALIVE_INTERVAL, dead_peer: DEAD_PEER_TIMEOUT, approval: APPROVAL_TIMEOUT } }
 }
 
 fn seal_control(sealer: &SharedSealer, control: &Control) -> Vec<u8> {
@@ -259,11 +266,14 @@ async fn drain_before_close(sender: &transport::reliable::ReliableSender) {
     }
 }
 
-fn split_session_control(mut rx: mpsc::Receiver<Vec<u8>>, session: String) -> (mpsc::Receiver<Vec<u8>>, mpsc::Receiver<Vec<u8>>) {
+/// Splits ICE signaling from the other control frames, starting with
+/// `early` (frames that arrived before the session started).
+fn split_session_control(mut rx: mpsc::Receiver<Vec<u8>>, early: Vec<Vec<u8>>, session: String) -> (mpsc::Receiver<Vec<u8>>, mpsc::Receiver<Vec<u8>>) {
     let (ice_tx, ice_rx) = mpsc::channel(64);
     let (session_tx, session_rx) = mpsc::channel(64);
     tokio::spawn(async move {
-        while let Some(body) = rx.recv().await {
+        let mut early = early.into_iter();
+        while let Some(body) = match early.next() { Some(body) => Some(body), None => rx.recv().await } {
             let is_ice = matches!(Control::from_bytes(&body), Some(Control::Ice { session: body_session, .. }) if body_session == session);
             // Late ICE candidates after signaling is dropped are discarded;
             // only a closed session receiver ends the demux (which the host
@@ -272,6 +282,46 @@ fn split_session_control(mut rx: mpsc::Receiver<Vec<u8>>, session: String) -> (m
         }
     });
     (ice_rx, session_rx)
+}
+
+/// How a connection request was answered.
+#[derive(Debug, PartialEq, Eq)]
+enum Approval {
+    Allowed,
+    Denied,
+    /// Nobody answered within [`SessionTimings::approval`].
+    Expired,
+    /// The viewer left (its socket closed or went silent) first.
+    PeerGone,
+}
+
+/// Most control frames kept while a request waits; an authenticated viewer
+/// sends a few dozen (ICE candidates, keepalives).
+const MAX_EARLY_CONTROL: usize = 256;
+
+/// Waits for the host user's answer while watching the viewer's socket, so
+/// a viewer that leaves or a prompt nobody answers never blocks the host.
+async fn await_approval(
+    decision: impl Future<Output = bool>,
+    control_rx: &mut mpsc::Receiver<Vec<u8>>,
+    early: &mut Vec<Vec<u8>>,
+    timings: SessionTimings,
+) -> Approval {
+    tokio::pin!(decision);
+    let expires = tokio::time::Instant::now() + timings.approval;
+    let mut peer_deadline = tokio::time::Instant::now() + timings.dead_peer;
+    loop {
+        tokio::select! {
+            allowed = &mut decision => return if allowed { Approval::Allowed } else { Approval::Denied },
+            body = control_rx.recv() => {
+                let Some(body) = body else { return Approval::PeerGone };
+                peer_deadline = tokio::time::Instant::now() + timings.dead_peer;
+                if early.len() < MAX_EARLY_CONTROL { early.push(body); }
+            }
+            _ = tokio::time::sleep_until(expires) => return Approval::Expired,
+            _ = tokio::time::sleep_until(peer_deadline) => return Approval::PeerGone,
+        }
+    }
 }
 
 fn even_frame(frame: encode::RawFrame) -> Option<encode::RawFrame> {
@@ -459,12 +509,26 @@ where
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |duration| duration.as_secs());
         code.as_deref().zip(totp_secret).is_some_and(|(code, secret)| totp_is_valid_once(secret, code, now))
     } else { true };
+    // Control frames that arrive while the host user decides (ICE
+    // candidates, keepalives) are kept for the session.
+    let mut early_control = Vec::new();
     let rejection = if unattended_enabled && twofa_enabled && !code_valid {
         Some(if code_received { reject_code::TWOFA_INVALID } else { reject_code::TWOFA_REQUIRED })
-    } else if !should_auto_accept_with_2fa(unattended_enabled, true, twofa_enabled, code_valid) && !approve().await {
-        Some(reject_code::DENIED)
-    } else {
+    } else if should_auto_accept_with_2fa(unattended_enabled, true, twofa_enabled, code_valid) {
         None
+    } else {
+        match await_approval(approve(), &mut control_rx, &mut early_control, timings).await {
+            Approval::Allowed => None,
+            Approval::Denied => Some(reject_code::DENIED),
+            Approval::Expired => {
+                send_rejection(&sender, &control_sealer, reject_code::NO_ANSWER).await;
+                return Err(Box::new(SessionError("nobody answered the connection request")));
+            }
+            Approval::PeerGone => {
+                log::info!("viewer left before its request was answered");
+                return Ok(());
+            }
+        }
     };
     if let Some(code) = rejection {
         // Tell the viewer explicitly why, so it stops retrying instead of
@@ -487,7 +551,7 @@ where
     let (data_send_key, data_recv_key) = protocol::kex::derive_data_keys(&shared, true);
     let data_sealer = Sealer::new(data_send_key);
     let data_opener = Opener::new(data_recv_key);
-    let (ice_rx, mut session_control_rx) = split_session_control(control_rx, ice_session.to_owned());
+    let (ice_rx, mut session_control_rx) = split_session_control(control_rx, early_control, ice_session.to_owned());
 
     let signaling: RelayIceSignaling<S> = RelayIceSignaling::new(sender.clone(), ice_rx, ice_session);
     let relay: RelayTransport<S> = RelayTransport::new(sender.clone(), reliable.take_media_rx().ok_or(SessionError("media receiver unavailable"))?);
@@ -1155,7 +1219,7 @@ where
     // Started after AuthCode so a 2FA host reads the code as the first
     // control frame.
     let _keepalive = spawn_keepalive(sender.clone(), Arc::clone(&control_sealer), timings.keepalive);
-    let (ice_rx, mut session_control_rx) = split_session_control(control_rx, ice_session.to_owned());
+    let (ice_rx, mut session_control_rx) = split_session_control(control_rx, Vec::new(), ice_session.to_owned());
     // Open session control frames in one place (one opener, in order) and
     // split an explicit host rejection (`Control::Error`) out of the stream so
     // every phase below can react to it promptly.
@@ -2251,14 +2315,30 @@ mod tests {
         }
 
         fn spawn_host(ws: WebSocketStream<DuplexStream>, timings: SessionTimings, ready: Option<oneshot::Sender<DataHandle>>) -> JoinHandle<SessionResult<()>> {
+            spawn_host_approving(ws, timings, ready, || async { true })
+        }
+
+        fn spawn_host_approving<A, Fut>(ws: WebSocketStream<DuplexStream>, timings: SessionTimings, ready: Option<oneshot::Sender<DataHandle>>, approve: A) -> JoinHandle<SessionResult<()>>
+        where
+            A: FnOnce() -> Fut + Send + 'static,
+            Fut: Future<Output = bool> + Send + 'static,
+        {
             tokio::spawn(async move {
                 run_host_session_with_data_and_accept_and_2fa_with_factory(
                     ws, PASSWORD, SESSION, || Some(FakeCapturer::new(64, 64)),
                     |width, height| H264Encoder::new(width, height, 15, 1_000_000),
                     || Box::new(NoopInjector::default()) as Box<dyn InputInjector>,
-                    false, false, None, || async { true }, ready, timings,
+                    false, false, None, approve, ready, timings,
                 ).await
             })
+        }
+
+        /// An approval that signals when it is asked and never answers.
+        fn unanswered(asked: oneshot::Sender<()>) -> impl FnOnce() -> std::future::Pending<bool> + Send + 'static {
+            move || {
+                let _ = asked.send(());
+                std::future::pending()
+            }
         }
 
         struct Viewer {
@@ -2348,7 +2428,7 @@ mod tests {
 
         #[tokio::test(flavor = "multi_thread")]
         async fn keepalive_holds_idle_relay_sockets_open() {
-            let timings = SessionTimings { keepalive: Duration::from_millis(100), dead_peer: Duration::from_secs(5) };
+            let timings = SessionTimings { keepalive: Duration::from_millis(100), dead_peer: Duration::from_secs(5), ..SessionTimings::default() };
             let (relay, host_ws, viewer_ws) = TestRelay::start(Duration::from_millis(600)).await;
             let host = spawn_host(host_ws, timings, None);
             let mut viewer = spawn_viewer(viewer_ws, timings);
@@ -2369,7 +2449,7 @@ mod tests {
         #[tokio::test(flavor = "multi_thread")]
         async fn without_keepalive_the_idle_relay_drops_the_session() {
             // Control experiment for the test above: same relay, keepalives off.
-            let timings = SessionTimings { keepalive: Duration::from_secs(3600), dead_peer: Duration::from_secs(3600) };
+            let timings = SessionTimings { keepalive: Duration::from_secs(3600), dead_peer: Duration::from_secs(3600), ..SessionTimings::default() };
             let (relay, host_ws, viewer_ws) = TestRelay::start(Duration::from_millis(600)).await;
             let host = spawn_host(host_ws, timings, None);
             let mut viewer = spawn_viewer(viewer_ws, timings);
@@ -2390,7 +2470,7 @@ mod tests {
         #[tokio::test(flavor = "multi_thread")]
         async fn viewer_ends_promptly_when_host_control_channel_closes() {
             // Liveness timers far away: only the closed channel can end it.
-            let timings = SessionTimings { keepalive: Duration::from_secs(3600), dead_peer: Duration::from_secs(3600) };
+            let timings = SessionTimings { keepalive: Duration::from_secs(3600), dead_peer: Duration::from_secs(3600), ..SessionTimings::default() };
             let (relay, host_ws, viewer_ws) = TestRelay::start(Duration::from_secs(3600)).await;
             let host = spawn_host(host_ws, timings, None);
             let mut viewer = spawn_viewer(viewer_ws, timings);
@@ -2414,7 +2494,7 @@ mod tests {
 
         #[tokio::test(flavor = "multi_thread")]
         async fn silent_peer_times_out_on_both_sides() {
-            let timings = SessionTimings { keepalive: Duration::from_millis(100), dead_peer: Duration::from_millis(800) };
+            let timings = SessionTimings { keepalive: Duration::from_millis(100), dead_peer: Duration::from_millis(800), ..SessionTimings::default() };
             let (relay, host_ws, viewer_ws) = TestRelay::start(Duration::from_secs(3600)).await;
             let host = spawn_host(host_ws, timings, None);
             let mut viewer = spawn_viewer(viewer_ws, timings);
@@ -2480,6 +2560,49 @@ mod tests {
             assert_eq!(error.reason, DisconnectReason::CleanUserDisconnect);
             assert!(!crate::reconnect::should_reconnect(error.reason));
             host.abort();
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn pending_approval_ends_when_the_viewer_leaves() {
+            let timings = SessionTimings { approval: Duration::from_secs(3600), ..SessionTimings::default() };
+            let (relay, host_ws, viewer_ws) = TestRelay::start(Duration::from_secs(3600)).await;
+            let (asked_tx, asked) = oneshot::channel();
+            let host = spawn_host_approving(host_ws, timings, None, unanswered(asked_tx));
+            let viewer = spawn_viewer(viewer_ws, timings);
+            timeout(Duration::from_secs(10), asked).await.expect("the host never asked for approval").unwrap();
+
+            relay.close();
+            let result = timeout(Duration::from_secs(3), host).await.expect("host kept waiting on a viewer that left");
+            assert!(result.unwrap().is_ok(), "a viewer leaving is not a host error");
+            viewer.task.abort();
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn unanswered_approval_expires_and_tells_the_viewer() {
+            let timings = SessionTimings { approval: Duration::from_millis(300), ..SessionTimings::default() };
+            let (_relay, host_ws, viewer_ws) = TestRelay::start(Duration::from_secs(3600)).await;
+            let (asked_tx, _asked) = oneshot::channel();
+            let host = spawn_host_approving(host_ws, timings, None, unanswered(asked_tx));
+            let viewer = spawn_viewer(viewer_ws, timings);
+            let error = timeout(Duration::from_secs(10), viewer.task).await.expect("viewer kept waiting").unwrap().expect_err("an unanswered request ends the attempt");
+            assert_eq!(error.reason, DisconnectReason::AuthFailure, "{}", error.message);
+            assert_eq!(crate::reconnect::rejection_code(&error.message), Some(reject_code::NO_ANSWER));
+            assert!(timeout(Duration::from_secs(3), host).await.expect("host kept waiting").unwrap().is_err());
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn slow_approval_still_starts_the_session() {
+            let timings = SessionTimings::default();
+            let (_relay, host_ws, viewer_ws) = TestRelay::start(Duration::from_secs(3600)).await;
+            // ICE candidates and keepalives arrive while the host user decides.
+            let host = spawn_host_approving(host_ws, timings, None, || async {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                true
+            });
+            let mut viewer = spawn_viewer(viewer_ws, timings);
+            first_frame(&mut viewer).await;
+            host.abort();
+            viewer.task.abort();
         }
     }
 }
