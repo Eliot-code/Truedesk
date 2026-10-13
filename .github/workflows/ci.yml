@@ -40,6 +40,9 @@ jobs:
       - run: cargo build --locked -p host-core
       - run: cargo test --locked -p host-core
       - run: cargo clippy --locked -p host-core --all-targets -- -D warnings
+      # web-core's tests run the browser session against a real host-core host.
+      - run: cargo test --locked -p web-core
+      - run: cargo clippy --locked -p web-core --all-targets -- -D warnings
 
   tauri:
     name: Tauri Rust crate
@@ -72,6 +75,34 @@ jobs:
         working-directory: viewer
       - run: npx vitest run
         working-directory: viewer
+
+  web:
+    name: Browser viewer
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # Must match the wasm-bindgen version pinned in crates/web-core.
+      - run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
+      - run: cargo clippy --locked -p web-core --target wasm32-unknown-unknown -- -D warnings
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - run: npm run wasm
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+      - run: npx vitest run
+        working-directory: web
 
   # First-ever cross-compile of the cfg-gated Windows/Linux host code
   # (scap/enigo/cpal). These paths are never built on macOS, so this job is
