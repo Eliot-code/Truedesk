@@ -64,4 +64,9 @@ describe("api invoke payload keys (camelCase contract)", () => {
     await api.requestKeyframe();
     expect(invoke).toHaveBeenCalledWith("request_keyframe");
   });
+
+  it("sendChat passes the text to the backend", async () => {
+    await api.sendChat("hello");
+    expect(invoke).toHaveBeenCalledWith("send_chat", { text: "hello" });
+  });
 });

@@ -96,6 +96,7 @@ export function startVideo(handler: (message: ArrayBuffer) => void): () => void 
     void started.then(() => invoke<void>("stop_video", { id: channel.id })).catch(() => {});
   };
 }
+export const sendChat = (text: string) => invoke<void>("send_chat", { text });
 export const setClipboardSync = (enabled: boolean) => invoke<void>("set_clipboard_sync", { enabled });
 export const setAudioMuted = (muted: boolean) => invoke<void>("set_audio_muted", { muted });
 export const sendFile = (path: string) => invoke<number>("send_file", { path });
@@ -140,6 +141,8 @@ export const onVirtualDisplayRefused = (handler: (payload: { code: string }) => 
 /** Something the host user should know, e.g. that the viewer added a display. */
 export const onHostNotice = (handler: (payload: { message: string }) => void) => on("host_notice", handler);
 export const onLinkStats = (handler: (payload: LinkStats) => void) => on("link_stats", handler);
+/** An inbound chat message from the peer; your own sent messages are not echoed. */
+export const onChatMessage = (handler: (payload: { text: string }) => void) => on("chat_message", handler);
 export const onAudioFrame = (handler: (frame: AudioFrame) => void) => on("audio_frame", handler);
 export const onFileOffer = (handler: (payload: FileOffer) => void) => on("file_offer", handler);
 export const onFileProgress = (handler: (payload: FileProgress) => void) => on("file_progress", handler);
