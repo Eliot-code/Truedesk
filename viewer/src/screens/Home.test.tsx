@@ -7,7 +7,7 @@ import { NotifyContext } from "../lib/notify";
 
 vi.mock("../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
-  return { ...actual, getIdentity: vi.fn(), getConfig: vi.fn(), getUnattendedStatus: vi.fn(), listContacts: vi.fn(), listAllowed: vi.fn(), startHosting: vi.fn(), connect: vi.fn(), setUnattendedAccess: vi.fn(), setUnattended2fa: vi.fn(), confirmUnattended2fa: vi.fn(), rotatePassword: vi.fn(), addContact: vi.fn(), getStartAtSignIn: vi.fn(), setStartAtSignIn: vi.fn(), onIdentityChanged: vi.fn() };
+  return { ...actual, getIdentity: vi.fn(), getConfig: vi.fn(), getUnattendedStatus: vi.fn(), listContacts: vi.fn(), listAllowed: vi.fn(), startHosting: vi.fn(), closeKeepsRunning: vi.fn(), quitApp: vi.fn(), connect: vi.fn(), setUnattendedAccess: vi.fn(), setUnattended2fa: vi.fn(), confirmUnattended2fa: vi.fn(), rotatePassword: vi.fn(), addContact: vi.fn(), getStartAtSignIn: vi.fn(), setStartAtSignIn: vi.fn(), onIdentityChanged: vi.fn() };
 });
 describe("Home", () => {
   afterEach(cleanup);
@@ -20,6 +20,7 @@ describe("Home", () => {
     vi.mocked(api.startHosting).mockResolvedValue(undefined); vi.mocked(api.connect).mockResolvedValue(undefined);
     vi.mocked(api.getStartAtSignIn).mockResolvedValue(false); vi.mocked(api.setStartAtSignIn).mockResolvedValue(undefined);
     vi.mocked(api.onIdentityChanged).mockResolvedValue(() => {});
+    vi.mocked(api.closeKeepsRunning).mockResolvedValue(false); vi.mocked(api.quitApp).mockResolvedValue(undefined);
   });
   it("renders the identity returned by the backend", async () => { render(<Home status="online" onConnect={vi.fn()} incomingRequest={null} onDismissRequest={vi.fn()} />); expect(await screen.findByText("123456789")).toBeTruthy(); });
   it("shows a replacement ID when the relay says the old one is taken", async () => {
@@ -37,6 +38,16 @@ describe("Home", () => {
     expect(api.startHosting).toHaveBeenCalledTimes(before + 1);
     rerender(<Home status="online" onConnect={vi.fn()} />);
     expect(screen.queryByRole("button", { name: "Start hosting" })).toBeNull();
+  });
+  it("offers Quit only when closing the window keeps OpenDesk running", async () => {
+    render(<Home status="online" onConnect={vi.fn()} />);
+    await screen.findByText("123456789");
+    expect(screen.queryByRole("button", { name: "Quit OpenDesk" })).toBeNull();
+    cleanup();
+    vi.mocked(api.closeKeepsRunning).mockResolvedValue(true);
+    render(<Home status="online" onConnect={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Quit OpenDesk" }));
+    expect(api.quitApp).toHaveBeenCalledOnce();
   });
   it("reveals the session password on demand", async () => {
     render(<Home status="online" onConnect={vi.fn()} incomingRequest={null} onDismissRequest={vi.fn()} />);
@@ -166,7 +177,7 @@ describe("Home", () => {
       fireEvent.click(toggle());
       await waitFor(() => expect(toggle().checked).toBe(true));
       expect(api.setStartAtSignIn).toHaveBeenCalledWith(true);
-      expect(screen.getByText(/quit from the tray icon/)).toBeTruthy();
+      expect(screen.getByText(/use Quit OpenDesk to stop it/)).toBeTruthy();
     });
 
     it("shows the state the OS reports and can always be turned off", async () => {

@@ -44,6 +44,7 @@ export default function Home({ status, onConnect, onOpenPermissions, initialTarg
   const [startAtSignIn, setStartAtSignIn] = useState<boolean | null>(null);
   const [startAtSignInBusy, setStartAtSignInBusy] = useState(false);
   const [relays, setRelays] = useState<string[]>([]);
+  const [closeKeepsRunning, setCloseKeepsRunning] = useState(false);
   const [relayText, setRelayText] = useState("");
 
   useEffect(() => {
@@ -60,6 +61,13 @@ export default function Home({ status, onConnect, onOpenPermissions, initialTarg
     const idListener = api.onIdentityChanged(({ id }) => { if (mounted) setIdentity((current) => current ? { ...current, id } : current); }).catch(() => undefined);
     return () => { mounted = false; void passwordListener.then((unlisten) => unlisten?.()); void idListener.then((unlisten) => unlisten?.()); };
   }, []);
+
+  // Closing the window may only hide it, so offer a way to quit from here.
+  useEffect(() => {
+    let mounted = true;
+    void api.closeKeepsRunning().then((keeps) => { if (mounted) setCloseKeepsRunning(keeps); }).catch(() => undefined);
+    return () => { mounted = false; };
+  }, [startAtSignIn, unattended.enabled, unattended.has_password]);
 
   const rotate = async () => {
     try { const result = await api.rotatePassword(); setIdentity((current) => current ? { ...current, password: result.password } : current); setMessage("New password generated.", "info"); }
@@ -169,7 +177,7 @@ export default function Home({ status, onConnect, onOpenPermissions, initialTarg
   const startAtSignInHint = startAtSignIn === null ? null
     : !unattendedReady && unattended.enabled ? (startAtSignIn ? "Unattended access isn't working, so OpenDesk will just open its window at sign-in." : "Fix unattended access first.")
     : !unattendedReady ? (startAtSignIn ? "Unattended access is off, so OpenDesk will just open its window at sign-in." : "Turn on and save unattended access first.")
-    : startAtSignIn ? "OpenDesk starts hidden and keeps hosting. Closing the window leaves it running; quit from the tray icon." : null;
+    : startAtSignIn ? "OpenDesk starts hidden and keeps hosting. Closing the window leaves it running; use Quit OpenDesk to stop it." : null;
   const relativeLastConnected = (timestamp: number | null) => {
     if (timestamp === null) return "Never connected";
     const seconds = Math.max(0, Math.floor(Date.now() / 1000) - timestamp);
@@ -189,7 +197,7 @@ export default function Home({ status, onConnect, onOpenPermissions, initialTarg
   };
 
   return <main className="app-shell">
-    <header className="topbar"><div className="brand"><span className="lock-glyph" aria-hidden="true">⌑</span> OpenDesk</div><div className="topbar-actions"><button className="quiet-button" type="button" onClick={onOpenPermissions}>Permissions</button><div className="status" data-status={status}><span className="status-dot" aria-hidden="true" /><span>{statusLabels[status]}</span></div>{status === "offline" && <button className="quiet-button" type="button" onClick={startHosting}>Start hosting</button>}</div></header>
+    <header className="topbar"><div className="brand"><span className="lock-glyph" aria-hidden="true">⌑</span> OpenDesk</div><div className="topbar-actions"><button className="quiet-button" type="button" onClick={onOpenPermissions}>Permissions</button><div className="status" data-status={status}><span className="status-dot" aria-hidden="true" /><span>{statusLabels[status]}</span></div>{status === "offline" && <button className="quiet-button" type="button" onClick={startHosting}>Start hosting</button>}{closeKeepsRunning && <button className="quiet-button" type="button" onClick={() => void api.quitApp().catch(() => undefined)}>Quit OpenDesk</button>}</div></header>
     <section className="hero"><span className="eyebrow">PERSONAL DEVICE ACCESS</span><h1>Remote access, end to end.</h1><p>Share your ID to let someone help you, or enter another device's ID to control it.</p></section>
     <div className="cards">
       <section className="card identity-card"><span className="eyebrow">YOUR ID</span><div className="id-row"><strong className="mono identity-value">{identity?.id ?? "—"}</strong><button className="icon-button" type="button" onClick={() => void copyId()} aria-label="Copy device ID">⧉</button></div><div className="password-row"><label htmlFor="device-password">SESSION PASSWORD</label><div className="password-control"><input id="device-password" className="mono password-value" type={showPassword ? "text" : "password"} value={identity?.password ?? ""} readOnly aria-label="Session password" /><button className="quiet-button" type="button" onClick={() => setShowPassword((shown) => !shown)} aria-label={showPassword ? "Hide password" : "Show password"}>{showPassword ? "Hide" : "Show"}</button><button className="icon-button" type="button" onClick={() => void copyPassword()} aria-label="Copy password">⧉</button><button className="quiet-button" type="button" onClick={() => void rotate()}>Rotate</button></div></div><p className="caption">Share your ID and password to let someone control this device.</p></section>

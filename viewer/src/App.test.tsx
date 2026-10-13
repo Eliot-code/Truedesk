@@ -13,7 +13,7 @@ const { listeners, mocks } = vi.hoisted(() => {
     onFileOffer: on("file_offer"), onFileProgress: on("file_progress"), onFileDone: on("file_done"), onFileError: on("file_error"),
     onFileDrop: on("drop"), onPasswordRotated: on("password_rotated"), onIdentityChanged: on("identity_changed"),
     permissionStatus: vi.fn(), connect: vi.fn(), disconnect: vi.fn(),
-    getIdentity: vi.fn(), getConfig: vi.fn(), getUnattendedStatus: vi.fn(), listContacts: vi.fn(), listAllowed: vi.fn(), startHosting: vi.fn(), getStartAtSignIn: vi.fn(),
+    getIdentity: vi.fn(), getConfig: vi.fn(), getUnattendedStatus: vi.fn(), listContacts: vi.fn(), listAllowed: vi.fn(), startHosting: vi.fn(), getStartAtSignIn: vi.fn(), closeKeepsRunning: vi.fn(),
     sendInput: vi.fn(), respondToRequest: vi.fn(),
   };
   return { listeners, mocks };
@@ -45,6 +45,7 @@ describe("App", () => {
     mocks.listAllowed.mockResolvedValue([]);
     mocks.startHosting.mockResolvedValue(undefined);
     mocks.getStartAtSignIn.mockResolvedValue(false);
+    mocks.closeKeepsRunning.mockResolvedValue(false);
   });
   afterEach(() => { cleanup(); vi.useRealTimers(); listeners.clear(); });
 

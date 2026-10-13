@@ -51,6 +51,9 @@ export const respondToRequest = (peer_id: string, allow: boolean, always: boolea
 /** Read from the OS sign-in entry each time; there is no saved copy in our config. */
 export const getStartAtSignIn = () => isAutostartEnabled();
 export const setStartAtSignIn = (enabled: boolean) => enabled ? enableAutostart() : disableAutostart();
+/** True when closing the window hides it to the tray instead of quitting. */
+export const closeKeepsRunning = () => invoke<boolean>("close_keeps_running");
+export const quitApp = () => invoke<void>("quit_app");
 export const startHosting = () => invoke<void>("start_hosting");
 export const stopHosting = () => invoke<void>("stop_hosting");
 export const connect = (target_id: string, password: string, auth_code?: string) => invoke<void>("connect", auth_code ? { targetId: target_id, password, authCode: auth_code } : { targetId: target_id, password });

@@ -658,7 +658,9 @@ pub fn run() {
             append_recording,
             finish_recording,
             set_relays,
-            list_relays
+            list_relays,
+            startup::close_keeps_running,
+            startup::quit_app
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

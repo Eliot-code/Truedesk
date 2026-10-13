@@ -51,6 +51,55 @@ pub(crate) fn keep_running_on_close(autostart_enabled: bool, unattended_ready: b
     autostart_enabled && unattended_ready
 }
 
+/// Whether a tray icon would actually be visible. On Linux the tray is an
+/// AppIndicator, which only shows up when a StatusNotifier host is running
+/// (stock GNOME has none). Without one a hidden window could never be shown
+/// again or quit, so anything unsure counts as no tray.
+pub(crate) fn tray_available() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        status_notifier_running()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        true
+    }
+}
+
+/// Asks the session bus whether the StatusNotifier watcher has an owner, via
+/// whichever of the standard D-Bus command line tools is installed.
+#[cfg(target_os = "linux")]
+fn status_notifier_running() -> bool {
+    use std::process::{Command, Stdio};
+    let attempts: [(&str, &[&str]); 2] = [
+        ("dbus-send", &[
+            "--session", "--print-reply", "--reply-timeout=1000", "--dest=org.freedesktop.DBus",
+            "/org/freedesktop/DBus", "org.freedesktop.DBus.NameHasOwner", "string:org.kde.StatusNotifierWatcher",
+        ]),
+        ("gdbus", &[
+            "call", "--session", "--timeout", "1", "--dest", "org.freedesktop.DBus",
+            "--object-path", "/org/freedesktop/DBus", "--method", "org.freedesktop.DBus.NameHasOwner",
+            "org.kde.StatusNotifierWatcher",
+        ]),
+    ];
+    for (program, args) in attempts {
+        let output = Command::new(program).args(args).stdin(Stdio::null()).stderr(Stdio::null()).output();
+        if let Ok(output) = output {
+            if output.status.success() {
+                return name_has_owner_reply(&String::from_utf8_lossy(&output.stdout));
+            }
+        }
+    }
+    log::info!("no D-Bus tool answered; assuming there is no tray");
+    false
+}
+
+/// Reads a NameHasOwner reply as printed by `dbus-send` or `gdbus`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn name_has_owner_reply(output: &str) -> bool {
+    output.contains("boolean true") || output.trim() == "(true,)"
+}
+
 /// Tray label for the hosting item, given the current host status.
 pub(crate) fn hosting_item_label(host_status: &str) -> &'static str {
     if host_status == "offline" { "Start hosting" } else { "Stop hosting" }
@@ -76,7 +125,10 @@ pub(crate) fn start(app: &AppHandle, background: bool) {
         Startup::ShowWindow => show_main_window(app),
         Startup::HostHidden => {
             log::info!("started at sign-in; hosting in the background");
-            if let Err(error) = ensure_tray(app) {
+            if !tray_available() {
+                log::info!("no tray to return to; showing the window");
+                show_main_window(app);
+            } else if let Err(error) = ensure_tray(app) {
                 // Without a tray there is no way back to a hidden window.
                 log::warn!("could not create the tray icon: {error}");
                 show_main_window(app);
@@ -107,15 +159,29 @@ pub(crate) fn reveal_if_hidden(app: &AppHandle) {
     }
 }
 
+/// Whether closing the main window hides it to the tray right now.
+fn closes_to_tray(app: &AppHandle) -> bool {
+    let autostart = app.autolaunch().is_enabled().unwrap_or(false);
+    // Skip the keychain lookup when autostart is off.
+    keep_running_on_close(autostart, autostart && unattended_ready(app)) && tray_available()
+}
+
+/// Lets the window offer its own Quit button when closing it won't quit.
+/// Async so the keychain and D-Bus lookups stay off the main thread.
+#[tauri::command]
+pub(crate) async fn close_keeps_running(app: AppHandle) -> bool {
+    closes_to_tray(&app)
+}
+
+#[tauri::command]
+pub(crate) fn quit_app(app: AppHandle) {
+    app.exit(0);
+}
+
 /// Window close handler. Returns true when the close was turned into a hide.
 pub(crate) fn hide_instead_of_close(window: &tauri::Window) -> bool {
     let app = window.app_handle();
-    if window.label() != "main" {
-        return false;
-    }
-    let autostart = app.autolaunch().is_enabled().unwrap_or(false);
-    // Skip the keychain lookup when autostart is off.
-    if !keep_running_on_close(autostart, autostart && unattended_ready(app)) {
+    if window.label() != "main" || !closes_to_tray(app) {
         return false;
     }
     if let Err(error) = ensure_tray(app) {
@@ -223,6 +289,16 @@ mod tests {
         assert!(!keep_running_on_close(true, false));
         assert!(!keep_running_on_close(false, true));
         assert!(!keep_running_on_close(false, false));
+    }
+
+    #[test]
+    fn reads_name_has_owner_replies_from_either_tool() {
+        let dbus_send = "method return time=1.2 sender=org.freedesktop.DBus -> destination=:1.9 serial=3 reply_serial=2\n   boolean true\n";
+        assert!(name_has_owner_reply(dbus_send));
+        assert!(!name_has_owner_reply(&dbus_send.replace("true", "false")));
+        assert!(name_has_owner_reply("(true,)\n"));
+        assert!(!name_has_owner_reply("(false,)\n"));
+        assert!(!name_has_owner_reply(""));
     }
 
     #[test]
