@@ -130,6 +130,7 @@ To run two instances on one machine, see [`docs/TESTING.md`](docs/TESTING.md).
 - [x] Hardware H.264 on macOS and Windows
 - [x] Files, clipboard, audio, recording, multi-monitor
 - [x] Unattended access with 2FA, start at sign-in
+- [ ] Windows sign-in-screen, UAC and lock-screen service (manual VM validation)
 - [x] Browser viewer
 - [x] Virtual displays on macOS and Windows
 - [x] In-session text chat and view-only sessions

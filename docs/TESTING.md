@@ -71,3 +71,18 @@ the OS versions, the number of any failing step, and the app log:
 - Linux: `~/.local/share/com.opendesk.app/logs/`
 
 The relay logs to stderr; set `RUST_LOG=debug` for more detail.
+# Windows sign-in-screen service
+
+The privileged path needs a real Windows VM and an administrator account.
+
+1. Start with the setting off; confirm the normal host starts after sign-in.
+2. Save unattended access (including 2FA if it is part of the test), enable
+   “Run OpenDesk at the Windows sign-in screen”, and approve the UAC prompt.
+3. Confirm Home reports “Hosted by the OpenDesk service” and that a second
+   normal host is not registered.
+4. Lock Windows, sign out, show a UAC prompt, and reboot. From another viewer,
+   verify capture and keyboard/mouse input on each protected desktop.
+5. Use Ctrl+Alt+Del, verify the Windows security screen appears, and complete
+   an unattended sign-in including the 2FA code.
+6. Disable the setting, verify the service is stopped and removed, and confirm
+   the ordinary host resumes after the next sign-in.
