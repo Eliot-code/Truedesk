@@ -17,7 +17,7 @@
 //! releasing the object removes it, and so does the process exiting.
 //! The objects stay on one thread that owns them.
 
-use super::{DisplaySpec, VirtualDisplayError, VirtualDisplays};
+use super::{AddedDisplay, DisplaySpec, VirtualDisplayError, VirtualDisplays};
 use objc2::rc::{autoreleasepool, Allocated, Retained};
 use objc2::runtime::{AnyClass, AnyObject, Bool, Sel};
 use objc2::{msg_send, sel, Encode, Encoding};
@@ -114,7 +114,7 @@ impl CgVirtualDisplays {
 impl VirtualDisplays for CgVirtualDisplays {
     fn supported(&self) -> bool { self.api.is_some() }
 
-    fn create(&self, spec: &DisplaySpec) -> Result<u32, VirtualDisplayError> {
+    fn create(&self, spec: &DisplaySpec) -> Result<AddedDisplay, VirtualDisplayError> {
         if self.api.is_none() {
             return Err(VirtualDisplayError::Unsupported);
         }
@@ -125,17 +125,19 @@ impl VirtualDisplays for CgVirtualDisplays {
         let id = result.recv().unwrap_or_else(|_| Err(VirtualDisplayError::Failed("the virtual display thread stopped".into())))?;
         self.owned.lock().unwrap_or_else(|poison| poison.into_inner()).push(id);
         log::info!("added virtual display {id} ({}x{}{})", spec.width, spec.height, if spec.hidpi { " HiDPI" } else { "" });
-        Ok(id)
+        // macOS makes the mode asked for.
+        Ok(AddedDisplay { id, width: spec.width, height: spec.height })
     }
 
-    fn remove(&self, id: u32) {
+    fn remove(&self, id: u32) -> Result<(), VirtualDisplayError> {
         let mut owned = self.owned.lock().unwrap_or_else(|poison| poison.into_inner());
-        let Some(index) = owned.iter().position(|&owned| owned == id) else { return };
+        let Some(index) = owned.iter().position(|&owned| owned == id) else { return Ok(()) };
         owned.remove(index);
         drop(owned);
         if self.send(Request::Remove(id)) {
             log::info!("removed virtual display {id}");
         }
+        Ok(())
     }
 
     fn owned(&self) -> Vec<u32> { self.owned.lock().unwrap_or_else(|poison| poison.into_inner()).clone() }

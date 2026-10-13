@@ -1,6 +1,6 @@
-//! Manual check of the macOS virtual display backend: adds a 1280x720
+//! Manual check of the virtual display backend. macOS: adds a 1280x720
 //! display and then a 2560x1440 HiDPI one, two seconds each, removes
-//! them, and says whether screen capture listed them.
+//! them, and says whether screen capture listed them. Windows: see below.
 //!
 //! `cargo run -p host-core --example virtual_display`
 
@@ -38,7 +38,7 @@ fn main() {
         let (width, height) = if hidpi { (2560, 1440) } else { (1280, 720) };
         let spec = DisplaySpec { width, height, refresh_hz: 60, hidpi };
         let id = match displays.create(&spec) {
-            Ok(id) => id,
+            Ok(display) => display.id,
             Err(error) => {
                 eprintln!("failed: {error}");
                 std::process::exit(1);
@@ -66,7 +66,7 @@ fn main() {
             listed.map_or("no (is Screen Recording allowed?)".to_owned(), |after| format!("after {} ms", after.as_millis())),
         );
         // Remove and go straight on to the next one.
-        displays.remove(id);
+        let _ = displays.remove(id);
     }
     std::thread::sleep(Duration::from_secs(1));
     match displays.owned().as_slice() {
@@ -78,7 +78,45 @@ fn main() {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Windows: needs Amyuni's driver (Home → "Install virtual display
+/// driver"). Adds a 1280x720 display and a 2560x1440 one, checks capture
+/// lists them, that the older can't go first, and removes both.
+#[cfg(windows)]
 fn main() {
-    eprintln!("virtual displays are only implemented on macOS");
+    use host_core::vdisplay::{platform, DisplaySpec, VirtualDisplayError};
+    use std::time::Duration;
+
+    let fail = |message: String| -> ! {
+        eprintln!("failed: {message}");
+        std::process::exit(1);
+    };
+    let displays = platform();
+    if !displays.supported() {
+        fail("the virtual display driver isn't installed".into());
+    }
+    let mut added = Vec::new();
+    for (width, height) in [(1280, 720), (2560, 1440)] {
+        let display = displays.create(&DisplaySpec { width, height, refresh_hz: 60, hidpi: false }).unwrap_or_else(|error| fail(error.to_string()));
+        std::thread::sleep(Duration::from_secs(2));
+        let listed = scap::get_all_targets().iter().any(|target| matches!(target, scap::Target::Display(shown) if shown.id == display.id));
+        println!("asked for {width}x{height}: display {} is {}x{}; capture lists it: {listed}", display.id, display.width, display.height);
+        added.push(display.id);
+    }
+    match displays.remove(added[0]) {
+        Err(VirtualDisplayError::NotNewest) => println!("ok: the older display can't go first"),
+        other => fail(format!("removing the older display first gave {other:?}")),
+    }
+    for id in added.into_iter().rev() {
+        displays.remove(id).unwrap_or_else(|error| fail(error.to_string()));
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    match displays.owned().as_slice() {
+        [] => println!("ok: every display was removed"),
+        left => fail(format!("still holding {left:?}")),
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn main() {
+    eprintln!("virtual displays are only implemented on macOS and Windows");
 }

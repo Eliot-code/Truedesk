@@ -3,8 +3,9 @@
 //!
 //! [`VirtualDisplays`] is the platform backend. A session owns its displays
 //! through [`SessionDisplays`], which removes them when the session ends.
-//! Leaving the process removes them too: the OS ties them to the process
-//! that made them.
+//! On macOS leaving the process removes them too: the OS ties them to the
+//! process that made them. Windows keeps them, so the app calls
+//! [`remove_owned`] on the way out.
 
 use protocol::control::{self, MonitorInfo};
 use std::fmt;
@@ -48,10 +49,26 @@ impl DisplaySpec {
     pub fn headless() -> Self { Self { width: 1920, height: 1080, refresh_hz: 60, hidpi: false } }
 }
 
+/// A display a backend made: its id (see [`VirtualDisplays`]) and the size
+/// it really got, which differs from the request where the platform only
+/// offers fixed modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AddedDisplay {
+    pub id: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VirtualDisplayError {
-    /// This OS (or OS version) has no virtual displays OpenDesk can drive.
+    /// This OS (or OS version) has no virtual displays OpenDesk can drive,
+    /// or their driver isn't installed.
     Unsupported,
+    /// The computer has as many virtual displays as it can take.
+    Limit,
+    /// Only the newest virtual display can go (Windows' driver removes
+    /// displays last in, first out).
+    NotNewest,
     /// The platform refused or failed; the text is for logs.
     Failed(String),
 }
@@ -60,6 +77,8 @@ impl fmt::Display for VirtualDisplayError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unsupported => f.write_str("virtual displays are not supported on this computer"),
+            Self::Limit => f.write_str("this computer has as many virtual displays as it can take"),
+            Self::NotNewest => f.write_str("only the newest virtual display can be removed"),
             Self::Failed(reason) => write!(f, "could not create a virtual display: {reason}"),
         }
     }
@@ -70,19 +89,24 @@ impl std::error::Error for VirtualDisplayError {}
 /// A platform's virtual displays.
 ///
 /// `create` returns once the display exists, with the id the screen
-/// capturer and input mapping use for it (a `CGDirectDisplayID` on macOS).
-/// A backend that drives an external driver would translate the driver's
-/// handle into that id and keep the handle itself. Backends only remove
-/// displays they created. Only macOS has one; elsewhere [`platform`] is
-/// [`Unsupported`].
+/// capturer and input mapping use for it (a `CGDirectDisplayID` on macOS,
+/// an `HMONITOR` on Windows). A backend that drives an external driver
+/// translates the driver's handle into that id and keeps the handle
+/// itself. Backends only remove displays they created. macOS has one, and
+/// so does Windows with Amyuni's driver installed; elsewhere [`platform`]
+/// is [`Unsupported`].
 pub trait VirtualDisplays: Send + Sync {
     /// Whether `create` can work here. Cheap, and must not prompt the user.
     fn supported(&self) -> bool;
 
-    fn create(&self, spec: &DisplaySpec) -> Result<u32, VirtualDisplayError>;
+    fn create(&self, spec: &DisplaySpec) -> Result<AddedDisplay, VirtualDisplayError>;
+
+    /// Whether `remove` would take this display away now. `Ok` for ids the
+    /// backend doesn't know.
+    fn removable(&self, _id: u32) -> Result<(), VirtualDisplayError> { Ok(()) }
 
     /// Removes a display this backend created; unknown ids are ignored.
-    fn remove(&self, id: u32);
+    fn remove(&self, id: u32) -> Result<(), VirtualDisplayError>;
 
     /// The displays this backend created and still holds.
     fn owned(&self) -> Vec<u32>;
@@ -95,9 +119,9 @@ pub struct Unsupported;
 impl VirtualDisplays for Unsupported {
     fn supported(&self) -> bool { false }
 
-    fn create(&self, _spec: &DisplaySpec) -> Result<u32, VirtualDisplayError> { Err(VirtualDisplayError::Unsupported) }
+    fn create(&self, _spec: &DisplaySpec) -> Result<AddedDisplay, VirtualDisplayError> { Err(VirtualDisplayError::Unsupported) }
 
-    fn remove(&self, _id: u32) {}
+    fn remove(&self, _id: u32) -> Result<(), VirtualDisplayError> { Ok(()) }
 
     fn owned(&self) -> Vec<u32> { Vec::new() }
 }
@@ -108,9 +132,22 @@ pub fn platform() -> Arc<dyn VirtualDisplays> {
     Arc::clone(PLATFORM.get_or_init(|| {
         #[cfg(target_os = "macos")]
         return Arc::new(macos::CgVirtualDisplays::new());
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(windows)]
+        return Arc::new(win32::AmyuniDisplays::new());
+        #[cfg(not(any(target_os = "macos", windows)))]
         return Arc::new(Unsupported);
     }))
+}
+
+/// Removes every display this process still holds, newest first. For app
+/// exit; sessions remove their own when they end.
+pub fn remove_owned() {
+    let backend = platform();
+    for id in backend.owned().into_iter().rev() {
+        if let Err(error) = backend.remove(id) {
+            log::warn!("left virtual display {id} in place: {error}");
+        }
+    }
 }
 
 /// Whether this computer has a screen to share: `Some(false)` when it has
@@ -139,6 +176,8 @@ pub const MAX_PER_SESSION: usize = 2;
 pub fn refusal_code(error: &VirtualDisplayError) -> &'static str {
     match error {
         VirtualDisplayError::Unsupported => control::VIRTUAL_DISPLAY_NOT_ALLOWED,
+        VirtualDisplayError::Limit => control::VIRTUAL_DISPLAY_LIMIT,
+        VirtualDisplayError::NotNewest => control::VIRTUAL_DISPLAY_NOT_NEWEST,
         VirtualDisplayError::Failed(_) => control::VIRTUAL_DISPLAY_FAILED,
     }
 }
@@ -148,10 +187,11 @@ pub struct SessionDisplays {
     backend: Arc<dyn VirtualDisplays>,
     /// Whether the viewer may add and remove displays.
     viewer_may_add: bool,
-    /// Added at the viewer's request; the viewer may remove these.
-    added: Vec<u32>,
+    /// Added at the viewer's request, oldest first; the viewer may remove
+    /// these.
+    added: Vec<AddedDisplay>,
     /// Made because the host had no screen; kept for the whole session.
-    headless: Option<u32>,
+    headless: Option<AddedDisplay>,
 }
 
 impl SessionDisplays {
@@ -171,9 +211,9 @@ impl SessionDisplays {
         if !self.viewer_may_add || !self.backend.supported() {
             return Err(VirtualDisplayError::Unsupported);
         }
-        let id = self.backend.create(&DisplaySpec::headless())?;
-        self.headless = Some(id);
-        Ok(id)
+        let display = self.backend.create(&DisplaySpec::headless())?;
+        self.headless = Some(display);
+        Ok(display.id)
     }
 
     /// Adds a display the viewer asked for. `Err` is a refusal code.
@@ -184,28 +224,46 @@ impl SessionDisplays {
         if self.added.len() >= MAX_PER_SESSION {
             return Err(control::VIRTUAL_DISPLAY_LIMIT);
         }
-        let id = self.backend.create(spec).map_err(|error| {
+        let display = self.backend.create(spec).map_err(|error| {
             log::warn!("{error}");
             refusal_code(&error)
         })?;
-        self.added.push(id);
-        Ok(id)
+        self.added.push(display);
+        Ok(display.id)
+    }
+
+    /// Whether [`remove`](Self::remove) would succeed now. `Err` is a
+    /// refusal code.
+    pub fn check_remove(&self, id: u32) -> Result<(), &'static str> {
+        if !self.added.iter().any(|added| added.id == id) {
+            return Err(control::VIRTUAL_DISPLAY_UNKNOWN);
+        }
+        self.backend.removable(id).map_err(|error| refusal_code(&error))
     }
 
     /// Removes a display the viewer added. `Err` is a refusal code.
     pub fn remove(&mut self, id: u32) -> Result<(), &'static str> {
-        let Some(index) = self.added.iter().position(|&added| added == id) else {
+        let Some(index) = self.added.iter().position(|added| added.id == id) else {
             return Err(control::VIRTUAL_DISPLAY_UNKNOWN);
         };
+        self.backend.remove(id).map_err(|error| {
+            log::warn!("{error}");
+            refusal_code(&error)
+        })?;
         self.added.remove(index);
-        self.backend.remove(id);
         Ok(())
     }
 
-    /// Marks the displays the viewer added, which it may remove.
+    /// Marks the displays the viewer added, which it may remove, and fills
+    /// in the size of each display the session made where capture didn't
+    /// report one (so the viewer sees the size Windows really gave it).
     pub fn annotate(&self, monitors: &mut [MonitorInfo]) {
         for monitor in monitors {
-            monitor.is_virtual = self.added.contains(&monitor.id);
+            monitor.is_virtual = self.added.iter().any(|added| added.id == monitor.id);
+            let made = self.added.iter().chain(&self.headless).find(|made| made.id == monitor.id);
+            if let Some(made) = made.filter(|_| monitor.width == 0 || monitor.height == 0) {
+                (monitor.width, monitor.height) = (made.width, made.height);
+            }
         }
     }
 
@@ -213,15 +271,21 @@ impl SessionDisplays {
 }
 
 impl Drop for SessionDisplays {
+    /// Newest first: Windows' driver can only take away its newest display.
     fn drop(&mut self) {
-        for id in self.added.drain(..).chain(self.headless.take()) {
-            self.backend.remove(id);
+        for display in self.added.drain(..).rev().chain(self.headless.take()) {
+            if let Err(error) = self.backend.remove(display.id) {
+                log::warn!("left virtual display {} in place: {error}", display.id);
+            }
         }
     }
 }
 
+pub mod amyuni;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(windows)]
+pub mod win32;
 
 #[cfg(test)]
 pub(crate) mod fake {
@@ -241,6 +305,8 @@ pub(crate) mod fake {
         pub next: u32,
         pub live: Vec<(u32, DisplaySpec)>,
         pub removed: Vec<u32>,
+        /// Like Windows' driver: only the newest display can go.
+        pub newest_only: bool,
     }
 
     impl FakeDisplays {
@@ -256,7 +322,7 @@ pub(crate) mod fake {
     impl VirtualDisplays for FakeDisplays {
         fn supported(&self) -> bool { !self.state.lock().unwrap().unsupported }
 
-        fn create(&self, spec: &DisplaySpec) -> Result<u32, VirtualDisplayError> {
+        fn create(&self, spec: &DisplaySpec) -> Result<AddedDisplay, VirtualDisplayError> {
             let mut state = self.state.lock().unwrap();
             if state.unsupported {
                 return Err(VirtualDisplayError::Unsupported);
@@ -267,15 +333,26 @@ pub(crate) mod fake {
             let id = 100 + state.next;
             state.next += 1;
             state.live.push((id, *spec));
-            Ok(id)
+            Ok(AddedDisplay { id, width: spec.width, height: spec.height })
         }
 
-        fn remove(&self, id: u32) {
+        fn removable(&self, id: u32) -> Result<(), VirtualDisplayError> {
+            let state = self.state.lock().unwrap();
+            let newest = state.live.last().map(|(live, _)| *live);
+            if state.newest_only && state.live.iter().any(|(live, _)| *live == id) && newest != Some(id) {
+                return Err(VirtualDisplayError::NotNewest);
+            }
+            Ok(())
+        }
+
+        fn remove(&self, id: u32) -> Result<(), VirtualDisplayError> {
+            self.removable(id)?;
             let mut state = self.state.lock().unwrap();
             if let Some(index) = state.live.iter().position(|(live, _)| *live == id) {
                 state.live.remove(index);
                 state.removed.push(id);
             }
+            Ok(())
         }
 
         fn owned(&self) -> Vec<u32> { self.state.lock().unwrap().live.iter().map(|(id, _)| *id).collect() }
@@ -319,6 +396,7 @@ mod tests {
         assert_eq!(displays.add(&spec), Err(control::VIRTUAL_DISPLAY_LIMIT));
         assert_eq!(displays.remove(7), Err(control::VIRTUAL_DISPLAY_UNKNOWN));
         displays.remove(first).unwrap();
+        assert_eq!(displays.check_remove(first), Err(control::VIRTUAL_DISPLAY_UNKNOWN));
         assert_eq!(backend.owned(), vec![second]);
         // Freed a slot.
         displays.add(&spec).unwrap();
@@ -366,6 +444,46 @@ mod tests {
         let mut list = vec![monitor(1), monitor(headless), monitor(added)];
         displays.annotate(&mut list);
         assert_eq!(list.iter().map(|monitor| monitor.is_virtual).collect::<Vec<_>>(), [false, false, true]);
+    }
+
+    #[test]
+    fn annotated_displays_carry_the_size_they_really_got() {
+        let mut displays = SessionDisplays::new(Arc::new(FakeDisplays::default()), true);
+        let headless = displays.add_headless().unwrap();
+        let added = displays.add(&DisplaySpec::fitted(1280, 720, false)).unwrap();
+        let reported = MonitorInfo { width: 1600, height: 900, ..monitor(added) };
+        let mut list = vec![monitor(1), monitor(headless), reported];
+        displays.annotate(&mut list);
+        let sizes: Vec<_> = list.iter().map(|monitor| (monitor.width, monitor.height)).collect();
+        // Capture's own size wins; unknown sizes stay unknown for real screens.
+        assert_eq!(sizes, [(0, 0), (1920, 1080), (1600, 900)]);
+    }
+
+    #[test]
+    fn newest_first_backends_refuse_out_of_order_removal_and_clean_up_in_order() {
+        let backend = Arc::new(FakeDisplays::default());
+        backend.state.lock().unwrap().newest_only = true;
+        let mut displays = SessionDisplays::new(backend.clone(), true);
+        let headless = displays.add_headless().unwrap();
+        let spec = DisplaySpec::fitted(1280, 720, false);
+        let first = displays.add(&spec).unwrap();
+        let second = displays.add(&spec).unwrap();
+        assert_eq!(displays.check_remove(first), Err(control::VIRTUAL_DISPLAY_NOT_NEWEST));
+        assert_eq!(displays.remove(first), Err(control::VIRTUAL_DISPLAY_NOT_NEWEST));
+        assert_eq!(backend.owned(), vec![headless, first, second], "a refused removal leaves everything in place");
+        assert_eq!(displays.check_remove(second), Ok(()));
+        displays.remove(second).unwrap();
+        assert_eq!(displays.check_remove(first), Ok(()));
+        let third = displays.add(&spec).unwrap();
+        drop(displays);
+        assert!(backend.owned().is_empty());
+        assert_eq!(backend.state.lock().unwrap().removed, vec![second, third, first, headless]);
+    }
+
+    #[test]
+    fn platform_limits_become_refusal_codes() {
+        assert_eq!(refusal_code(&VirtualDisplayError::Limit), control::VIRTUAL_DISPLAY_LIMIT);
+        assert_eq!(refusal_code(&VirtualDisplayError::NotNewest), control::VIRTUAL_DISPLAY_NOT_NEWEST);
     }
 
     #[test]

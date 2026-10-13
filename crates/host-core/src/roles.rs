@@ -727,13 +727,14 @@ where
                     }
                     Some(Control::RemoveVirtualDisplay { id }) => {
                         // Move off the display first, so capture never waits
-                        // on one that is gone.
-                        if unpack_display(display.load(Ordering::Acquire)) == Some(id) {
+                        // on one that is gone (but not for a refusal).
+                        let allowed = virtual_displays.check_remove(id);
+                        if allowed.is_ok() && unpack_display(display.load(Ordering::Acquire)) == Some(id) {
                             let main = monitors.iter().find(|monitor| monitor.is_primary && monitor.id != id).map(|monitor| monitor.id);
                             display.store(pack_display(main), Ordering::Release);
                             if let Some(main) = main { video.send(VideoCommand::SelectMonitor(main)); }
                         }
-                        let reply = match virtual_displays.remove(id) {
+                        let reply = match allowed.and_then(|()| virtual_displays.remove(id)) {
                             Ok(()) => {
                                 displays.tell(DisplayNotice::ViewerRemoved);
                                 monitors.retain(|monitor| monitor.id != id);
@@ -2997,8 +2998,9 @@ mod tests {
             }
         }
 
-        fn virtual_monitor(id: u32) -> protocol::control::MonitorInfo {
-            protocol::control::MonitorInfo { is_virtual: true, ..monitor(id) }
+        /// A display the viewer added, at the size the backend gave it.
+        fn virtual_monitor(id: u32, width: u32, height: u32) -> protocol::control::MonitorInfo {
+            protocol::control::MonitorInfo { is_virtual: true, width, height, ..monitor(id) }
         }
 
         #[tokio::test(flavor = "multi_thread")]
@@ -3010,7 +3012,7 @@ mod tests {
             // The fake hands out 100 first; capture lists it once it exists.
             rig.capturer.script().monitors = vec![monitor(1), monitor(100)];
             rig.send(Control::AddVirtualDisplay { width: 2561, height: 1441, hidpi: false }).await;
-            assert_eq!(rig.next().await, Control::MonitorList { monitors: vec![monitor(1), virtual_monitor(100)] });
+            assert_eq!(rig.next().await, Control::MonitorList { monitors: vec![monitor(1), virtual_monitor(100, 2560, 1440)] });
             assert_eq!(rig.next().await, Control::VirtualDisplayAdded { id: 100 });
             let (_, spec) = rig.backend.live()[0];
             assert_eq!((spec.width, spec.height), (2560, 1440), "sizes are evened");
@@ -3025,12 +3027,36 @@ mod tests {
             rig.send(Control::RemoveVirtualDisplay { id: 1 }).await;
             assert_eq!(rig.next().await, Control::VirtualDisplayRefused { code: protocol::control::VIRTUAL_DISPLAY_UNKNOWN.into() });
             rig.send(Control::RemoveVirtualDisplay { id: 100 }).await;
-            assert_eq!(rig.next().await, Control::MonitorList { monitors: vec![monitor(1), virtual_monitor(101)] });
+            assert_eq!(rig.next().await, Control::MonitorList { monitors: vec![monitor(1), virtual_monitor(101, 1280, 720)] });
             assert_eq!(rig.backend.owned(), vec![101]);
             assert_eq!(*rig.notices.lock().unwrap(), [DisplayNotice::ViewerAdded, DisplayNotice::ViewerAdded, DisplayNotice::ViewerRemoved]);
 
             let backend = rig.end().await;
             assert!(backend.owned().is_empty(), "ending the session removes the viewer's displays");
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_display_under_a_newer_one_is_refused_and_stays_shown() {
+            let backend = vdisplay::fake::FakeDisplays::default();
+            backend.state.lock().unwrap().newest_only = true;
+            let mut rig = DisplayRig::start(Some(true), true, vec![monitor(1)], backend).await;
+            assert!(matches!(rig.next().await, Control::MonitorList { .. }));
+            assert!(matches!(rig.next().await, Control::VirtualDisplaySupport { .. }));
+            rig.capturer.script().monitors = vec![monitor(1), monitor(100), monitor(101)];
+            for id in [100, 101] {
+                rig.send(Control::AddVirtualDisplay { width: 1920, height: 1080, hidpi: false }).await;
+                assert!(matches!(rig.next().await, Control::MonitorList { .. }));
+                assert_eq!(rig.next().await, Control::VirtualDisplayAdded { id });
+            }
+            rig.send(Control::SelectMonitor { id: 100 }).await;
+            rig.send(Control::RemoveVirtualDisplay { id: 100 }).await;
+            assert_eq!(rig.next().await, Control::VirtualDisplayRefused { code: protocol::control::VIRTUAL_DISPLAY_NOT_NEWEST.into() });
+            assert_eq!(rig.backend.owned(), vec![100, 101]);
+            rig.send(Control::RemoveVirtualDisplay { id: 101 }).await;
+            assert!(matches!(rig.next().await, Control::MonitorList { monitors } if monitors.len() == 2));
+            rig.send(Control::RemoveVirtualDisplay { id: 100 }).await;
+            assert!(matches!(rig.next().await, Control::MonitorList { monitors } if monitors == vec![monitor(1)]));
+            rig.end().await;
         }
 
         #[tokio::test(flavor = "multi_thread")]
@@ -3047,7 +3073,8 @@ mod tests {
         async fn a_headless_host_adds_a_display_for_the_session() {
             let mut rig = DisplayRig::start(Some(false), true, vec![monitor(100)], Default::default()).await;
             // The headless display is the host's, not the viewer's to remove.
-            assert!(matches!(rig.next().await, Control::MonitorList { monitors } if monitors == vec![monitor(100)]));
+            let sized = protocol::control::MonitorInfo { width: 1920, height: 1080, ..monitor(100) };
+            assert!(matches!(rig.next().await, Control::MonitorList { monitors } if monitors == vec![sized]));
             assert_eq!(rig.backend.owned(), vec![100]);
             assert_eq!(rig.backend.live()[0].1, DisplaySpec::headless());
             assert_eq!(*rig.notices.lock().unwrap(), [DisplayNotice::HeadlessAdded]);
