@@ -5,9 +5,9 @@
 #![allow(clippy::result_large_err)]
 
 use futures_util::{SinkExt, StreamExt};
-use protocol::{control::{Control, ERROR_ID_IN_USE, ERROR_ID_TAKEN}, frame, Tag};
+use protocol::{control::*, frame, Tag};
 use tokio::net::TcpStream;
-use tokio::time::{timeout, Duration};
+use tokio::time::{timeout, Duration, Instant};
 use tokio_tungstenite::{connect_async_with_config, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
 /// The WebSocket type returned by [`connect`].
@@ -107,14 +107,53 @@ pub async fn settle_registration(ws: &mut RelayWebSocket, settle: Duration) -> R
     }
 }
 
+/// The longest a parked registration is trusted. Relays drop a parked host
+/// after their pairing timeout (60 s by default) and the host re-registers,
+/// so this only runs out when the socket died without a close, as it does
+/// when the computer sleeps or changes network.
+pub const PARKED_LIMIT: Duration = Duration::from_secs(75);
+
+/// How often a parked host pings the relay. A relay that answers (newer ones
+/// do) must keep answering or the registration is renewed; older relays
+/// don't read a parked socket, so for them only [`PARKED_LIMIT`] applies.
+const PARKED_PING: Duration = Duration::from_secs(15);
+
 /// Wait on a registered host socket until the relay pairs a viewer with it.
 /// Errors when the relay closes the registration (rejected, pairing timeout,
-/// relay restart) or sends something other than a `paired` frame.
+/// relay restart), sends something other than a `paired` frame, or goes
+/// quiet (see [`PARKED_LIMIT`]). Callers re-register in every case.
 pub async fn await_pairing(ws: &mut RelayWebSocket) -> Result<Pairing, String> {
+    await_pairing_within(ws, PARKED_LIMIT, PARKED_PING).await
+}
+
+async fn await_pairing_within(ws: &mut RelayWebSocket, limit: Duration, ping_every: Duration) -> Result<Pairing, String> {
+    let limit = Instant::now() + limit;
+    let mut ping = tokio::time::interval_at(Instant::now() + ping_every, ping_every);
+    let mut answers_pings = false;
+    let mut unanswered = false;
     loop {
-        let message = match ws.next().await {
+        let message = tokio::select! {
+            message = ws.next() => message,
+            _ = tokio::time::sleep_until(limit) => return Err("relay went quiet while hosting".into()),
+            _ = ping.tick() => {
+                if answers_pings && unanswered {
+                    return Err("relay stopped answering while hosting".into());
+                }
+                if !matches!(timeout(ping_every, ws.send(Message::Ping(Vec::new().into()))).await, Ok(Ok(()))) {
+                    return Err("relay closed while hosting".into());
+                }
+                unanswered = true;
+                continue;
+            }
+        };
+        let message = match message {
             Some(Ok(Message::Binary(message))) => message,
-            Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+            Some(Ok(Message::Pong(_))) => {
+                answers_pings = true;
+                unanswered = false;
+                continue;
+            }
+            Some(Ok(Message::Ping(_))) => continue,
             _ => return Err("relay closed while hosting".into()),
         };
         let Some((Tag::Control, body)) = frame::unwrap(&message) else {
@@ -122,28 +161,61 @@ pub async fn await_pairing(ws: &mut RelayWebSocket) -> Result<Pairing, String> {
         };
         return match Control::from_bytes(body) {
             Some(Control::Paired { session, peer_id, .. }) => Ok(Pairing { session, peer_id }),
-            Some(Control::Error { code }) if code == ERROR_ID_TAKEN => Err(format!(
-                "relay rejected registration ({ERROR_ID_TAKEN}): this ID is registered to another device"
-            )),
-            Some(Control::Error { code }) if code == ERROR_ID_IN_USE => Err(format!(
-                "relay rejected registration ({ERROR_ID_IN_USE}): another computer is online with this ID"
-            )),
-            Some(Control::Error { code }) => Err(format!("relay rejected registration ({code})")),
+            Some(Control::Error { code }) => Err(match registration_refusal(&code) {
+                Some(reason) => format!("relay rejected registration ({code}): {reason}"),
+                None => format!("relay rejected registration ({code})"),
+            }),
             _ => Err("invalid pairing message".into()),
         };
+    }
+}
+
+/// What a relay's refusal code means, in words for the person hosting.
+fn registration_refusal(code: &str) -> Option<&'static str> {
+    Some(match code {
+        ERROR_ID_TAKEN => "this ID is registered to another device",
+        ERROR_ID_IN_USE => "another computer is online with this ID",
+        ERROR_NEW_ID_RATE => "This relay is limiting new devices from your network. OpenDesk keeps trying, but it can take up to an hour. To skip the wait, use your own relay.",
+        ERROR_REGISTRY_FULL => "This relay is full and can't take new devices. Add another relay or use your own.",
+        ERROR_RELAY_BUSY => "This relay is busy or limiting connections from your network. OpenDesk keeps trying.",
+        ERROR_INVALID_REGISTER => "This relay didn't accept this device's registration. Update OpenDesk and check the relay address.",
+        _ => return None,
+    })
+}
+
+fn refusal_code(error: &str) -> Option<&str> {
+    let rest = error.strip_prefix("relay rejected registration (")?;
+    Some(&rest[..rest.find(')')?])
+}
+
+/// The message to show for an [`await_pairing`] error when the relay refused
+/// the registration for a reason that needs no other context. ID conflicts
+/// are left out: callers explain those per relay.
+pub fn refusal_message(error: &str) -> Option<&'static str> {
+    refusal_code(error).filter(|code| ![ERROR_ID_TAKEN, ERROR_ID_IN_USE].contains(code)).and_then(registration_refusal)
+}
+
+/// How long to leave a relay alone after it refused a registration, when
+/// trying again sooner can't help. A relay allows 20 new IDs per network an
+/// hour, so one frees up every 3 minutes.
+pub fn refusal_retry_after(error: &str) -> Option<Duration> {
+    match refusal_code(error)? {
+        ERROR_NEW_ID_RATE => Some(Duration::from_secs(180)),
+        ERROR_REGISTRY_FULL | ERROR_INVALID_REGISTER => Some(Duration::from_secs(600)),
+        _ => None,
     }
 }
 
 /// True when an [`await_pairing`] error means the relay refused the
 /// registration because the ID belongs to a different token.
 pub fn is_id_taken(error: &str) -> bool {
-    error.contains(ERROR_ID_TAKEN)
+    refusal_code(error) == Some(ERROR_ID_TAKEN)
 }
 
 /// True when an [`await_pairing`] error means another live connection with
 /// the same ID and token keeps taking the registration: a copy of this device.
 pub fn is_id_in_use(error: &str) -> bool {
-    error.contains(ERROR_ID_IN_USE)
+    refusal_code(error) == Some(ERROR_ID_IN_USE)
 }
 
 /// Ask the relay to connect this WebSocket to a registered peer.
@@ -167,6 +239,7 @@ pub async fn connect_to(
 #[cfg(test)]
 mod tests {
     use super::select_first_reachable;
+    use std::time::Duration;
 
     /// Regression: release builds once shipped without TLS, so every wss://
     /// relay failed with "TLS support not compiled in". Against a listener
@@ -183,6 +256,67 @@ mod tests {
         let message = error.to_string();
         assert!(!message.contains("TLS support not compiled"), "{message}");
         assert!(!matches!(error, tokio_tungstenite::tungstenite::Error::Url(_)), "{message}");
+    }
+
+    /// A relay that accepted the WebSocket. `answer_pings` reads (and so
+    /// answers pings) until that many pings arrived, then stops reading but
+    /// keeps the socket open, like a path that died without a close.
+    async fn quiet_relay(answer_pings: usize) -> super::RelayWebSocket {
+        use futures_util::StreamExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let mut pings = 0;
+            while pings < answer_pings {
+                match ws.next().await {
+                    Some(Ok(super::Message::Ping(_))) => pings += 1,
+                    Some(Ok(_)) => {}
+                    _ => return,
+                }
+            }
+            std::future::pending::<()>().await;
+            drop(ws);
+        });
+        super::connect(&format!("ws://127.0.0.1:{port}")).await.unwrap()
+    }
+
+    /// Regression: a parked host waited on the socket forever, so after
+    /// sleep or a network change it showed "online" while the relay had
+    /// long dropped it.
+    #[tokio::test(start_paused = true)]
+    async fn a_parked_registration_that_goes_quiet_is_renewed() {
+        let mut ws = quiet_relay(0).await;
+        let started = tokio::time::Instant::now();
+        let result = tokio::time::timeout(super::PARKED_LIMIT * 2, super::await_pairing(&mut ws)).await;
+        assert!(result.expect("await_pairing never gave up").is_err());
+        assert!(started.elapsed() <= super::PARKED_LIMIT + Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn a_relay_that_stops_answering_pings_is_left_early() {
+        let mut ws = quiet_relay(2).await;
+        let started = std::time::Instant::now();
+        let result = super::await_pairing_within(&mut ws, Duration::from_secs(10), Duration::from_millis(200)).await;
+        assert_eq!(result, Err("relay stopped answering while hosting".into()));
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn refusals_explain_themselves_and_rate_limits_back_off() {
+        use protocol::control::*;
+        let refused = |code: &str| format!("relay rejected registration ({code}): ...");
+        assert!(super::refusal_message(&refused(ERROR_NEW_ID_RATE)).unwrap().contains("limiting new devices from your network"));
+        assert_eq!(super::refusal_retry_after(&refused(ERROR_NEW_ID_RATE)), Some(Duration::from_secs(180)));
+        assert!(super::refusal_message(&refused(ERROR_REGISTRY_FULL)).is_some());
+        assert_eq!(super::refusal_retry_after(&refused(ERROR_RELAY_BUSY)), None);
+        // ID conflicts are explained per relay by the caller.
+        assert_eq!(super::refusal_message(&refused(ERROR_ID_TAKEN)), None);
+        assert!(super::is_id_taken(&refused(ERROR_ID_TAKEN)) && !super::is_id_in_use(&refused(ERROR_ID_TAKEN)));
+        // Codes from newer relays stay a generic rejection.
+        assert_eq!(super::refusal_message("relay rejected registration (something_new)"), None);
+        assert_eq!(super::refusal_retry_after("relay closed while hosting"), None);
     }
 
     #[tokio::test]

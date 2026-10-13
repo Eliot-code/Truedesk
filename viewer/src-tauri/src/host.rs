@@ -160,14 +160,19 @@ pub(crate) fn prune_identity_conflicts(app: &AppHandle, relays: Option<&[String]
 ///
 /// Status: "online" when a registration is parked on the relay; "connecting"
 /// (plus one error event per failure streak) while registration is failing.
-/// A healthy registration that the relay expires (its pairing timeout) is
-/// renewed silently so the UI stays "online".
+/// A healthy registration that the relay expires (its pairing timeout), or
+/// that goes quiet after sleep or a network change, is renewed silently so
+/// the UI stays "online". A relay refusal with a known code is shown in
+/// plain words; rate limits wait until the relay can say yes.
 pub(crate) async fn register_host_until_paired(
     app: &AppHandle,
     registration: &mut HostRegistration,
     still_hosting: impl Fn() -> bool,
 ) -> Option<(host_core::relay_client::RelayWebSocket, host_core::relay_client::Pairing)> {
-    use host_core::relay_client::{await_pairing, is_id_in_use, is_id_taken, register_host, settle_registration, REGISTRATION_SETTLE};
+    use host_core::relay_client::{
+        await_pairing, is_id_in_use, is_id_taken, refusal_message, refusal_retry_after, register_host, settle_registration,
+        REGISTRATION_SETTLE,
+    };
     let mut backoff = host_core::reconnect::HostRegistrationBackoff::new();
     let mut online = false;
     // Relays that refused the ID during this loop.
@@ -240,7 +245,21 @@ pub(crate) async fn register_host_until_paired(
                         error
                     }
                     Err(error) => {
-                        backoff.record_failure();
+                        match refusal_retry_after(&error) {
+                            // Try the other relays now; come back to this
+                            // one only once its limit can have cleared.
+                            Some(wait) => {
+                                if !refused.contains(&relay) {
+                                    refused.push(relay);
+                                }
+                                if relay_urls.iter().any(|url| !refused.contains(url)) {
+                                    backoff.record_failure();
+                                } else {
+                                    backoff.record_refusal(wait);
+                                }
+                            }
+                            None => backoff.record_failure(),
+                        }
                         error
                     }
                     Ok(early) => {
@@ -281,7 +300,11 @@ pub(crate) async fn register_host_until_paired(
             continue;
         }
         if online || backoff.consecutive_failures() == 1 {
-            emit(app, "error", ErrorEvent { message: format!("{failure}; retrying host registration") });
+            let message = match refusal_message(&failure) {
+                Some(message) => message.to_owned(),
+                None => format!("{failure}; retrying host registration"),
+            };
+            emit(app, "error", ErrorEvent { message });
             emit_host_status(app, "connecting");
         }
         online = false;

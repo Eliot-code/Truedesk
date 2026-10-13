@@ -48,5 +48,5 @@ windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_
 
 [dev-dependencies]
 relay = { path = "../relay" }
-tokio = { workspace = true, features = ["full"] }
+tokio = { workspace = true, features = ["full", "test-util"] }
 tokio-tungstenite = "0.30"

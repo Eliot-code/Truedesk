@@ -148,6 +148,8 @@ pub fn auth_failure_message(error: &str, after_session: bool) -> String {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HostRegistrationBackoff {
     consecutive_failures: u32,
+    /// Set by [`Self::record_refusal`]: the least the next delay may be.
+    at_least: Duration,
 }
 
 impl HostRegistrationBackoff {
@@ -161,12 +163,20 @@ impl HostRegistrationBackoff {
 
     /// 0 after a healthy registration, then 500ms, 1s, 2s, 4s, 8s, 10s, 10s…
     pub fn delay(&self) -> Duration {
-        host_reregister_delay(self.consecutive_failures)
+        host_reregister_delay(self.consecutive_failures).max(self.at_least)
     }
 
     /// Connecting or registering failed outright.
     pub fn record_failure(&mut self) {
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        self.at_least = Duration::ZERO;
+    }
+
+    /// The relay refused the registration for a reason that won't clear for
+    /// a while, such as its limit on new IDs: wait at least `wait`.
+    pub fn record_refusal(&mut self, wait: Duration) {
+        self.record_failure();
+        self.at_least = wait;
     }
 
     /// A registration was accepted and parked for `parked_for` before the relay
@@ -174,7 +184,7 @@ impl HostRegistrationBackoff {
     /// rejecting the ID) back off; long-lived ones re-register immediately.
     pub fn record_parked_then_closed(&mut self, parked_for: Duration) {
         if parked_for >= HOST_STABLE_REGISTRATION {
-            self.consecutive_failures = 0;
+            *self = Self::new();
         } else {
             self.record_failure();
         }
@@ -182,7 +192,7 @@ impl HostRegistrationBackoff {
 
     /// A viewer paired with this registration.
     pub fn record_paired(&mut self) {
-        self.consecutive_failures = 0;
+        *self = Self::new();
     }
 }
 
@@ -332,5 +342,19 @@ mod tests {
         backoff.record_failure();
         backoff.record_paired();
         assert_eq!(backoff.consecutive_failures(), 0);
+    }
+
+    #[test]
+    fn a_rate_limited_host_waits_out_the_limit() {
+        let mut backoff = HostRegistrationBackoff::new();
+        backoff.record_refusal(Duration::from_secs(180));
+        assert_eq!(backoff.delay(), Duration::from_secs(180));
+        assert_eq!(backoff.consecutive_failures(), 1);
+        // Another relay failing in the ordinary way goes back to the schedule.
+        backoff.record_failure();
+        assert_eq!(backoff.delay(), Duration::from_secs(1));
+        backoff.record_refusal(Duration::from_secs(180));
+        backoff.record_paired();
+        assert_eq!(backoff.delay(), Duration::ZERO);
     }
 }
