@@ -70,6 +70,7 @@ export const selectMonitor = (id: number) => invoke<void>("select_monitor", { id
 export const requestKeyframe = () => invoke<void>("request_keyframe");
 export const addVirtualDisplay = (width: number, height: number, hidpi: boolean) => invoke<void>("add_virtual_display", { width, height, hidpi });
 export const removeVirtualDisplay = (id: number) => invoke<void>("remove_virtual_display", { id });
+export const sendSecureAttention = () => invoke<void>("send_secure_attention");
 export const setAllowVirtualDisplays = (enabled: boolean) => invoke<void>("set_allow_virtual_displays", { enabled });
 /** Windows' virtual display driver (Amyuni's): `applies` only on 64-bit Windows; `license` is Amyuni's, shown before installing. */
 export interface DisplayDriver { applies: boolean; installed: boolean; license: string }
