@@ -49,7 +49,8 @@ anything in time. Ask someone at the host to watch for it, or set up
 The host accepted, but it couldn't capture its screen. On the host:
 
 - **No display.** A computer with no monitor connected (or with the display
-  off) may have nothing to capture. Connect a monitor or turn the display on.
+  off) may have nothing to capture. Connect a monitor or an HDMI dummy plug,
+  or turn on [virtual displays](/docs/virtual-displays/).
 - **macOS**: check that **Screen Recording** is allowed for OpenDesk, then
   restart OpenDesk. See the next section if it already looks allowed.
 - **Linux**: approve the screen-sharing request from the desktop portal when

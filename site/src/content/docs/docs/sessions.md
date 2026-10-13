@@ -11,7 +11,7 @@ across the top. From left to right:
 | Dot and ID | The host you're connected to. The dot turns amber while reconnecting. |
 | **Direct** / **Relayed** badge | How the video travels, and the round trip in milliseconds. See [below](#direct-or-relayed). |
 | **Fullscreen** | Fills the screen with the remote desktop. Press it again to leave. |
-| Monitor picker | Appears when the host has more than one display. Lists each one with its resolution, and marks the primary. |
+| Monitor picker | Lists the host's displays with their resolution and marks the primary. **Add display…** adds a [virtual display](/docs/virtual-displays/) when the host allows it. |
 | **Clipboard** | Turns clipboard sync on or off. It starts off. |
 | **Sound** / **Muted** | Mutes or unmutes the host's sound on your side. |
 | **Files** | Opens the file transfer panel. |

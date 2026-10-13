@@ -36,6 +36,7 @@ export default defineConfig({
         "docs/sessions",
         "docs/unattended",
         "docs/browser-viewer",
+        "docs/virtual-displays",
         "docs/self-hosting",
         "docs/security",
         "docs/updates",
