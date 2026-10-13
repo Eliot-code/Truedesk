@@ -10,7 +10,7 @@
 
 use crate::filexfer::FileSource;
 use async_trait::async_trait;
-use protocol::{clipboard::ClipboardMsg, datamsg::DataMsg, filexfer::FileMsg};
+use protocol::{chat::ChatMsg, clipboard::ClipboardMsg, datamsg::DataMsg, filexfer::FileMsg};
 use std::{collections::HashMap, sync::{Arc, Mutex, MutexGuard}};
 use tokio::sync::mpsc;
 
@@ -138,14 +138,16 @@ impl FileRouter {
 /// Open, decode and dispatch every inbound Data frame until the channel
 /// closes. Undecryptable, undecodable or unexpected frames are logged and
 /// skipped; they never end the dispatch (and so never end the session).
-pub async fn dispatch_data<O, C>(
+pub async fn dispatch_data<O, C, H>(
     mut incoming: mpsc::Receiver<Vec<u8>>,
     mut open: O,
     router: Arc<FileRouter>,
     mut on_clipboard: C,
+    mut on_chat: H,
 ) where
     O: FnMut(&[u8]) -> Option<Vec<u8>>,
     C: FnMut(ClipboardMsg),
+    H: FnMut(ChatMsg),
 {
     while let Some(sealed) = incoming.recv().await {
         let Some(plaintext) = open(&sealed) else {
@@ -155,6 +157,7 @@ pub async fn dispatch_data<O, C>(
         match DataMsg::from_bytes(&plaintext) {
             Some(DataMsg::FileTransfer(message)) => router.route(message).await,
             Some(DataMsg::Clipboard(message)) => on_clipboard(message),
+            Some(DataMsg::Chat(message)) => on_chat(message),
             None => log::debug!("dropping an unrecognized Data message"),
         }
     }
@@ -211,7 +214,7 @@ mod tests {
             let (clip_tx, clipboard) = mpsc::unbounded_channel();
             tokio::spawn(dispatch_data(incoming, |bytes: &[u8]| Some(bytes.to_vec()), Arc::clone(&router), move |message| {
                 let _ = clip_tx.send(message);
-            }));
+            }, |_chat| {}));
             Peer { router, offers, out, clipboard }
         };
         let a = make(a_in, a_out.clone());
