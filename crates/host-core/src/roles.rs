@@ -1769,7 +1769,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     run_host_session_with_data_and_accept_and_2fa_with_factory(
-        ws, password, ice_session, ScapCapturer::new,
+        ws, password, ice_session, ScapCapturer::create,
         default_encoder,
         default_injector, false, false, None, || async { true }, None, SessionTimings::default(), HostDisplays::default(),
     )
@@ -1842,7 +1842,7 @@ where
         ws,
         password,
         ice_session,
-        ScapCapturer::new,
+        ScapCapturer::create,
         default_encoder,
         default_injector,
         unattended_enabled,

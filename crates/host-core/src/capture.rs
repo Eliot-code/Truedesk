@@ -7,6 +7,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc as std_mpsc, Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "windows")]
+mod secure_desktop;
+
 // Scap 0.0.8 supplies the platform engines here: ScreenCaptureKit on macOS,
 // Windows.Graphics.Capture on Windows, and PipeWire/portal on Linux. The
 // Windows and Linux branches are compile-tested only on their respective CI
@@ -54,6 +57,15 @@ pub trait ScreenCapturer {
 
     /// The displays, when they changed since the last call.
     fn monitors_changed(&mut self) -> Option<Vec<MonitorInfo>> { None }
+}
+
+impl<T: ScreenCapturer + ?Sized> ScreenCapturer for Box<T> {
+    fn next_frame(&mut self) -> Option<RawFrame> { (**self).next_frame() }
+    fn wait_frame(&mut self, timeout: Duration) -> Option<RawFrame> { (**self).wait_frame(timeout) }
+    fn monitors(&self) -> Vec<MonitorInfo> { (**self).monitors() }
+    fn select_monitor(&mut self, id: u32) -> bool { (**self).select_monitor(id) }
+    fn stalled_since(&self) -> Option<Instant> { (**self).stalled_since() }
+    fn monitors_changed(&mut self) -> Option<Vec<MonitorInfo>> { (**self).monitors_changed() }
 }
 
 /// How long the capture thread waits for a frame before it checks for
@@ -113,7 +125,12 @@ pub struct ScapCapturer {
 }
 
 impl ScapCapturer {
-    pub fn new() -> Option<Self> {
+    pub fn create() -> Option<Box<dyn ScreenCapturer + Send>> {
+        #[cfg(target_os = "windows")]
+        if crate::secure_attention::available() {
+            return secure_desktop::SecureDesktopCapturer::new()
+                .map(|capturer| Box::new(capturer) as Box<dyn ScreenCapturer + Send>);
+        }
         if !scap::is_supported() {
             return None;
         }
@@ -142,7 +159,7 @@ impl ScapCapturer {
             let _ = worker.join();
             return None;
         }
-        Some(Self { latest, commands: Some(commands), worker: Some(worker) })
+        Some(Box::new(Self { latest, commands: Some(commands), worker: Some(worker) }))
     }
 }
 

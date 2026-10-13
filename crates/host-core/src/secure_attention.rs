@@ -26,20 +26,34 @@ impl std::fmt::Display for SecureAttentionError {
 
 impl std::error::Error for SecureAttentionError {}
 
+#[cfg(target_os = "windows")]
+fn helper_active() -> bool {
+    crate::windows_service::helper_active()
+}
+
 /// Whether this host can deliver the secure attention sequence. The host only
-/// offers the viewer a Ctrl+Alt+Del control when this is true. It stays false
-/// until the sign-in-screen helper service exists (see `deliver`).
+/// offers the viewer a Ctrl+Alt+Del control when it is the helper-launched
+/// host on Windows.
 pub fn available() -> bool {
-    false
+    #[cfg(target_os = "windows")]
+    { helper_active() }
+    #[cfg(not(target_os = "windows"))]
+    { false }
 }
 
 /// Deliver Ctrl+Alt+Del on this host. Succeeds only where OpenDesk can reach
 /// the secure attention sequence; everywhere else it returns [`Unsupported`]
 /// and the caller simply ignores the request.
 pub fn deliver() -> Result<(), SecureAttentionError> {
-    // Scaffold: the Windows path needs the sign-in-screen helper service,
-    // which is not built yet. Until then every platform reports Unsupported.
-    Err(SecureAttentionError::Unsupported)
+    #[cfg(target_os = "windows")]
+    {
+        if !helper_active() {
+            return Err(SecureAttentionError::Unsupported);
+        }
+        return crate::windows_service::send_secure_attention();
+    }
+    #[cfg(not(target_os = "windows"))]
+    { Err(SecureAttentionError::Unsupported) }
 }
 
 #[cfg(test)]
@@ -47,7 +61,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn deliver_is_unsupported_until_the_service_exists() {
+    fn non_windows_has_no_secure_attention() {
+        #[cfg(not(target_os = "windows"))]
         assert_eq!(deliver(), Err(SecureAttentionError::Unsupported));
     }
 }
