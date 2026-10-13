@@ -79,7 +79,7 @@ button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-
 
 /* Home additions */
 .topbar-actions { display: flex; align-items: center; gap: 16px; }
-.unattended-pending { margin: -6px 0 0; }
+.unattended-pending, .start-at-sign-in-hint { margin: -6px 0 0; }
 .twofa-enroll { display: grid; grid-template-columns: 148px 1fr; gap: 16px; padding: 14px; background: #0f131a; border: 1px solid var(--border); border-radius: 8px; }
 .twofa-enroll__details { display: grid; gap: 10px; align-content: start; min-width: 0; }.twofa-enroll__details .caption { margin: 0; }
 .qr-code { width: 148px; height: 148px; border-radius: 6px; }

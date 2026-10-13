@@ -1,6 +1,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { disable as disableAutostart, enable as enableAutostart, isEnabled as isAutostartEnabled } from "@tauri-apps/plugin-autostart";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
 export type Status = "offline" | "online" | "connecting" | "in_session";
@@ -46,6 +47,9 @@ export const permissionStatus = () => invoke<PermissionStatus>("permission_statu
 export const openPermissionSettings = (which: "screen" | "accessibility") => invoke<void>("open_permission_settings", { which });
 // Tauri v2 exposes Rust snake_case params to JS as camelCase (peerId/targetId).
 export const respondToRequest = (peer_id: string, allow: boolean, always: boolean) => invoke<void>("respond_to_request", { peerId: peer_id, allow, always });
+/** Read from the OS sign-in entry each time; there is no saved copy in our config. */
+export const getStartAtSignIn = () => isAutostartEnabled();
+export const setStartAtSignIn = (enabled: boolean) => enabled ? enableAutostart() : disableAutostart();
 export const startHosting = () => invoke<void>("start_hosting");
 export const stopHosting = () => invoke<void>("stop_hosting");
 export const connect = (target_id: string, password: string, auth_code?: string) => invoke<void>("connect", auth_code ? { targetId: target_id, password, authCode: auth_code } : { targetId: target_id, password });

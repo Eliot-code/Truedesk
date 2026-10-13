@@ -7,7 +7,7 @@ import { NotifyContext } from "../lib/notify";
 
 vi.mock("../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
-  return { ...actual, getIdentity: vi.fn(), getConfig: vi.fn(), getUnattendedStatus: vi.fn(), listContacts: vi.fn(), listAllowed: vi.fn(), startHosting: vi.fn(), connect: vi.fn(), setUnattendedAccess: vi.fn(), setUnattended2fa: vi.fn(), confirmUnattended2fa: vi.fn(), rotatePassword: vi.fn(), addContact: vi.fn() };
+  return { ...actual, getIdentity: vi.fn(), getConfig: vi.fn(), getUnattendedStatus: vi.fn(), listContacts: vi.fn(), listAllowed: vi.fn(), startHosting: vi.fn(), connect: vi.fn(), setUnattendedAccess: vi.fn(), setUnattended2fa: vi.fn(), confirmUnattended2fa: vi.fn(), rotatePassword: vi.fn(), addContact: vi.fn(), getStartAtSignIn: vi.fn(), setStartAtSignIn: vi.fn() };
 });
 describe("Home", () => {
   afterEach(cleanup);
@@ -18,6 +18,7 @@ describe("Home", () => {
     vi.mocked(api.listContacts).mockResolvedValue([]);
     vi.mocked(api.listAllowed).mockResolvedValue([]);
     vi.mocked(api.startHosting).mockResolvedValue(undefined); vi.mocked(api.connect).mockResolvedValue(undefined);
+    vi.mocked(api.getStartAtSignIn).mockResolvedValue(false); vi.mocked(api.setStartAtSignIn).mockResolvedValue(undefined);
   });
   it("renders the identity returned by the backend", async () => { render(<Home status="online" onConnect={vi.fn()} incomingRequest={null} onDismissRequest={vi.fn()} />); expect(await screen.findByText("123456789")).toBeTruthy(); });
   it("reveals the session password on demand", async () => {
@@ -129,6 +130,57 @@ describe("Home", () => {
     render(<Home status="online" onConnect={vi.fn()} />);
     await screen.findByText("123456789");
     expect((screen.getByRole("checkbox", { name: "Require 2FA code" }) as HTMLInputElement).disabled).toBe(true);
+  });
+
+  describe("start at sign-in", () => {
+    const toggle = () => screen.getByRole("checkbox", { name: "Start OpenDesk when I sign in" }) as HTMLInputElement;
+
+    it("stays disabled with a hint until unattended access is saved", async () => {
+      render(<Home status="online" onConnect={vi.fn()} />);
+      expect(await screen.findByText("Turn on and save unattended access first.")).toBeTruthy();
+      expect(toggle().checked).toBe(false);
+      expect(toggle().disabled).toBe(true);
+    });
+
+    it("turns on through the OS once unattended access is ready", async () => {
+      vi.mocked(api.getUnattendedStatus).mockResolvedValue({ enabled: true, has_password: true, twofa_enabled: false });
+      render(<Home status="online" onConnect={vi.fn()} />);
+      await waitFor(() => expect(toggle().disabled).toBe(false));
+      fireEvent.click(toggle());
+      await waitFor(() => expect(toggle().checked).toBe(true));
+      expect(api.setStartAtSignIn).toHaveBeenCalledWith(true);
+      expect(screen.getByText(/quit from the tray icon/)).toBeTruthy();
+    });
+
+    it("shows the state the OS reports and can always be turned off", async () => {
+      vi.mocked(api.getStartAtSignIn).mockResolvedValue(true);
+      render(<Home status="online" onConnect={vi.fn()} />);
+      await waitFor(() => expect(toggle().checked).toBe(true));
+      expect(screen.getByText(/will just open its window at sign-in/)).toBeTruthy();
+      expect(toggle().disabled).toBe(false);
+      fireEvent.click(toggle());
+      await waitFor(() => expect(toggle().checked).toBe(false));
+      expect(api.setStartAtSignIn).toHaveBeenCalledWith(false);
+    });
+
+    it("keeps the old state and reports an error when the OS refuses", async () => {
+      vi.mocked(api.getUnattendedStatus).mockResolvedValue({ enabled: true, has_password: true, twofa_enabled: false });
+      vi.mocked(api.setStartAtSignIn).mockRejectedValue("permission denied");
+      const notify = vi.fn();
+      render(<NotifyContext.Provider value={notify}><Home status="online" onConnect={vi.fn()} /></NotifyContext.Provider>);
+      await waitFor(() => expect(toggle().disabled).toBe(false));
+      fireEvent.click(toggle());
+      await waitFor(() => expect(notify).toHaveBeenCalled());
+      expect(toggle().checked).toBe(false);
+    });
+
+    it("is disabled when the OS state can't be read", async () => {
+      vi.mocked(api.getUnattendedStatus).mockResolvedValue({ enabled: true, has_password: true, twofa_enabled: false });
+      vi.mocked(api.getStartAtSignIn).mockRejectedValue("unsupported");
+      render(<Home status="online" onConnect={vi.fn()} />);
+      await screen.findByText("123456789");
+      expect(toggle().disabled).toBe(true);
+    });
   });
 
   it("confirms a rotated password", async () => {
