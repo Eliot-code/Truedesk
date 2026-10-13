@@ -6,6 +6,8 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
 export type Status = "offline" | "online" | "connecting" | "in_session";
 export interface Identity { id: string; password: string }
+/** A relay refusing this device's ID: another device's ID there ("taken"), or a copy of this device online with it ("in_use"). */
+export interface IdentityConflict { relay: string; kind: "taken" | "in_use"; message: string }
 export interface AppConfig { relay_url: string; relay_urls: string[]; recent_ids: string[]; clipboard_sync: boolean }
 /** `ready` means the keyring answered and connections skip approval; `problem` says why not when it is on. */
 export interface UnattendedStatus { enabled: boolean; has_password: boolean; twofa_enabled: boolean; ready: boolean; problem: string | null }
@@ -28,6 +30,9 @@ export interface LinkStats { path: "direct" | "relay"; rtt_ms: number | null }
 
 export const getIdentity = () => invoke<Identity>("get_identity");
 export const rotatePassword = () => invoke<{ password: string }>("rotate_password");
+/** Replaces this device's ID and registration token; resolves to the new ID. */
+export const resetIdentity = () => invoke<string>("reset_identity");
+export const getIdentityConflicts = () => invoke<IdentityConflict[]>("get_identity_conflicts");
 export const getConfig = () => invoke<AppConfig>("get_config");
 export const listContacts = () => invoke<Contact[]>("list_contacts");
 export const listAllowed = () => invoke<string[]>("list_allowed");
@@ -124,3 +129,4 @@ export const onFileDone = (handler: (payload: FileDone) => void) => on("file_don
 export const onFileError = (handler: (payload: FileError) => void) => on("file_error", handler);
 export const onPasswordRotated = (handler: (payload: { password: string }) => void) => on("password_rotated", handler);
 export const onIdentityChanged = (handler: (payload: { id: string }) => void) => on("identity_changed", handler);
+export const onIdentityConflicts = (handler: (payload: { conflicts: IdentityConflict[] }) => void) => on("identity_conflicts", handler);

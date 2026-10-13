@@ -7,7 +7,7 @@ import { NotifyContext } from "../lib/notify";
 
 vi.mock("../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
-  return { ...actual, getIdentity: vi.fn(), getConfig: vi.fn(), getUnattendedStatus: vi.fn(), listContacts: vi.fn(), listAllowed: vi.fn(), startHosting: vi.fn(), closeKeepsRunning: vi.fn(), quitApp: vi.fn(), connect: vi.fn(), setUnattendedAccess: vi.fn(), setUnattended2fa: vi.fn(), confirmUnattended2fa: vi.fn(), rotatePassword: vi.fn(), addContact: vi.fn(), getStartAtSignIn: vi.fn(), setStartAtSignIn: vi.fn(), onIdentityChanged: vi.fn() };
+  return { ...actual, getIdentity: vi.fn(), getConfig: vi.fn(), getUnattendedStatus: vi.fn(), listContacts: vi.fn(), listAllowed: vi.fn(), startHosting: vi.fn(), closeKeepsRunning: vi.fn(), quitApp: vi.fn(), connect: vi.fn(), setUnattendedAccess: vi.fn(), setUnattended2fa: vi.fn(), confirmUnattended2fa: vi.fn(), rotatePassword: vi.fn(), addContact: vi.fn(), getStartAtSignIn: vi.fn(), setStartAtSignIn: vi.fn(), onIdentityChanged: vi.fn(), resetIdentity: vi.fn(), getIdentityConflicts: vi.fn(), onIdentityConflicts: vi.fn() };
 });
 describe("Home", () => {
   afterEach(cleanup);
@@ -21,6 +21,9 @@ describe("Home", () => {
     vi.mocked(api.getStartAtSignIn).mockResolvedValue(false); vi.mocked(api.setStartAtSignIn).mockResolvedValue(undefined);
     vi.mocked(api.onIdentityChanged).mockResolvedValue(() => {});
     vi.mocked(api.closeKeepsRunning).mockResolvedValue(false); vi.mocked(api.quitApp).mockResolvedValue(undefined);
+    vi.mocked(api.getIdentityConflicts).mockResolvedValue([]);
+    vi.mocked(api.onIdentityConflicts).mockResolvedValue(() => {});
+    vi.mocked(api.resetIdentity).mockReset();
   });
   it("renders the identity returned by the backend", async () => { render(<Home status="online" onConnect={vi.fn()} incomingRequest={null} onDismissRequest={vi.fn()} />); expect(await screen.findByText("123456789")).toBeTruthy(); });
   it("shows a replacement ID when the relay says the old one is taken", async () => {
@@ -48,6 +51,31 @@ describe("Home", () => {
     render(<Home status="online" onConnect={vi.fn()} />);
     fireEvent.click(await screen.findByRole("button", { name: "Quit OpenDesk" }));
     expect(api.quitApp).toHaveBeenCalledOnce();
+  it("explains relays that refuse the ID", async () => {
+    vi.mocked(api.getIdentityConflicts).mockResolvedValue([{ relay: "wss://a", kind: "taken", message: "ID 123456789 now belongs to another device on wss://a." }]);
+    render(<Home status="connecting" onConnect={vi.fn()} />);
+    expect((await screen.findByRole("alert")).textContent).toContain("now belongs to another device");
+    const handler = vi.mocked(api.onIdentityConflicts).mock.calls[0][0];
+    act(() => handler({ conflicts: [{ relay: "wss://b", kind: "in_use", message: "Another computer is online with ID 123456789 on wss://b." }] }));
+    expect(screen.getByRole("alert").textContent).toContain("Another computer is online");
+    act(() => handler({ conflicts: [] }));
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+  it("gets a new ID only after the user confirms", async () => {
+    vi.mocked(api.resetIdentity).mockResolvedValue("555666777");
+    render(<Home status="online" onConnect={vi.fn()} />);
+    expect(await screen.findByText("123456789")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Get a new ID" }));
+    const confirm = screen.getByRole("group", { name: "Confirm new ID" });
+    expect(confirm.textContent).toContain("Anyone who saved 123456789");
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("group", { name: "Confirm new ID" })).toBeNull();
+    expect(api.resetIdentity).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Get a new ID" }));
+    fireEvent.click(screen.getByRole("button", { name: "Get new ID" }));
+    expect(await screen.findByText("555666777")).toBeTruthy();
+    expect(api.resetIdentity).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("group", { name: "Confirm new ID" })).toBeNull();
   });
   it("reveals the session password on demand", async () => {
     render(<Home status="online" onConnect={vi.fn()} incomingRequest={null} onDismissRequest={vi.fn()} />);
