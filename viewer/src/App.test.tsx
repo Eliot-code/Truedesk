@@ -18,6 +18,9 @@ const { listeners, mocks } = vi.hoisted(() => {
     permissionStatus: vi.fn(), connect: vi.fn(), disconnect: vi.fn(),
     getIdentity: vi.fn(), getConfig: vi.fn(), getUnattendedStatus: vi.fn(), listContacts: vi.fn(), listAllowed: vi.fn(), startHosting: vi.fn(), getWindowsServiceStatus: vi.fn(), getStartAtSignIn: vi.fn(), getDisplayDriver: vi.fn(), closeKeepsRunning: vi.fn(),
     sendInput: vi.fn(), respondToRequest: vi.fn(), respondFile: vi.fn(),
+    getViewerPermissions: () => Promise.resolve({ control: true, files: true, clipboard: true, audio: true }),
+    setViewerPermission: vi.fn(() => Promise.resolve()), disconnectViewer: vi.fn(() => Promise.resolve()),
+    onViewerPermissions: on("viewer_permissions"), onActivity: on("activity"),
   };
   return { listeners, mocks };
 });

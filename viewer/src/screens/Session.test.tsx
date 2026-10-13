@@ -2,7 +2,7 @@
 import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { onVirtualDisplaySupport, onVirtualDisplayAdded, onVirtualDisplayRefused, addVirtualDisplay, removeVirtualDisplay, startVideo, requestKeyframe, closeDecoder, onAudioFrame, onMonitorList, onLinkStats, onFileOffer, onFileProgress, onFileDone, onFileError, onFileDrop, pickFile, startRecording, appendRecording, finishRecording, sendFile, respondFile, sendInput, selectMonitor, setAudioMuted, setClipboardSync, getConfig, onChatMessage, sendChat, onSecureAttentionSupport, sendSecureAttention, decode } = vi.hoisted(() => ({
+const { onVirtualDisplaySupport, onVirtualDisplayAdded, onVirtualDisplayRefused, addVirtualDisplay, removeVirtualDisplay, startVideo, requestKeyframe, closeDecoder, onAudioFrame, onMonitorList, onLinkStats, onFileOffer, onFileProgress, onFileDone, onFileError, onFileDrop, pickFile, startRecording, appendRecording, finishRecording, sendFile, respondFile, sendInput, selectMonitor, setAudioMuted, setClipboardSync, getConfig, onChatMessage, sendChat, onSecureAttentionSupport, sendSecureAttention, getViewerPermissions, setViewerPermission, disconnectViewer, onViewerPermissions, onActivity, decode } = vi.hoisted(() => ({
   onVirtualDisplaySupport: vi.fn<(handler: (payload: { max: number }) => void) => Promise<() => void>>(() => Promise.resolve(vi.fn())),
   onVirtualDisplayAdded: vi.fn<(handler: (payload: { id: number }) => void) => Promise<() => void>>(() => Promise.resolve(vi.fn())),
   onVirtualDisplayRefused: vi.fn<(handler: (payload: { code: string }) => void) => Promise<() => void>>(() => Promise.resolve(vi.fn())),
@@ -34,10 +34,15 @@ const { onVirtualDisplaySupport, onVirtualDisplayAdded, onVirtualDisplayRefused,
   sendChat: vi.fn(() => Promise.resolve()),
   onSecureAttentionSupport: vi.fn<(handler: () => void) => Promise<() => void>>(() => Promise.resolve(vi.fn())),
   sendSecureAttention: vi.fn(() => Promise.resolve()),
+  getViewerPermissions: vi.fn(() => Promise.resolve({ control: true, files: true, clipboard: true, audio: true })),
+  setViewerPermission: vi.fn(() => Promise.resolve()),
+  disconnectViewer: vi.fn(() => Promise.resolve()),
+  onViewerPermissions: vi.fn<(handler: (payload: { control: boolean; files: boolean; clipboard: boolean; audio: boolean }) => void) => Promise<() => void>>(() => Promise.resolve(vi.fn())),
+  onActivity: vi.fn<(handler: (payload: { at: number; kind: string; detail: string }) => void) => Promise<() => void>>(() => Promise.resolve(vi.fn())),
   decode: vi.fn(),
 }));
 
-vi.mock("../lib/api", () => ({ onVirtualDisplaySupport, onVirtualDisplayAdded, onVirtualDisplayRefused, addVirtualDisplay, removeVirtualDisplay, startVideo, requestKeyframe, onAudioFrame, onMonitorList, onLinkStats, onFileOffer, onFileProgress, onFileDone, onFileError, onFileDrop, pickFile, startRecording, appendRecording, finishRecording, sendFile, respondFile, sendInput, selectMonitor, setAudioMuted, setClipboardSync, getConfig, onChatMessage, sendChat, onSecureAttentionSupport, sendSecureAttention }));
+vi.mock("../lib/api", () => ({ onVirtualDisplaySupport, onVirtualDisplayAdded, onVirtualDisplayRefused, addVirtualDisplay, removeVirtualDisplay, startVideo, requestKeyframe, onAudioFrame, onMonitorList, onLinkStats, onFileOffer, onFileProgress, onFileDone, onFileError, onFileDrop, pickFile, startRecording, appendRecording, finishRecording, sendFile, respondFile, sendInput, selectMonitor, setAudioMuted, setClipboardSync, getConfig, onChatMessage, sendChat, onSecureAttentionSupport, sendSecureAttention, getViewerPermissions, setViewerPermission, disconnectViewer, onViewerPermissions, onActivity }));
 vi.mock("../lib/decode", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/decode")>()),
   makeDecoder: vi.fn(() => ({ push: decode, close: closeDecoder })),
@@ -200,13 +205,24 @@ describe("Session viewer transport", () => {
 });
 
 describe("Session host role", () => {
-  afterEach(cleanup);
+  afterEach(() => { cleanup(); setViewerPermission.mockClear(); disconnectViewer.mockClear(); });
 
-  it("shows only the timer, clipboard toggle and Disconnect", () => {
+  it("shows the toolbar plus the host control panel", () => {
     const view = render(<Session remoteId="123" role="host" onDisconnect={vi.fn()} />);
     expect(view.container.querySelector("canvas")).toBeNull();
-    expect(view.queryByLabelText("File transfer")).toBeNull();
-    expect(view.getAllByRole("button").map((button) => button.getAttribute("aria-label") ?? button.textContent)).toEqual(["Sync clipboard", "Disconnect"]);
+    // No viewer-side file transfer drawer for the host.
+    expect(view.container.querySelector(".file-transfer")).toBeNull();
+    expect(view.getAllByRole("button").map((button) => button.getAttribute("aria-label") ?? button.textContent)).toEqual(["Disconnect viewer", "Sync clipboard", "Disconnect"]);
     expect(view.getByLabelText("Session timer")).toBeTruthy();
+    expect(view.getByLabelText("Viewer controls")).toBeTruthy();
+  });
+
+  it("enforces a permission change and disconnects the viewer", async () => {
+    const view = render(<Session remoteId="123" role="host" onDisconnect={vi.fn()} />);
+    await waitFor(() => expect(getViewerPermissions).toHaveBeenCalled());
+    fireEvent.click(view.getByLabelText("Keyboard & mouse"));
+    expect(setViewerPermission).toHaveBeenCalledWith("control", false);
+    fireEvent.click(view.getByText("Disconnect viewer"));
+    expect(disconnectViewer).toHaveBeenCalledOnce();
   });
 });

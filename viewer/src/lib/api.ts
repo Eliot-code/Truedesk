@@ -29,6 +29,11 @@ export interface TotpEnrollment { uri: string; secret: string; qr_width: number;
 export interface MonitorInfo { id: number; name: string; width: number; height: number; is_primary: boolean; is_virtual?: boolean }
 /** Media path of a viewer session and its measured round trip; `rtt_ms` is null until there is a real sample. */
 export interface LinkStats { path: "direct" | "relay"; rtt_ms: number | null }
+/** Host-enforced capabilities for the connected viewer; all default to enabled and reset each session. */
+export interface ViewerPermissions { control: boolean; files: boolean; clipboard: boolean; audio: boolean }
+export type Capability = keyof ViewerPermissions;
+/** One line in the host's session activity log; `at` is Unix milliseconds. */
+export interface Activity { at: number; kind: string; detail: string }
 
 export const getIdentity = () => invoke<Identity>("get_identity");
 export const rotatePassword = () => invoke<{ password: string }>("rotate_password");
@@ -104,6 +109,11 @@ export function startVideo(handler: (message: ArrayBuffer) => void): () => void 
 export const sendChat = (text: string) => invoke<void>("send_chat", { text });
 export const setClipboardSync = (enabled: boolean) => invoke<void>("set_clipboard_sync", { enabled });
 export const setAudioMuted = (muted: boolean) => invoke<void>("set_audio_muted", { muted });
+/** Host-enforced viewer permissions for the current session. */
+export const getViewerPermissions = () => invoke<ViewerPermissions>("get_viewer_permissions");
+export const setViewerPermission = (capability: Capability, allowed: boolean) => invoke<void>("set_viewer_permission", { capability, allowed });
+/** Ends the current viewer session but keeps hosting (re-registers for the next viewer). */
+export const disconnectViewer = () => invoke<void>("disconnect_viewer");
 export const sendFile = (path: string) => invoke<number>("send_file", { path });
 /** Native file picker; resolves to the chosen path or null when cancelled. */
 export const pickFile = async (): Promise<string | null> => {
@@ -158,3 +168,7 @@ export const onFileError = (handler: (payload: FileError) => void) => on("file_e
 export const onPasswordRotated = (handler: (payload: { password: string }) => void) => on("password_rotated", handler);
 export const onIdentityChanged = (handler: (payload: { id: string }) => void) => on("identity_changed", handler);
 export const onIdentityConflicts = (handler: (payload: { conflicts: IdentityConflict[] }) => void) => on("identity_conflicts", handler);
+/** Host-enforced viewer permissions changed; keeps the control panel in sync. */
+export const onViewerPermissions = (handler: (payload: ViewerPermissions) => void) => on("viewer_permissions", handler);
+/** A new line for the host's session activity log. */
+export const onActivity = (handler: (payload: Activity) => void) => on("activity", handler);
