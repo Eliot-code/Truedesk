@@ -38,6 +38,7 @@ export default function Session({ remoteId, role, status = "in_session", onDisco
   const recordingStartedAtRef = useRef<number | undefined>(undefined);
   const [monitors, setMonitors] = useState<api.MonitorInfo[]>([]);
   const [selectedMonitor, setSelectedMonitor] = useState<number>();
+  const [link, setLink] = useState<api.LinkStats>();
   const toggleClipboardSync = (enabled: boolean) => {
     setClipboardSync(enabled);
     void api.setClipboardSync(enabled).catch((error: unknown) => { setClipboardSync(!enabled); notify(friendlyError(error)); });
@@ -59,6 +60,17 @@ export default function Session({ remoteId, role, status = "in_session", onDisco
     void listener.then((unlisten) => { stop = unlisten; });
     return () => { if (stop) stop(); else void listener.then((unlisten) => unlisten()); };
   }, [role]);
+
+  useEffect(() => {
+    if (role !== "viewer") return;
+    let stop: (() => void) | undefined;
+    const listener = api.onLinkStats(setLink);
+    void listener.then((unlisten) => { stop = unlisten; });
+    return () => { if (stop) stop(); else void listener.then((unlisten) => unlisten()); };
+  }, [role]);
+
+  // A reconnect may land on the other path; show nothing until it reports.
+  useEffect(() => { if (status !== "in_session") setLink(undefined); }, [status]);
 
   const chooseMonitor = (id: number) => {
     setSelectedMonitor(id);
@@ -185,7 +197,7 @@ export default function Session({ remoteId, role, status = "in_session", onDisco
     <main className={`session-screen session-screen--${role}`}>
       {role === "viewer" && <canvas ref={canvasRef} className="session-canvas" tabIndex={0} aria-label="Remote screen" />}
       {role === "host" && <div className="session-host-overlay"><span className="eyebrow">OPENDESK · SECURE SESSION</span><h1>You are being controlled by {remoteId}</h1><p>Your screen is shared for this session.</p></div>}
-      <Toolbar remoteId={remoteId} role={role} status={status} monitors={monitors} selectedMonitor={selectedMonitor} onMonitorChange={chooseMonitor} clipboardSync={clipboardSync} onClipboardSyncChange={toggleClipboardSync} audioMuted={audioMuted} onAudioMutedChange={toggleAudioMuted} recordingActive={recordingActive} recordingElapsed={recordingElapsed} onRecordingToggle={() => void toggleRecording()} filesOpen={filesOpen} onFilesToggle={() => setFilesOpen((open) => !open)} onDisconnect={onDisconnect} />
+      <Toolbar remoteId={remoteId} role={role} status={status} link={link} monitors={monitors} selectedMonitor={selectedMonitor} onMonitorChange={chooseMonitor} clipboardSync={clipboardSync} onClipboardSyncChange={toggleClipboardSync} audioMuted={audioMuted} onAudioMutedChange={toggleAudioMuted} recordingActive={recordingActive} recordingElapsed={recordingElapsed} onRecordingToggle={() => void toggleRecording()} filesOpen={filesOpen} onFilesToggle={() => setFilesOpen((open) => !open)} onDisconnect={onDisconnect} />
       {role === "viewer" && <FileTransfer open={filesOpen} onOpenChange={onFilesOpenChange} />}
     </main>
   );

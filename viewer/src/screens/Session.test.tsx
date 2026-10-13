@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { startVideo, requestKeyframe, closeDecoder, onAudioFrame, onMonitorList, onFileOffer, onFileProgress, onFileDone, onFileError, onFileDrop, pickFile, startRecording, appendRecording, finishRecording, sendFile, respondFile, sendInput, selectMonitor, setAudioMuted, setClipboardSync, getConfig, decode } = vi.hoisted(() => ({
+const { startVideo, requestKeyframe, closeDecoder, onAudioFrame, onMonitorList, onLinkStats, onFileOffer, onFileProgress, onFileDone, onFileError, onFileDrop, pickFile, startRecording, appendRecording, finishRecording, sendFile, respondFile, sendInput, selectMonitor, setAudioMuted, setClipboardSync, getConfig, decode } = vi.hoisted(() => ({
   onFileDrop: vi.fn(() => Promise.resolve(vi.fn())),
   pickFile: vi.fn(),
   startRecording: vi.fn(() => Promise.resolve(3)),
@@ -13,6 +13,7 @@ const { startVideo, requestKeyframe, closeDecoder, onAudioFrame, onMonitorList, 
   closeDecoder: vi.fn(),
   onAudioFrame: vi.fn(() => Promise.resolve(vi.fn())),
   onMonitorList: vi.fn(() => Promise.resolve(vi.fn())),
+  onLinkStats: vi.fn<(handler: (payload: { path: "direct" | "relay"; rtt_ms: number | null }) => void) => Promise<() => void>>(() => Promise.resolve(vi.fn())),
   onFileOffer: vi.fn(() => Promise.resolve(vi.fn())),
   onFileProgress: vi.fn(() => Promise.resolve(vi.fn())),
   onFileDone: vi.fn(() => Promise.resolve(vi.fn())),
@@ -27,7 +28,7 @@ const { startVideo, requestKeyframe, closeDecoder, onAudioFrame, onMonitorList, 
   decode: vi.fn(),
 }));
 
-vi.mock("../lib/api", () => ({ startVideo, requestKeyframe, onAudioFrame, onMonitorList, onFileOffer, onFileProgress, onFileDone, onFileError, onFileDrop, pickFile, startRecording, appendRecording, finishRecording, sendFile, respondFile, sendInput, selectMonitor, setAudioMuted, setClipboardSync, getConfig }));
+vi.mock("../lib/api", () => ({ startVideo, requestKeyframe, onAudioFrame, onMonitorList, onLinkStats, onFileOffer, onFileProgress, onFileDone, onFileError, onFileDrop, pickFile, startRecording, appendRecording, finishRecording, sendFile, respondFile, sendInput, selectMonitor, setAudioMuted, setClipboardSync, getConfig }));
 vi.mock("../lib/decode", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/decode")>()),
   makeDecoder: vi.fn(() => ({ push: decode, close: closeDecoder })),
@@ -126,6 +127,21 @@ describe("Session viewer transport", () => {
     fireEvent.click(view.getByRole("button", { name: "Record" }));
     await waitFor(() => expect(notify).toHaveBeenCalledWith("Could not start recording: Recording Downloads path must be a regular directory."));
     vi.unstubAllGlobals();
+  });
+
+  it("shows link reports in the toolbar and clears them while reconnecting", () => {
+    const view = render(<Session remoteId="123" role="viewer" status="in_session" onDisconnect={vi.fn()} />);
+    const report = onLinkStats.mock.calls[onLinkStats.mock.calls.length - 1][0];
+    expect(view.container.querySelector(".session-toolbar__link")).toBeNull();
+    act(() => report({ path: "relay", rtt_ms: null }));
+    expect(view.container.querySelector(".session-toolbar__link")!.textContent).toBe("Relayed·—");
+    act(() => report({ path: "relay", rtt_ms: 48 }));
+    expect(view.container.querySelector(".session-toolbar__link")!.textContent).toBe("Relayed·48 ms");
+    view.rerender(<Session remoteId="123" role="viewer" status="connecting" onDisconnect={vi.fn()} />);
+    expect(view.container.querySelector(".session-toolbar__link")).toBeNull();
+    view.rerender(<Session remoteId="123" role="viewer" status="in_session" onDisconnect={vi.fn()} />);
+    act(() => report({ path: "direct", rtt_ms: 12 }));
+    expect(view.container.querySelector(".session-toolbar__link")!.textContent).toBe("Direct·12 ms");
   });
 });
 

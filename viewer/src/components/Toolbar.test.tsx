@@ -76,3 +76,46 @@ describe("Toolbar", () => {
     expect(screen.getByText("Reconnecting")).toBeTruthy();
   });
 });
+
+describe("connection badge", () => {
+  afterEach(cleanup);
+
+  const badge = (container: HTMLElement) => container.querySelector<HTMLElement>(".session-toolbar__link");
+
+  it("is absent until the backend reports a path, and never invents a latency", () => {
+    const { container } = render(<Toolbar remoteId="123" onDisconnect={vi.fn()} />);
+    expect(badge(container)).toBeNull();
+    expect(container.textContent).not.toMatch(/\d+ ms/);
+  });
+
+  it("shows a direct path with its round trip", () => {
+    const { container } = render(<Toolbar remoteId="123" link={{ path: "direct", rtt_ms: 14 }} onDisconnect={vi.fn()} />);
+    const element = badge(container)!;
+    expect(element.textContent).toBe("Direct·14 ms");
+    expect(element.dataset.path).toBe("direct");
+    expect(element.dataset.slow).toBe("false");
+    expect(element.title).toMatch(/straight between the two computers.*Round trip 14 ms/);
+  });
+
+  it("shows a dash while the latency is unknown and explains Relayed", () => {
+    const { container } = render(<Toolbar remoteId="123" link={{ path: "relay", rtt_ms: null }} onDisconnect={vi.fn()} />);
+    const element = badge(container)!;
+    expect(element.textContent).toBe("Relayed·—");
+    expect(element.dataset.path).toBe("relay");
+    expect(element.title).toMatch(/relay server/);
+    expect(element.title).toMatch(/not measured/);
+  });
+
+  it("warns above 100 ms", () => {
+    const { container, rerender } = render(<Toolbar remoteId="123" link={{ path: "relay", rtt_ms: 100 }} onDisconnect={vi.fn()} />);
+    expect(badge(container)!.dataset.slow).toBe("false");
+    rerender(<Toolbar remoteId="123" link={{ path: "relay", rtt_ms: 140 }} onDisconnect={vi.fn()} />);
+    expect(badge(container)!.dataset.slow).toBe("true");
+    expect(badge(container)!.textContent).toContain("140 ms");
+  });
+
+  it("is not shown to the host", () => {
+    const { container } = render(<Toolbar remoteId="123" role="host" link={{ path: "direct", rtt_ms: 5 }} onDisconnect={vi.fn()} />);
+    expect(badge(container)).toBeNull();
+  });
+});

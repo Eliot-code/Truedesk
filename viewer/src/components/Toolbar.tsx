@@ -1,12 +1,13 @@
 import { useEffect, useState, type ReactNode } from "react";
-import type { MonitorInfo, Status } from "../lib/api";
+import type { LinkStats, MonitorInfo, Status } from "../lib/api";
 
 interface ToolbarProps {
   remoteId: string;
   /** "host" shows only the timer, clipboard toggle and Disconnect. */
   role?: "host" | "viewer";
   status?: Status;
-  latency?: string;
+  /** Path and round trip of the media; no badge until the first report. */
+  link?: LinkStats;
   clipboardSync?: boolean;
   onClipboardSyncChange?: (enabled: boolean) => void;
   onDisconnect: () => void;
@@ -62,9 +63,31 @@ function formatDuration(seconds: number): string {
   return `${minutes}:${(seconds % 60).toString().padStart(2, "0")}`;
 }
 
+/** Round trips above this get the warning colour. */
+export const SLOW_RTT_MS = 100;
+
+const linkLabels = { direct: "Direct", relay: "Relayed" } as const;
+const linkHelp = {
+  direct: "Direct: video and input go straight between the two computers.",
+  relay: "Relayed: a direct connection couldn't be made, so traffic passes through the relay server. It is still end-to-end encrypted, but usually slower.",
+} as const;
+
+export function LinkBadge({ link }: { link: LinkStats }) {
+  const rtt = link.rtt_ms === null ? "—" : `${link.rtt_ms} ms`;
+  const measured = link.rtt_ms === null ? "Round trip not measured yet (older versions don't report it)." : `Round trip ${link.rtt_ms} ms.`;
+  return (
+    <span className="session-toolbar__link mono" data-path={link.path} data-slow={link.rtt_ms !== null && link.rtt_ms > SLOW_RTT_MS} title={`${linkHelp[link.path]} ${measured}`}>
+      <span className="session-toolbar__link-dot" aria-hidden="true" />
+      <span className="session-toolbar__link-label">{linkLabels[link.path]}</span>
+      <span className="session-toolbar__link-sep" aria-hidden="true">·</span>
+      <span className="session-toolbar__link-rtt">{rtt}</span>
+    </span>
+  );
+}
+
 const connectionLabels: Record<Status, string> = { in_session: "Connected", connecting: "Reconnecting", online: "Connected", offline: "Disconnected" };
 
-export default function Toolbar({ remoteId, role = "viewer", status = "in_session", latency, clipboardSync = true, onClipboardSyncChange = () => {}, onDisconnect, monitors = [], selectedMonitor, onMonitorChange = () => {}, audioMuted = false, onAudioMutedChange = () => {}, recordingActive = false, recordingElapsed = 0, onRecordingToggle = () => {}, filesOpen = false, onFilesToggle = () => {} }: ToolbarProps) {
+export default function Toolbar({ remoteId, role = "viewer", status = "in_session", link, clipboardSync = true, onClipboardSyncChange = () => {}, onDisconnect, monitors = [], selectedMonitor, onMonitorChange = () => {}, audioMuted = false, onAudioMutedChange = () => {}, recordingActive = false, recordingElapsed = 0, onRecordingToggle = () => {}, filesOpen = false, onFilesToggle = () => {} }: ToolbarProps) {
   const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
@@ -88,7 +111,7 @@ export default function Toolbar({ remoteId, role = "viewer", status = "in_sessio
           <span className="session-toolbar__connected-dot" data-status={status} title={connectionLabels[status]} aria-hidden="true" />
           <span className="sr-only">{connectionLabels[status]}</span>
           <span className="session-toolbar__remote mono">{remoteId}</span>
-          {latency && <span className="session-toolbar__latency mono">{latency}</span>}
+          {link && <LinkBadge link={link} />}
         </div>}
         <div className="session-toolbar__controls">
           {viewer && <IconButton label="Fullscreen" text="Fullscreen" icon={icons.fullscreen} onClick={toggleFullscreen} />}

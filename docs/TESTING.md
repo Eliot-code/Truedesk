@@ -29,7 +29,7 @@ Run the relay where both machines can reach it, then point both apps at it
 | # | Step | Expected |
 |---|------|----------|
 | 1 | Open the app on both. Viewer: enter host ID + password, Connect | Host shows accept dialog |
-| 2 | Accept | Viewer shows the host screen within a few seconds |
+| 2 | Accept | Viewer shows the host screen within a few seconds; the toolbar shows Direct or Relayed and a round-trip time |
 | 3 | Move mouse, click, type (incl. symbols like `@#{}`) | Host reacts; characters match |
 | 4 | Turn clipboard sync on in the toolbar (it starts off), copy text on each side | Clipboard syncs both ways |
 | 5 | Send a file both ways | Consent prompt, file arrives, size matches |

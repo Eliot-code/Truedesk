@@ -21,6 +21,8 @@ export interface FileError { id: number; message: string }
 export interface Contact { id: string; alias: string; last_connected: number | null }
 export interface TotpEnrollment { uri: string; secret: string; qr_width: number; qr_modules: boolean[] }
 export interface MonitorInfo { id: number; name: string; width: number; height: number; is_primary: boolean }
+/** Media path of a viewer session and its measured round trip; `rtt_ms` is null until there is a real sample. */
+export interface LinkStats { path: "direct" | "relay"; rtt_ms: number | null }
 
 export const getIdentity = () => invoke<Identity>("get_identity");
 export const rotatePassword = () => invoke<{ password: string }>("rotate_password");
@@ -104,6 +106,7 @@ export const onSessionStarted = (handler: (payload: SessionStarted) => void) => 
 export const onSessionEnded = (handler: (payload: SessionEnded) => void) => on("session_ended", handler);
 export const onError = (handler: (payload: ErrorEvent) => void) => on("error", handler);
 export const onMonitorList = (handler: (payload: { monitors: MonitorInfo[] }) => void) => on("monitor_list", handler);
+export const onLinkStats = (handler: (payload: LinkStats) => void) => on("link_stats", handler);
 export const onAudioFrame = (handler: (frame: AudioFrame) => void) => on("audio_frame", handler);
 export const onFileOffer = (handler: (payload: FileOffer) => void) => on("file_offer", handler);
 export const onFileProgress = (handler: (payload: FileProgress) => void) => on("file_progress", handler);
