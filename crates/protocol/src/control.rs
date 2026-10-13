@@ -27,6 +27,13 @@ pub enum Control {
     /// Viewer → host: the decoder lost its reference (a gap or decode error),
     /// so the host should send a keyframe as soon as it can.
     RequestKeyframe,
+    /// Viewer → host on the relay socket, to measure the relay round trip.
+    /// `sent_us` is on the viewer's clock; the host echoes it in a `Pong`.
+    /// beta.5 and older peers cannot parse it and ignore it, so the viewer
+    /// just never gets an answer from them.
+    Ping { sent_us: u64 },
+    /// Host → viewer: the answer to a `Ping`, echoing its `sent_us`.
+    Pong { sent_us: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,6 +136,57 @@ mod tests {
         let bytes = Control::KeepAlive.to_bytes();
         assert_eq!(String::from_utf8(bytes.clone()).unwrap(), r#"{"t":"keep_alive"}"#);
         assert_eq!(Control::from_bytes(&bytes), Some(Control::KeepAlive));
+    }
+
+    #[test]
+    fn ping_and_pong_roundtrip() {
+        let ping = Control::Ping { sent_us: 1_234_567 };
+        assert_eq!(String::from_utf8(ping.to_bytes()).unwrap(), r#"{"t":"ping","sent_us":1234567}"#);
+        assert_eq!(Control::from_bytes(&ping.to_bytes()), Some(ping));
+        let pong = Control::Pong { sent_us: 7 };
+        assert_eq!(String::from_utf8(pong.to_bytes()).unwrap(), r#"{"t":"pong","sent_us":7}"#);
+        assert_eq!(Control::from_bytes(&pong.to_bytes()), Some(pong));
+    }
+
+    /// The control enum as v0.1.0-beta.5 shipped it. Old peers parse sealed
+    /// control with this, and anything that fails to parse falls through to
+    /// a `_` arm in their session loops.
+    mod beta5 {
+        use super::MonitorInfo;
+        use serde::Deserialize;
+
+        #[derive(Debug, Deserialize)]
+        #[serde(tag = "t", rename_all = "snake_case")]
+        #[allow(dead_code)]
+        pub enum Control {
+            Register { peer_id: String, token: String, ver: u32 },
+            Connect { target: String, peer_id: String, ver: u32 },
+            Paired { session: String, peer_role: String, peer_id: String },
+            Ice { session: String, cand: String },
+            Error { code: String },
+            Bye { session: String },
+            MonitorList { monitors: Vec<MonitorInfo> },
+            SelectMonitor { id: u32 },
+            AuthCode { code: String },
+            KeepAlive,
+            RequestKeyframe,
+        }
+
+        pub fn from_bytes(b: &[u8]) -> Option<Control> { serde_json::from_slice(b).ok() }
+    }
+
+    #[test]
+    fn beta5_peers_skip_ping_and_pong_but_read_everything_else() {
+        assert!(beta5::from_bytes(&Control::Ping { sent_us: 1 }.to_bytes()).is_none());
+        assert!(beta5::from_bytes(&Control::Pong { sent_us: 1 }.to_bytes()).is_none());
+        for known in [Control::KeepAlive, Control::RequestKeyframe, Control::Bye { session: String::new() }, Control::SelectMonitor { id: 2 }] {
+            assert!(beta5::from_bytes(&known.to_bytes()).is_some(), "{known:?}");
+        }
+    }
+
+    #[test]
+    fn unknown_kinds_from_newer_peers_are_ignored() {
+        assert_eq!(Control::from_bytes(br#"{"t":"something_newer","x":1}"#), None);
     }
 
     #[test]
