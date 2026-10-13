@@ -47,7 +47,10 @@ export default function ConnectForm({ viewerId, relay: savedRelay, defaultRelay,
   return (
     <main className="app-shell web-shell">
       <header className="topbar">
-        <div className="brand"><span className="lock-glyph" aria-hidden="true">⌑</span> OpenDesk</div>
+        <a className="brand" href="https://opendesk.treeot.dev">
+          <svg className="brand-mark" viewBox="0 0 48 48" aria-hidden="true"><g fill="none" strokeWidth="6"><circle cx="19" cy="29" r="13" stroke="#22d3ee" /><circle cx="29" cy="19" r="13" stroke="#f5b921" /></g><circle cx="29" cy="19" r="5" fill="#22d3ee" /></svg>
+          OpenDesk
+        </a>
         <div className="status mono" title="The host sees this ID when you connect">
           YOUR ID <span className="web-own-id">{formatId(viewerId)}</span>
         </div>
