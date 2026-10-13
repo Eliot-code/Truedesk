@@ -10,5 +10,6 @@ pub mod input;
 pub mod pake;
 pub mod filexfer;
 pub mod clipboard;
+pub mod chat;
 pub mod datamsg;
 pub mod audio;

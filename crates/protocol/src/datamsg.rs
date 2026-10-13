@@ -1,9 +1,10 @@
-use crate::{clipboard::ClipboardMsg, filexfer::FileMsg};
+use crate::{chat::ChatMsg, clipboard::ClipboardMsg, filexfer::FileMsg};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DataMsg {
     FileTransfer(FileMsg),
     Clipboard(ClipboardMsg),
+    Chat(ChatMsg),
 }
 
 impl DataMsg {
@@ -11,6 +12,7 @@ impl DataMsg {
         let (tag, inner) = match self {
             Self::FileTransfer(message) => (1, message.to_bytes()),
             Self::Clipboard(message) => (2, message.to_bytes()),
+            Self::Chat(message) => (3, message.to_bytes()),
         };
         let mut bytes = Vec::with_capacity(1 + inner.len());
         bytes.push(tag);
@@ -23,6 +25,7 @@ impl DataMsg {
         match tag {
             1 => FileMsg::from_bytes(inner).map(Self::FileTransfer),
             2 => ClipboardMsg::from_bytes(inner).map(Self::Clipboard),
+            3 => ChatMsg::from_bytes(inner).map(Self::Chat),
             _ => None,
         }
     }
@@ -33,7 +36,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn round_trips_file_transfer_and_clipboard_variants() {
+    fn round_trips_file_transfer_clipboard_and_chat_variants() {
         let file = DataMsg::FileTransfer(FileMsg::Chunk {
             id: 11,
             offset: 128,
@@ -43,9 +46,13 @@ mod tests {
             seq: 12,
             text: "shared 📋".into(),
         });
+        let chat = DataMsg::Chat(ChatMsg {
+            text: "hello 💬".into(),
+        });
 
         assert_eq!(DataMsg::from_bytes(&file.to_bytes()), Some(file));
         assert_eq!(DataMsg::from_bytes(&clipboard.to_bytes()), Some(clipboard));
+        assert_eq!(DataMsg::from_bytes(&chat.to_bytes()), Some(chat));
     }
 
     #[test]
