@@ -52,6 +52,62 @@ struct RuntimeState {
     clipboard_thread: Option<ClipboardThread>,
     /// Relays currently refusing this device's ID; see `host::identity_conflict`.
     identity_conflicts: Vec<IdentityConflict>,
+    /// Host-enforced permissions for the currently connected viewer. Shared with
+    /// the session paths so flipping one takes effect live. Reset to all-on when
+    /// a session starts.
+    viewer_permissions: ViewerPermissions,
+    /// Ends the current host session (without stopping hosting) when fired; see
+    /// `disconnect_viewer`. Present only while a session is active.
+    disconnect_viewer: Option<oneshot::Sender<()>>,
+}
+
+/// The four host-enforced capabilities a connected viewer may use. Each is a
+/// cheaply shared atomic so the session paths (input, audio, clipboard, files)
+/// can read it without locking `AppState`. All default to enabled.
+#[derive(Clone)]
+pub(crate) struct ViewerPermissions {
+    pub(crate) control: Arc<AtomicBool>,
+    pub(crate) files: Arc<AtomicBool>,
+    pub(crate) clipboard: Arc<AtomicBool>,
+    pub(crate) audio: Arc<AtomicBool>,
+}
+
+impl ViewerPermissions {
+    fn new() -> Self {
+        Self {
+            control: Arc::new(AtomicBool::new(true)),
+            files: Arc::new(AtomicBool::new(true)),
+            clipboard: Arc::new(AtomicBool::new(true)),
+            audio: Arc::new(AtomicBool::new(true)),
+        }
+    }
+
+    /// Back to all-on, for the start of a new session.
+    pub(crate) fn reset(&self) {
+        for flag in [&self.control, &self.files, &self.clipboard, &self.audio] {
+            flag.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// The atomic for one capability name, or `None` if the name is unknown.
+    pub(crate) fn flag(&self, capability: &str) -> Option<&Arc<AtomicBool>> {
+        match capability {
+            "control" => Some(&self.control),
+            "files" => Some(&self.files),
+            "clipboard" => Some(&self.clipboard),
+            "audio" => Some(&self.audio),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> ViewerPermissionsEvent {
+        ViewerPermissionsEvent {
+            control: self.control.load(Ordering::Relaxed),
+            files: self.files.load(Ordering::Relaxed),
+            clipboard: self.clipboard.load(Ordering::Relaxed),
+            audio: self.audio.load(Ordering::Relaxed),
+        }
+    }
 }
 
 /// Each host session runs with its own current-thread Tokio runtime on a
@@ -134,9 +190,13 @@ fn spawn_clipboard_thread(
     outgoing: ReliableSender,
     sealer: Arc<Mutex<Sealer>>,
     enabled: Arc<AtomicBool>,
+    allowed: Arc<AtomicBool>,
 ) -> Option<(std_mpsc::Sender<ClipboardCommand>, std::thread::JoinHandle<()>)> {
     let backend = ArboardBackend::new()?;
     let (command_tx, command_rx) = std_mpsc::channel();
+    // Clipboard moves only when the user's sync preference is on AND the host
+    // hasn't blocked the viewer's clipboard permission, in both directions.
+    let active = move || enabled.load(Ordering::Relaxed) && allowed.load(Ordering::Relaxed);
     let join = std::thread::spawn(move || {
         let mut sync = ClipboardSync::new(backend);
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build();
@@ -144,11 +204,11 @@ fn spawn_clipboard_thread(
         loop {
             match command_rx.recv_timeout(Duration::from_millis(500)) {
                 Ok(ClipboardCommand::Apply(text)) => {
-                    if enabled.load(Ordering::Relaxed) { sync.apply(&text); }
+                    if active() { sync.apply(&text); }
                 }
                 Ok(ClipboardCommand::Stop) | Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(std_mpsc::RecvTimeoutError::Timeout) => {
-                    if !enabled.load(Ordering::Relaxed) { continue; }
+                    if !active() { continue; }
                     let Some(message) = sync.poll_data() else { continue };
                     let sealed = lock_unpoisoned(&sealer).seal(&[Tag::Data as u8], &message.to_bytes());
                     if runtime.block_on(outgoing.send_frame(Tag::Data, &sealed)).is_err() { break; }
@@ -169,11 +229,13 @@ fn dispatch_data(
     clipboard_tx: Option<std_mpsc::Sender<ClipboardCommand>>,
 ) -> (Arc<FileRouter>, mpsc::Receiver<IncomingTransfer>) {
     let (router, offers) = FileRouter::new();
+    let clipboard_app = app.clone();
     tauri::async_runtime::spawn(host_core::datachan::dispatch_data(
         incoming,
         move |sealed: &[u8]| lock_unpoisoned(&opener).open(&[Tag::Data as u8], sealed),
         Arc::clone(&router),
         move |message| {
+            emit_activity(&clipboard_app, "clipboard", "clipboard received");
             if let Some(sender) = &clipboard_tx { let _ = sender.send(ClipboardCommand::Apply(message.text)); }
         },
         move |message| emit(&app, "chat_message", ChatMessage { text: message.text }),
@@ -183,9 +245,13 @@ fn dispatch_data(
 
 fn activate_data_channel(app: &AppHandle, handle: DataHandle, from: String) {
     let DataHandle { sender, receiver, sealer, opener, control_sender, control_sealer, .. } = handle;
-    let enabled = app.state::<AppState>().lock().clipboard_enabled.clone();
+    let (enabled, clipboard_allowed) = {
+        let state = app.state::<AppState>();
+        let state = state.lock();
+        (state.clipboard_enabled.clone(), state.viewer_permissions.clipboard.clone())
+    };
     let sealer = Arc::new(Mutex::new(sealer));
-    let clipboard_thread = spawn_clipboard_thread(sender.clone(), sealer.clone(), enabled);
+    let clipboard_thread = spawn_clipboard_thread(sender.clone(), sealer.clone(), enabled, clipboard_allowed);
     let clipboard_tx = clipboard_thread.as_ref().map(|(tx, _)| tx.clone());
     let (file_router, offers) = dispatch_data(app.clone(), receiver, Arc::new(Mutex::new(opener)), clipboard_tx);
     let state = app.state::<AppState>();
@@ -548,6 +614,45 @@ fn set_audio_muted(state: tauri::State<'_, AppState>, muted: bool) {
     state.lock().audio_muted.store(muted, Ordering::Relaxed);
 }
 
+/// The current host-enforced viewer permissions.
+#[tauri::command]
+fn get_viewer_permissions(state: tauri::State<'_, AppState>) -> ViewerPermissionsEvent {
+    state.lock().viewer_permissions.snapshot()
+}
+
+/// Flip one host-enforced viewer permission. Takes effect live on the running
+/// session, emits `viewer_permissions` so the UI stays in sync, and logs the
+/// change to the session activity log.
+#[tauri::command]
+fn set_viewer_permission(
+    state: tauri::State<'_, AppState>,
+    app: AppHandle,
+    capability: String,
+    allowed: bool,
+) -> Result<(), String> {
+    let snapshot = {
+        let state = state.lock();
+        let flag = state
+            .viewer_permissions
+            .flag(&capability)
+            .ok_or_else(|| format!("unknown capability: {capability}"))?;
+        flag.store(allowed, Ordering::Relaxed);
+        state.viewer_permissions.snapshot()
+    };
+    emit(&app, "viewer_permissions", snapshot);
+    emit_activity(&app, "permission", format!("{capability} {}", if allowed { "allowed" } else { "blocked" }));
+    Ok(())
+}
+
+/// End the CURRENT host session without stopping hosting: the host thread loops
+/// back, re-registers, and awaits a new viewer. A no-op if no session is active.
+#[tauri::command]
+fn disconnect_viewer(state: tauri::State<'_, AppState>) {
+    if let Some(tx) = state.lock().disconnect_viewer.take() {
+        let _ = tx.send(());
+    }
+}
+
 #[tauri::command]
 fn disconnect(state: tauri::State<'_, AppState>, app: AppHandle) {
     let (host_thread, viewer_task, host_starting) = {
@@ -671,6 +776,8 @@ pub fn run() {
                 audio_muted: Arc::new(AtomicBool::new(false)),
                 clipboard_thread: None,
                 identity_conflicts: Vec::new(),
+                viewer_permissions: ViewerPermissions::new(),
+                disconnect_viewer: None,
             })));
             #[cfg(windows)]
             if windows_service::is_service_host_process() {
@@ -732,6 +839,9 @@ pub fn run() {
             vdriver::install_virtual_display_driver,
             vdriver::uninstall_virtual_display_driver,
             set_audio_muted,
+            get_viewer_permissions,
+            set_viewer_permission,
+            disconnect_viewer,
             send_file,
             respond_file,
             send_chat,
@@ -764,6 +874,28 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn viewer_permissions_default_to_all_enabled() {
+        let perms = ViewerPermissions::new();
+        let snapshot = perms.snapshot();
+        assert!(snapshot.control && snapshot.files && snapshot.clipboard && snapshot.audio);
+    }
+
+    #[test]
+    fn viewer_permission_flag_toggles_and_snapshot_tracks_it() {
+        let perms = ViewerPermissions::new();
+        assert!(perms.flag("bogus").is_none());
+        for name in ["control", "files", "clipboard", "audio"] {
+            perms.flag(name).unwrap().store(false, Ordering::Relaxed);
+        }
+        let off = perms.snapshot();
+        assert_eq!((off.control, off.files, off.clipboard, off.audio), (false, false, false, false));
+        // Reset puts every capability back on for a new session.
+        perms.reset();
+        let on = perms.snapshot();
+        assert!(on.control && on.files && on.clipboard && on.audio);
+    }
 
     #[test]
     fn auth_backoff_stays_short_and_resets() {
@@ -1011,6 +1143,8 @@ mod tests {
             audio_muted: Arc::new(AtomicBool::new(false)),
             clipboard_thread: None,
             identity_conflicts: Vec::new(),
+            viewer_permissions: ViewerPermissions::new(),
+            disconnect_viewer: None,
         }));
 
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

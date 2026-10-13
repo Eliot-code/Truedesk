@@ -353,6 +353,21 @@ pub(crate) async fn run_paired_host_session(
     let authenticated = Arc::new(AtomicBool::new(false));
     let authenticated_flag = authenticated.clone();
     let HostSessionParams { password, unattended_enabled, twofa_enabled, totp_secret, unattended_problem, allow_virtual_displays } = params;
+    // Every session starts with all four viewer permissions enabled, and a
+    // fresh per-session disconnect signal distinct from the stop-hosting one.
+    let (gates, mut disconnect_rx) = {
+        let state = app.state::<AppState>();
+        let mut state = state.lock();
+        state.viewer_permissions.reset();
+        let gates = host_core::roles::SessionGates {
+            control: state.viewer_permissions.control.clone(),
+            audio: state.viewer_permissions.audio.clone(),
+        };
+        let (disconnect_tx, disconnect_rx) = oneshot::channel::<()>();
+        state.disconnect_viewer = Some(disconnect_tx);
+        (gates, disconnect_rx)
+    };
+    emit(app, "viewer_permissions", app.state::<AppState>().lock().viewer_permissions.snapshot());
     if let Some(problem) = unattended_problem {
         // This connection will need approval; say why before the prompt.
         emit(app, "error", ErrorEvent { message: problem });
@@ -370,6 +385,7 @@ pub(crate) async fn run_paired_host_session(
         if unattended_enabled {
             emit_host_status(&approve_app, "in_session");
             emit(&approve_app, "session_started", SessionStarted { role: "host", remote_id: peer_id.clone() });
+            emit_activity(&approve_app, "session", format!("{} connected", peer_id));
             return true;
         }
         let (decision_tx, decision_rx) = oneshot::channel();
@@ -396,6 +412,7 @@ pub(crate) async fn run_paired_host_session(
         if allowed {
             emit_host_status(&approve_app, "in_session");
             emit(&approve_app, "session_started", SessionStarted { role: "host", remote_id: peer_id.clone() });
+            emit_activity(&approve_app, "session", format!("{} connected", peer_id));
         }
         allowed
     };
@@ -403,9 +420,12 @@ pub(crate) async fn run_paired_host_session(
     let notice_app = app.clone();
     displays.notify = Some(Arc::new(move |notice| emit(&notice_app, "host_notice", HostNoticeEvent { message: display_notice(notice) })));
     let mut session = Box::pin(host_core::roles::run_default_host_session_with_displays(
-        ws, &password, &ice_session, unattended_enabled, twofa_enabled, totp_secret.as_deref(), approve, data_ready_tx, displays,
+        ws, &password, &ice_session, unattended_enabled, twofa_enabled, totp_secret.as_deref(), approve, data_ready_tx, displays, gates,
     ));
     let mut streamed = false;
+    // The host user disconnected this viewer but wants to keep hosting; it ends
+    // the session like a stop but loops back instead of leaving the loop.
+    let mut disconnected = false;
     let result = tokio::select! {
         handle = data_ready_rx => {
             match handle {
@@ -415,6 +435,7 @@ pub(crate) async fn run_paired_host_session(
                     tokio::select! {
                         result = &mut session => Some(result),
                         _ = &mut *stop_rx => None,
+                        _ = &mut disconnect_rx => { disconnected = true; None }
                     }
                 }
                 Err(_) => Some(Err("session ended before the data channel was ready".into())),
@@ -422,11 +443,14 @@ pub(crate) async fn run_paired_host_session(
         }
         result = &mut session => Some(result),
         _ = &mut *stop_rx => None,
+        _ = &mut disconnect_rx => { disconnected = true; None }
     };
+    // This session is over, so its disconnect sender must not linger.
+    app.state::<AppState>().lock().disconnect_viewer = None;
     if result.is_none() {
-        // The host user stopped: tell the viewer explicitly so it ends
-        // cleanly instead of treating the close as a drop and reconnecting.
-        // The session (and its writer) is still alive here.
+        // The host user stopped or disconnected the viewer: tell it explicitly
+        // so it ends cleanly instead of treating the close as a drop and
+        // reconnecting. The session (and its writer) is still alive here.
         send_host_bye(app).await;
     }
     if let Some(Err(error)) = &result {
@@ -439,9 +463,18 @@ pub(crate) async fn run_paired_host_session(
             reason: if result.is_some() { "host session ended".into() } else { "disconnected".into() },
         },
     );
+    emit_activity(app, "session", if disconnected { format!("{remote_id} disconnected by host") } else { "viewer disconnected".to_owned() });
     clear_data_channel(app);
     let dropped = streamed && matches!(result, Some(Err(_)));
-    HostSessionEnd { stopped: result.is_none(), authenticated: authenticated.load(Ordering::Relaxed), dropped }
+    // A host-initiated disconnect keeps hosting: the loop re-registers.
+    HostSessionEnd { stopped: should_stop_hosting(result.is_none(), disconnected), authenticated: authenticated.load(Ordering::Relaxed), dropped }
+}
+
+/// Whether the hosting loop should leave after this session. Only a stop (the
+/// `stop_rx` signal) ends hosting; a host-initiated viewer disconnect does not,
+/// so the loop re-registers and awaits the next viewer.
+pub(crate) fn should_stop_hosting(ended_by_signal: bool, disconnected: bool) -> bool {
+    ended_by_signal && !disconnected
 }
 
 /// What the host user is told when a session changes its displays.
@@ -742,6 +775,16 @@ mod tests {
         assert_eq!(relays_to_try(&relays, &urls(&["wss://a"])), urls(&["wss://b", "wss://c"]));
         // Every relay refused it: keep trying them all so the error stays visible.
         assert_eq!(relays_to_try(&relays, &relays), relays);
+    }
+
+    #[test]
+    fn disconnect_keeps_hosting_but_stop_leaves() {
+        // Viewer disconnected by the host: keep hosting.
+        assert!(!should_stop_hosting(true, true));
+        // Stop signal, no disconnect: leave the loop.
+        assert!(should_stop_hosting(true, false));
+        // Session ended on its own: not a signal, so keep hosting.
+        assert!(!should_stop_hosting(false, false));
     }
 
     #[test]

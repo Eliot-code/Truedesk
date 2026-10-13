@@ -152,9 +152,37 @@ pub(crate) struct ChatMessage {
     pub(crate) text: String,
 }
 
+/// The host-enforced permissions for the connected viewer. Sent whenever they
+/// change so the control panel stays in sync. All default to enabled.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ViewerPermissionsEvent {
+    pub(crate) control: bool,
+    pub(crate) files: bool,
+    pub(crate) clipboard: bool,
+    pub(crate) audio: bool,
+}
+
+/// One line in the host's session activity log.
+#[derive(Serialize, Clone)]
+pub(crate) struct ActivityEvent {
+    /// Unix milliseconds.
+    pub(crate) at: u64,
+    pub(crate) kind: String,
+    pub(crate) detail: String,
+}
+
+/// Emit an `activity` line stamped with the current time.
+pub(crate) fn emit_activity(app: &AppHandle, kind: &str, detail: impl Into<String>) {
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_millis() as u64)
+        .unwrap_or(0);
+    emit(app, "activity", ActivityEvent { at, kind: kind.to_owned(), detail: detail.into() });
+}
+
 /// Lifecycle events that also go to the log file, so a bug report can include
 /// what happened. Media and progress events are too frequent to log.
-pub(crate) const LOGGED_EVENTS: &[&str] = &["status_changed", VIEWER_STATUS, "session_started", "session_ended", "incoming_request", "error", "file_error", "identity_changed", "identity_conflicts", "chat_message"];
+pub(crate) const LOGGED_EVENTS: &[&str] = &["status_changed", VIEWER_STATUS, "session_started", "session_ended", "incoming_request", "error", "file_error", "identity_changed", "identity_conflicts", "chat_message", "activity"];
 
 /// The outgoing (viewer) session's own status. `status_changed` is only ever
 /// the host's presence, so a host hiccup never shows up in a viewer session.

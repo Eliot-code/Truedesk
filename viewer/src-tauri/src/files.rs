@@ -116,6 +116,10 @@ async fn receive_offer(
     };
     let pending_app = app.clone();
     let progress_app = app.clone();
+    // The accepted file's name, captured at consent time so completion can name
+    // it in the activity log.
+    let received_name = Arc::new(Mutex::new(String::new()));
+    let name_slot = received_name.clone();
     let result = FileReceiver::receive_with_async_consent(
         &mut source,
         &mut answers,
@@ -124,6 +128,13 @@ async fn receive_offer(
             let FileMsg::Offer { id, name, size, .. } = offer else {
                 return ConsentDecision::Reject;
             };
+            // Host-enforced file permission: auto-reject without prompting the
+            // user when the viewer's file transfer is blocked.
+            if !pending_app.state::<AppState>().lock().viewer_permissions.files.load(Ordering::Relaxed) {
+                emit_activity(&pending_app, "file", format!("blocked file \"{name}\""));
+                return ConsentDecision::Reject;
+            }
+            *lock_unpoisoned(&name_slot) = name.clone();
             let (decision_tx, decision_rx) = oneshot::channel();
             pending_app
                 .state::<AppState>()
@@ -163,7 +174,11 @@ async fn receive_offer(
     )
     .await;
     match result {
-        Ok(path) => emit(&app, "file_done", FileDone { id, path: Some(path.display().to_string()) }),
+        Ok(path) => {
+            let name = lock_unpoisoned(&received_name).clone();
+            if !name.is_empty() { emit_activity(&app, "file", format!("received \"{name}\"")); }
+            emit(&app, "file_done", FileDone { id, path: Some(path.display().to_string()) });
+        }
         Err(error) => emit(
             &app,
             "file_error",
