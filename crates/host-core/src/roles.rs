@@ -653,6 +653,10 @@ where
     if let Some(max) = virtual_displays.viewer_limit() {
         reliable.sender().send_frame(Tag::Control, &seal_control(&control_sealer, &Control::VirtualDisplaySupport { max })).await?;
     }
+    // Old viewers ignore this; new ones only offer Ctrl+Alt+Del after it.
+    if crate::secure_attention::available() {
+        reliable.sender().send_frame(Tag::Control, &seal_control(&control_sealer, &Control::SecureAttentionSupport)).await?;
+    }
     let path = transport.path();
     let (transport_tx, transport_rx) = transport.into_split();
     if let Some(ready) = data_ready {
@@ -1640,7 +1644,7 @@ async fn run_viewer_media_loop_with_control(
                 peer_deadline = tokio::time::Instant::now() + dead_peer;
                 match Control::from_bytes(&plaintext) {
                     Some(Control::Bye { .. }) => return Err(crate::reconnect::HOST_ENDED_MESSAGE.into()),
-                    Some(Control::MonitorList { .. } | Control::VirtualDisplaySupport { .. } | Control::VirtualDisplayAdded { .. } | Control::VirtualDisplayRefused { .. }) => {
+                    Some(Control::MonitorList { .. } | Control::VirtualDisplaySupport { .. } | Control::VirtualDisplayAdded { .. } | Control::VirtualDisplayRefused { .. } | Control::SecureAttentionSupport) => {
                         if let Some(sink) = &monitor_sink { let _ = sink.send(plaintext).await; }
                     }
                     Some(Control::Pong { sent_us }) if relay_ping.is_some() => {

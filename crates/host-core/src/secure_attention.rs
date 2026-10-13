@@ -26,6 +26,13 @@ impl std::fmt::Display for SecureAttentionError {
 
 impl std::error::Error for SecureAttentionError {}
 
+/// Whether this host can deliver the secure attention sequence. The host only
+/// offers the viewer a Ctrl+Alt+Del control when this is true. It stays false
+/// until the sign-in-screen helper service exists (see `deliver`).
+pub fn available() -> bool {
+    false
+}
+
 /// Deliver Ctrl+Alt+Del on this host. Succeeds only where OpenDesk can reach
 /// the secure attention sequence; everywhere else it returns [`Unsupported`]
 /// and the caller simply ignores the request.

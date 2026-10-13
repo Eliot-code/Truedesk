@@ -79,6 +79,10 @@ pub enum Control {
     /// the host, so the viewer can reach the Windows security screen. Hosts
     /// that can't honor it ignore it; beta.5 peers can't parse it.
     RequestSecureAttention,
+    /// Host → viewer, after the first `MonitorList`: this host can deliver the
+    /// secure attention sequence, so the viewer may show a Ctrl+Alt+Del
+    /// control. Hosts that can't never send it, so viewers hide the control.
+    SecureAttentionSupport,
 }
 
 /// `VirtualDisplayRefused` codes.
@@ -288,6 +292,7 @@ mod tests {
             Control::VirtualDisplayAdded { id: 3 },
             Control::VirtualDisplayRefused { code: VIRTUAL_DISPLAY_FAILED.into() },
             Control::RequestSecureAttention,
+            Control::SecureAttentionSupport,
         ] {
             assert!(beta5::from_bytes(&newer.to_bytes()).is_none(), "{newer:?}");
         }
