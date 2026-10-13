@@ -221,6 +221,7 @@ pub(crate) fn connect(
                         Some(Control::VirtualDisplaySupport { max }) => emit(&monitor_app, "virtual_display_support", VirtualDisplaySupportEvent { max }),
                         Some(Control::VirtualDisplayAdded { id }) => emit(&monitor_app, "virtual_display_added", VirtualDisplayAddedEvent { id }),
                         Some(Control::VirtualDisplayRefused { code }) => emit(&monitor_app, "virtual_display_refused", VirtualDisplayRefusedEvent { code }),
+                        Some(Control::SecureAttentionSupport) => emit(&monitor_app, "secure_attention_support", ()),
                         _ => {}
                     }
                 }

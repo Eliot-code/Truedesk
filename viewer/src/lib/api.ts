@@ -139,6 +139,8 @@ export const onMonitorList = (handler: (payload: { monitors: MonitorInfo[] }) =>
 export const onVirtualDisplaySupport = (handler: (payload: { max: number }) => void) => on("virtual_display_support", handler);
 export const onVirtualDisplayAdded = (handler: (payload: { id: number }) => void) => on("virtual_display_added", handler);
 export const onVirtualDisplayRefused = (handler: (payload: { code: string }) => void) => on("virtual_display_refused", handler);
+/** The host can deliver Ctrl+Alt+Del; hosts that can't never send it, so the control stays hidden. */
+export const onSecureAttentionSupport = (handler: () => void) => on("secure_attention_support", handler);
 /** Something the host user should know, e.g. that the viewer added a display. */
 export const onHostNotice = (handler: (payload: { message: string }) => void) => on("host_notice", handler);
 export const onLinkStats = (handler: (payload: LinkStats) => void) => on("link_stats", handler);
