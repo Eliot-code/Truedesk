@@ -35,6 +35,10 @@ cpal = { version = "0.18", features = ["pulseaudio"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
+# CGVirtualDisplay (private CoreGraphics classes) for virtual displays.
+# Already in the tree through arboard and cpal.
+objc2 = { version = "0.6.4", default-features = false, features = ["std"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSString"] }
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFDictionary", "CFNumber", "CFString"] }
 objc2-core-media = { version = "0.3.2", default-features = false, features = ["std", "CMBase", "CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMTime"] }
 objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferPool", "CVReturn"] }

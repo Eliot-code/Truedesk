@@ -232,6 +232,8 @@ fn reconnect_rules_match_host_core() {
         &desktop::rejection_error(desktop::reject_code::TWOFA_INVALID),
         &desktop::rejection_error(desktop::reject_code::CAPTURE_UNAVAILABLE),
         &desktop::rejection_error(desktop::reject_code::NO_ANSWER),
+        &desktop::rejection_error(desktop::reject_code::NO_DISPLAY),
+        &desktop::rejection_error(reconnect::reject_code::NO_DISPLAY),
         &desktop::rejection_error("future_code"),
     ];
     for message in messages {

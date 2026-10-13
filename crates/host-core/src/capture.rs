@@ -514,6 +514,7 @@ fn list_monitors() -> Vec<MonitorInfo> {
                     width: u32::try_from(width).ok()?,
                     height: u32::try_from(height).ok()?,
                     is_primary: primary,
+                    is_virtual: false,
                 })
             }
             (_, scap::Target::Window(_)) => None,
@@ -709,7 +710,7 @@ mod tests {
     }
 
     fn monitors(ids: &[u32]) -> Vec<MonitorInfo> {
-        ids.iter().enumerate().map(|(index, &id)| MonitorInfo { id, name: format!("D{id}"), width: 0, height: 0, is_primary: index == 0 }).collect()
+        ids.iter().enumerate().map(|(index, &id)| MonitorInfo { id, name: format!("D{id}"), width: 0, height: 0, is_primary: index == 0, is_virtual: false }).collect()
     }
 
     struct Loop {
@@ -787,7 +788,7 @@ mod tests {
 
     #[test]
     fn selected_monitor_id_only_accepts_advertised_displays() {
-        let monitors = vec![MonitorInfo { id: 4, name: "A".into(), width: 0, height: 0, is_primary: true }];
+        let monitors = vec![MonitorInfo { id: 4, name: "A".into(), width: 0, height: 0, is_primary: true, is_virtual: false }];
         assert_eq!(selected_monitor_id(&monitors, 4), Some(4));
         assert_eq!(selected_monitor_id(&monitors, 9), None);
     }

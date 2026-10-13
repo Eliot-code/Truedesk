@@ -66,7 +66,11 @@ pub mod reject_code {
     pub const TWOFA_INVALID: &str = "2fa_invalid";
     pub const CAPTURE_UNAVAILABLE: &str = "capture_unavailable";
     pub const NO_ANSWER: &str = "no_answer";
+    pub const NO_DISPLAY: &str = "no_display";
 }
+
+/// What the viewer shows when the host has no screen to share.
+pub const NO_DISPLAY_MESSAGE: &str = "That computer has no screen connected. Plug in a monitor or an HDMI dummy plug. Or, on a Mac, turn on \"Let viewers add virtual displays\" in OpenDesk there; on Windows, install the free Virtual Display Driver (github.com/VirtualDrivers/Virtual-Display-Driver).";
 
 const REJECTION_PREFIX: &str = "session rejected by host: ";
 
@@ -121,6 +125,7 @@ pub fn auth_failure_message(error: &str, after_session: bool) -> String {
         Some(reject_code::CAPTURE_UNAVAILABLE) => {
             "The other device can't share its screen. On that device, check that a display is on and Screen Recording is allowed for OpenDesk, restart it, and connect again.".to_owned()
         }
+        Some(reject_code::NO_DISPLAY) => NO_DISPLAY_MESSAGE.to_owned(),
         Some(other) => format!("The host rejected the session ({other})."),
         None if error == KEY_NOT_CONFIRMED => {
             "The other device hung up while checking the password, so the password is probably wrong. It changes after every session: get the current one and connect again.".to_owned()

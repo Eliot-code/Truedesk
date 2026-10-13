@@ -6,6 +6,7 @@ use crate::{
     encode::{self, stream::{self, KeyframePolicy, STREAM_FPS}, Encoder, VideoEncoder},
     inject::{EnigoInjector, InputInjector, NoopInjector},
     transport::{self, RelayIceSignaling, RelayTransport, ReliableChannel, Transport, TransportReceiver, TransportSender},
+    vdisplay::{self, DisplaySpec, SessionDisplays, VirtualDisplays},
 };
 use crate::reconnect::{classify_viewer_error, reject_code, rejection_error, DisconnectReason};
 use protocol::{
@@ -197,6 +198,55 @@ struct SessionTimings {
 impl Default for SessionTimings {
     fn default() -> Self {
         Self { keepalive: KEEPALIVE_INTERVAL, dead_peer: DEAD_PEER_TIMEOUT, approval: APPROVAL_TIMEOUT, capture_restore: CAPTURE_RESTORE_WINDOW }
+    }
+}
+
+/// How long a new virtual display gets to show up for capture.
+const VIRTUAL_DISPLAY_WAIT: Duration = Duration::from_secs(5);
+/// Time macOS needs to bring up a headless host's virtual display before
+/// capture can start on it.
+const HEADLESS_SETTLE: Duration = Duration::from_millis(1500);
+
+/// Something the host user should hear about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayNotice {
+    /// The host has no screen, so the session added a virtual one.
+    HeadlessAdded,
+    ViewerAdded,
+    ViewerRemoved,
+}
+
+pub type DisplayNotify = Arc<dyn Fn(DisplayNotice) + Send + Sync>;
+
+/// The host's displays as a session sees them.
+#[derive(Clone)]
+pub struct HostDisplays {
+    pub backend: Arc<dyn VirtualDisplays>,
+    /// The host setting "Let viewers add virtual displays". It also lets a
+    /// host with no screen add one for itself.
+    pub allow_virtual: bool,
+    /// See [`crate::vdisplay::displays_present`].
+    pub present: Arc<dyn Fn() -> Option<bool> + Send + Sync>,
+    pub notify: Option<DisplayNotify>,
+}
+
+impl HostDisplays {
+    /// This computer's displays.
+    pub fn platform(allow_virtual: bool) -> Self {
+        Self { backend: vdisplay::platform(), allow_virtual, present: Arc::new(vdisplay::displays_present), notify: None }
+    }
+
+    fn tell(&self, notice: DisplayNotice) {
+        if let Some(notify) = &self.notify {
+            notify(notice);
+        }
+    }
+}
+
+impl Default for HostDisplays {
+    /// No virtual displays, and no idea whether a screen is attached.
+    fn default() -> Self {
+        Self { backend: Arc::new(vdisplay::Unsupported), allow_virtual: false, present: Arc::new(|| None), notify: None }
     }
 }
 
@@ -445,7 +495,7 @@ where
     run_host_session_with_data_and_accept_and_2fa_with_factory(
         ws, password, ice_session, || Some(capturer), encoder_factory,
         move || Box::new(injector) as Box<dyn InputInjector>,
-        unattended_enabled, twofa_enabled, totp_secret, approve, data_ready, SessionTimings::default(),
+        unattended_enabled, twofa_enabled, totp_secret, approve, data_ready, SessionTimings::default(), HostDisplays::default(),
     ).await
 }
 
@@ -454,7 +504,7 @@ async fn run_host_session_with_data_and_accept_and_2fa_with_factory<S, C, E, F, 
     ws: WebSocketStream<S>, password: &str, ice_session: &str, capture_factory: CF,
     encoder_factory: F, injector_factory: IF, unattended_enabled: bool,
     twofa_enabled: bool, totp_secret: Option<&str>, approve: A,
-    data_ready: Option<oneshot::Sender<DataHandle>>, timings: SessionTimings,
+    data_ready: Option<oneshot::Sender<DataHandle>>, timings: SessionTimings, displays: HostDisplays,
 )-> SessionResult<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -543,10 +593,30 @@ where
         send_rejection(&sender, &control_sealer, code).await;
         return Err(Box::new(SessionError("session rejected")));
     }
+    // Dropped when the session ends, which removes its virtual displays.
+    let mut virtual_displays = SessionDisplays::new(Arc::clone(&displays.backend), displays.allow_virtual);
+    if (displays.present)() == Some(false) {
+        match virtual_displays.add_headless() {
+            Ok(_) => {
+                displays.tell(DisplayNotice::HeadlessAdded);
+                tokio::time::sleep(HEADLESS_SETTLE).await;
+            }
+            Err(error) => {
+                log::warn!("this computer has no screen to share ({error})");
+                send_rejection(&sender, &control_sealer, reject_code::NO_DISPLAY).await;
+                return Err(Box::new(SessionError("this computer has no screen to share")));
+            }
+        }
+    }
     let Some(capturer) = capture_factory() else {
         // Without this the viewer reads the close as a drop and reconnects.
-        send_rejection(&sender, &control_sealer, reject_code::CAPTURE_UNAVAILABLE).await;
-        return Err(Box::new(SessionError(capture_unavailable_message())));
+        let (code, message) = if (displays.present)() == Some(false) {
+            (reject_code::NO_DISPLAY, "this computer has no screen to share")
+        } else {
+            (reject_code::CAPTURE_UNAVAILABLE, capture_unavailable_message())
+        };
+        send_rejection(&sender, &control_sealer, code).await;
+        return Err(Box::new(SessionError(message)));
     };
     reliable.enable_application_traffic();
     let (send_key, recv_key) = derive_keys(&shared, true);
@@ -575,10 +645,14 @@ where
     // data channel. Host->viewer control frames must share one sealer (one
     // nonce sequence) on this key: a second Sealer::new on control_send_key
     // would restart the counter at 0 and reuse a nonce with MonitorList.
-    let monitors = capturer.monitors();
-    let mut monitor_ids: Vec<u32> = monitors.iter().map(|monitor| monitor.id).collect();
-    let monitor_list = Control::MonitorList { monitors };
+    let mut monitors = capturer.monitors();
+    virtual_displays.annotate(&mut monitors);
+    let monitor_list = Control::MonitorList { monitors: monitors.clone() };
     reliable.sender().send_frame(Tag::Control, &seal_control(&control_sealer, &monitor_list)).await?;
+    // Old viewers ignore this; new ones only offer "Add display" after it.
+    if let Some(max) = virtual_displays.viewer_limit() {
+        reliable.sender().send_frame(Tag::Control, &seal_control(&control_sealer, &Control::VirtualDisplaySupport { max })).await?;
+    }
     let path = transport.path();
     let (transport_tx, transport_rx) = transport.into_split();
     if let Some(ready) = data_ready {
@@ -633,10 +707,41 @@ where
                     Some(Control::SelectMonitor { id }) => {
                         // Input follows the switch; the capturer ignores ids
                         // it did not advertise, so input does too.
-                        if monitor_ids.contains(&id) {
+                        if monitors.iter().any(|monitor| monitor.id == id) {
                             display.store(pack_display(Some(id)), Ordering::Release);
                         }
                         video.send(VideoCommand::SelectMonitor(id));
+                    }
+                    Some(Control::AddVirtualDisplay { width, height, hidpi }) => {
+                        let spec = DisplaySpec::fitted(width, height, hidpi);
+                        match virtual_displays.add(&spec) {
+                            // Shared once capture can see it (VideoEvent::Shown).
+                            Ok(id) => {
+                                displays.tell(DisplayNotice::ViewerAdded);
+                                video.send(VideoCommand::ShowDisplay(id));
+                            }
+                            Err(code) => {
+                                let _ = sender.send_frame(Tag::Control, &seal_control(&control_sealer, &Control::VirtualDisplayRefused { code: code.into() })).await;
+                            }
+                        }
+                    }
+                    Some(Control::RemoveVirtualDisplay { id }) => {
+                        // Move off the display first, so capture never waits
+                        // on one that is gone.
+                        if unpack_display(display.load(Ordering::Acquire)) == Some(id) {
+                            let main = monitors.iter().find(|monitor| monitor.is_primary && monitor.id != id).map(|monitor| monitor.id);
+                            display.store(pack_display(main), Ordering::Release);
+                            if let Some(main) = main { video.send(VideoCommand::SelectMonitor(main)); }
+                        }
+                        let reply = match virtual_displays.remove(id) {
+                            Ok(()) => {
+                                displays.tell(DisplayNotice::ViewerRemoved);
+                                monitors.retain(|monitor| monitor.id != id);
+                                Control::MonitorList { monitors: monitors.clone() }
+                            }
+                            Err(code) => Control::VirtualDisplayRefused { code: code.into() },
+                        };
+                        let _ = sender.send_frame(Tag::Control, &seal_control(&control_sealer, &reply)).await;
                     }
                     Some(Control::RequestKeyframe) => video.send(VideoCommand::RequestKeyframe),
                     Some(Control::Ping { sent_us }) => {
@@ -646,13 +751,24 @@ where
                 }
             },
             Some(event) = video_events.recv() => match event {
-                VideoEvent::Monitors(monitors) => {
-                    monitor_ids = monitors.iter().map(|monitor| monitor.id).collect();
+                VideoEvent::Monitors(mut list) => {
+                    virtual_displays.annotate(&mut list);
+                    monitors = list;
                     // Capture left a vanished monitor for the main one.
-                    if unpack_display(display.load(Ordering::Acquire)).is_some_and(|id| !monitor_ids.contains(&id)) {
+                    if unpack_display(display.load(Ordering::Acquire)).is_some_and(|id| !monitors.iter().any(|monitor| monitor.id == id)) {
                         display.store(pack_display(None), Ordering::Release);
                     }
-                    let _ = sender.send_frame(Tag::Control, &seal_control(&control_sealer, &Control::MonitorList { monitors })).await;
+                    let _ = sender.send_frame(Tag::Control, &seal_control(&control_sealer, &Control::MonitorList { monitors: monitors.clone() })).await;
+                }
+                VideoEvent::Shown(id) => {
+                    display.store(pack_display(Some(id)), Ordering::Release);
+                    let _ = sender.send_frame(Tag::Control, &seal_control(&control_sealer, &Control::VirtualDisplayAdded { id })).await;
+                }
+                VideoEvent::NotShown(id) => {
+                    log::warn!("virtual display {id} never showed up for capture; removing it");
+                    let _ = virtual_displays.remove(id);
+                    let refused = Control::VirtualDisplayRefused { code: protocol::control::VIRTUAL_DISPLAY_FAILED.into() };
+                    let _ = sender.send_frame(Tag::Control, &seal_control(&control_sealer, &refused)).await;
                 }
                 VideoEvent::CaptureLost => {
                     log::warn!("screen capture stopped and could not be restarted; ending the session");
@@ -810,6 +926,8 @@ where
 /// Requests from the session loop to the encode thread.
 enum VideoCommand {
     SelectMonitor(u32),
+    /// Switch to a new display as soon as capture lists it.
+    ShowDisplay(u32),
     RequestKeyframe,
 }
 
@@ -820,6 +938,11 @@ enum VideoEvent {
     Monitors(Vec<protocol::control::MonitorInfo>),
     /// Capture stayed down past the restore window.
     CaptureLost,
+    /// Capture switched to the display from `ShowDisplay`. A `Monitors`
+    /// event listing it comes first.
+    Shown(u32),
+    /// The display from `ShowDisplay` never showed up.
+    NotShown(u32),
 }
 
 /// Async-side handle of the capture/encode thread. Dropping it stops the
@@ -924,10 +1047,12 @@ fn run_video_thread<C, E, F>(
     }
     let VideoLink { commands, units, events, capture_restore } = link;
     let mut last_encode: Option<Instant> = None;
+    let mut awaited = AwaitedDisplay::default();
     loop {
         loop {
             match commands.try_recv() {
                 Ok(VideoCommand::SelectMonitor(id)) => { capturer.select_monitor(id); }
+                Ok(VideoCommand::ShowDisplay(id)) => awaited.start(id, Instant::now()),
                 Ok(VideoCommand::RequestKeyframe) => {
                     if !video.request_keyframe() { log::debug!("keyframe request ignored: one was just sent"); }
                 }
@@ -937,6 +1062,9 @@ fn run_video_thread<C, E, F>(
         }
         if let Some(monitors) = capturer.monitors_changed() {
             let _ = events.send(VideoEvent::Monitors(monitors));
+        }
+        for event in awaited.check(&mut capturer, Instant::now()) {
+            let _ = events.send(event);
         }
         if capturer.stalled_since().is_some_and(|since| since.elapsed() >= capture_restore) {
             let _ = events.send(VideoEvent::CaptureLost);
@@ -965,6 +1093,40 @@ fn run_video_thread<C, E, F>(
             }
         }
         last_encode = Some(Instant::now());
+    }
+}
+
+/// A new display the encode thread switches to once capture lists it.
+#[derive(Default)]
+struct AwaitedDisplay {
+    pending: Option<(u32, Instant)>,
+    next_check: Option<Instant>,
+}
+
+impl AwaitedDisplay {
+    const CHECK_EVERY: Duration = Duration::from_millis(250);
+
+    fn start(&mut self, id: u32, now: Instant) {
+        self.pending = Some((id, now + VIRTUAL_DISPLAY_WAIT));
+        self.next_check = Some(now);
+    }
+
+    fn check<C: ScreenCapturer>(&mut self, capturer: &mut C, now: Instant) -> Vec<VideoEvent> {
+        let Some((id, deadline)) = self.pending else { return Vec::new() };
+        if self.next_check.is_some_and(|at| now < at) {
+            return Vec::new();
+        }
+        self.next_check = Some(now + Self::CHECK_EVERY);
+        let monitors = capturer.monitors();
+        if monitors.iter().any(|monitor| monitor.id == id) && capturer.select_monitor(id) {
+            self.pending = None;
+            return vec![VideoEvent::Monitors(monitors), VideoEvent::Shown(id)];
+        }
+        if now >= deadline {
+            self.pending = None;
+            return vec![VideoEvent::NotShown(id)];
+        }
+        Vec::new()
     }
 }
 
@@ -1472,7 +1634,7 @@ async fn run_viewer_media_loop_with_control(
                 peer_deadline = tokio::time::Instant::now() + dead_peer;
                 match Control::from_bytes(&plaintext) {
                     Some(Control::Bye { .. }) => return Err(crate::reconnect::HOST_ENDED_MESSAGE.into()),
-                    Some(Control::MonitorList { .. }) => {
+                    Some(Control::MonitorList { .. } | Control::VirtualDisplaySupport { .. } | Control::VirtualDisplayAdded { .. } | Control::VirtualDisplayRefused { .. }) => {
                         if let Some(sink) = &monitor_sink { let _ = sink.send(plaintext).await; }
                     }
                     Some(Control::Pong { sent_us }) if relay_ping.is_some() => {
@@ -1599,7 +1761,7 @@ where
     run_host_session_with_data_and_accept_and_2fa_with_factory(
         ws, password, ice_session, ScapCapturer::new,
         default_encoder,
-        default_injector, false, false, None, || async { true }, None, SessionTimings::default(),
+        default_injector, false, false, None, || async { true }, None, SessionTimings::default(), HostDisplays::default(),
     )
     .await
 }
@@ -1647,6 +1809,25 @@ where
     A: FnOnce() -> Fut,
     Fut: Future<Output = bool>,
 {
+    run_default_host_session_with_displays(
+        ws, password, ice_session, unattended_enabled, twofa_enabled, totp_secret, approve, data_ready,
+        HostDisplays::platform(false),
+    ).await
+}
+
+/// Like [`run_default_host_session_with_data_and_accept_and_2fa`], with
+/// the host's virtual display settings.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_default_host_session_with_displays<S, A, Fut>(
+    ws: WebSocketStream<S>, password: &str, ice_session: &str,
+    unattended_enabled: bool, twofa_enabled: bool, totp_secret: Option<&str>,
+    approve: A, data_ready: oneshot::Sender<DataHandle>, displays: HostDisplays,
+) -> SessionResult<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    A: FnOnce() -> Fut,
+    Fut: Future<Output = bool>,
+{
     run_host_session_with_data_and_accept_and_2fa_with_factory(
         ws,
         password,
@@ -1660,6 +1841,7 @@ where
         approve,
         Some(data_ready),
         SessionTimings::default(),
+        displays,
     )
     .await
 }
@@ -2382,7 +2564,7 @@ mod tests {
                     ws, PASSWORD, SESSION, || Some(FakeCapturer::new(64, 64)),
                     |width, height| H264Encoder::new(width, height, 15, 1_000_000),
                     || Box::new(NoopInjector::default()) as Box<dyn InputInjector>,
-                    false, false, None, approve, ready, timings,
+                    false, false, None, approve, ready, timings, HostDisplays::default(),
                 ).await
             })
         }
@@ -2579,7 +2761,7 @@ mod tests {
                     host_ws, PASSWORD, SESSION, || None::<FakeCapturer>,
                     |width, height| H264Encoder::new(width, height, 15, 1_000_000),
                     || Box::new(NoopInjector::default()) as Box<dyn InputInjector>,
-                    false, false, None, || async { true }, None, timings,
+                    false, false, None, || async { true }, None, timings, HostDisplays::default(),
                 ).await
             });
             let viewer = spawn_viewer(viewer_ws, timings);
@@ -2647,19 +2829,25 @@ mod tests {
             fn stalled_since(&self) -> Option<Instant> { self.script().stalled_since }
 
             fn monitors_changed(&mut self) -> Option<Vec<protocol::control::MonitorInfo>> { self.script().changed.take() }
+
+            fn select_monitor(&mut self, id: u32) -> bool { self.script().monitors.iter().any(|monitor| monitor.id == id) }
         }
 
         fn monitor(id: u32) -> protocol::control::MonitorInfo {
-            protocol::control::MonitorInfo { id, name: format!("D{id}"), width: 0, height: 0, is_primary: id == 1 }
+            protocol::control::MonitorInfo { id, name: format!("D{id}"), width: 0, height: 0, is_primary: id == 1, is_virtual: false }
         }
 
         fn spawn_scripted_host(ws: WebSocketStream<DuplexStream>, timings: SessionTimings, capturer: Scripted) -> JoinHandle<SessionResult<()>> {
+            spawn_scripted_host_with(ws, timings, capturer, HostDisplays::default())
+        }
+
+        fn spawn_scripted_host_with(ws: WebSocketStream<DuplexStream>, timings: SessionTimings, capturer: Scripted, displays: HostDisplays) -> JoinHandle<SessionResult<()>> {
             tokio::spawn(async move {
                 run_host_session_with_data_and_accept_and_2fa_with_factory(
                     ws, PASSWORD, SESSION, || Some(capturer),
                     |width, height| H264Encoder::new(width, height, 15, 1_000_000),
                     || Box::new(NoopInjector::default()) as Box<dyn InputInjector>,
-                    false, false, None, || async { true }, None, timings,
+                    false, false, None, || async { true }, None, timings, displays,
                 ).await
             })
         }
@@ -2745,6 +2933,137 @@ mod tests {
             assert_eq!(list(second), vec![monitor(1), monitor(2)]);
             host.abort();
             viewer.abort();
+        }
+
+        /// A viewer of a scripted host, with its control channel and the
+        /// display messages the host sent.
+        struct DisplayRig {
+            host: JoinHandle<SessionResult<()>>,
+            viewer: JoinHandle<Result<(), ViewerSessionError>>,
+            capturer: Scripted,
+            backend: Arc<vdisplay::fake::FakeDisplays>,
+            notices: Arc<Mutex<Vec<DisplayNotice>>>,
+            control: Option<DataHandle>,
+            messages: mpsc::Receiver<Vec<u8>>,
+            _frames: JoinHandle<()>,
+        }
+
+        impl DisplayRig {
+            async fn start(present: Option<bool>, allow: bool, monitors: Vec<protocol::control::MonitorInfo>, backend: vdisplay::fake::FakeDisplays) -> Self {
+                let timings = SessionTimings::default();
+                let (_relay, host_ws, viewer_ws) = TestRelay::start(Duration::from_secs(3600)).await;
+                let capturer = Scripted::default();
+                capturer.script().monitors = monitors;
+                let backend = Arc::new(backend);
+                let notices = Arc::new(Mutex::new(Vec::new()));
+                let recorded = Arc::clone(&notices);
+                let displays = HostDisplays {
+                    backend: backend.clone(),
+                    allow_virtual: allow,
+                    present: Arc::new(move || present),
+                    notify: Some(Arc::new(move |notice| recorded.lock().unwrap().push(notice))),
+                };
+                let host = spawn_scripted_host_with(host_ws, timings, capturer.clone(), displays);
+                let (frame_tx, mut frames) = mpsc::channel(64);
+                let (monitor_tx, messages) = mpsc::channel(16);
+                let (input, input_rx) = mpsc::channel(4);
+                let (ready_tx, ready_rx) = oneshot::channel();
+                let viewer = tokio::spawn(async move {
+                    let _input = input;
+                    run_viewer_session_inner(viewer_ws, PASSWORD, SESSION, frame_tx, input_rx, Some(ready_tx), Some(monitor_tx), None, None, timings)
+                        .await
+                        .map_err(viewer_session_error)
+                });
+                let frames = tokio::spawn(async move { while frames.recv().await.is_some() {} });
+                let control = timeout(Duration::from_secs(20), ready_rx).await.ok().and_then(Result::ok);
+                Self { host, viewer, capturer, backend, notices, control, messages, _frames: frames }
+            }
+
+            async fn send(&self, control: Control) {
+                let handle = self.control.as_ref().expect("session is up");
+                handle.control_sender.send_frame(Tag::Control, &seal_control(&handle.control_sealer, &control)).await.unwrap();
+            }
+
+            async fn next(&mut self) -> Control {
+                let body = timeout(Duration::from_secs(10), self.messages.recv()).await.expect("no message from the host").expect("sink closed");
+                Control::from_bytes(&body).expect("a control message")
+            }
+
+            async fn end(self) -> Arc<vdisplay::fake::FakeDisplays> {
+                self.viewer.abort();
+                // The host notices the viewer's socket closing.
+                let _ = timeout(Duration::from_secs(10), self.host).await;
+                self.backend
+            }
+        }
+
+        fn virtual_monitor(id: u32) -> protocol::control::MonitorInfo {
+            protocol::control::MonitorInfo { is_virtual: true, ..monitor(id) }
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn viewer_adds_switches_to_and_removes_a_virtual_display() {
+            let mut rig = DisplayRig::start(Some(true), true, vec![monitor(1)], Default::default()).await;
+            assert_eq!(rig.next().await, Control::MonitorList { monitors: vec![monitor(1)] });
+            assert_eq!(rig.next().await, Control::VirtualDisplaySupport { max: vdisplay::MAX_PER_SESSION as u32 });
+
+            // The fake hands out 100 first; capture lists it once it exists.
+            rig.capturer.script().monitors = vec![monitor(1), monitor(100)];
+            rig.send(Control::AddVirtualDisplay { width: 2561, height: 1441, hidpi: false }).await;
+            assert_eq!(rig.next().await, Control::MonitorList { monitors: vec![monitor(1), virtual_monitor(100)] });
+            assert_eq!(rig.next().await, Control::VirtualDisplayAdded { id: 100 });
+            let (_, spec) = rig.backend.live()[0];
+            assert_eq!((spec.width, spec.height), (2560, 1440), "sizes are evened");
+
+            rig.send(Control::AddVirtualDisplay { width: 1280, height: 720, hidpi: false }).await;
+            rig.capturer.script().monitors = vec![monitor(1), monitor(100), monitor(101)];
+            assert!(matches!(rig.next().await, Control::MonitorList { .. }));
+            assert_eq!(rig.next().await, Control::VirtualDisplayAdded { id: 101 });
+            rig.send(Control::AddVirtualDisplay { width: 1280, height: 720, hidpi: false }).await;
+            assert_eq!(rig.next().await, Control::VirtualDisplayRefused { code: protocol::control::VIRTUAL_DISPLAY_LIMIT.into() });
+
+            rig.send(Control::RemoveVirtualDisplay { id: 1 }).await;
+            assert_eq!(rig.next().await, Control::VirtualDisplayRefused { code: protocol::control::VIRTUAL_DISPLAY_UNKNOWN.into() });
+            rig.send(Control::RemoveVirtualDisplay { id: 100 }).await;
+            assert_eq!(rig.next().await, Control::MonitorList { monitors: vec![monitor(1), virtual_monitor(101)] });
+            assert_eq!(rig.backend.owned(), vec![101]);
+            assert_eq!(*rig.notices.lock().unwrap(), [DisplayNotice::ViewerAdded, DisplayNotice::ViewerAdded, DisplayNotice::ViewerRemoved]);
+
+            let backend = rig.end().await;
+            assert!(backend.owned().is_empty(), "ending the session removes the viewer's displays");
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn hosts_that_do_not_allow_virtual_displays_never_offer_them() {
+            let mut rig = DisplayRig::start(Some(true), false, vec![monitor(1)], Default::default()).await;
+            assert!(matches!(rig.next().await, Control::MonitorList { .. }));
+            rig.send(Control::AddVirtualDisplay { width: 1920, height: 1080, hidpi: false }).await;
+            assert_eq!(rig.next().await, Control::VirtualDisplayRefused { code: protocol::control::VIRTUAL_DISPLAY_NOT_ALLOWED.into() });
+            assert!(rig.backend.owned().is_empty());
+            rig.end().await;
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_headless_host_adds_a_display_for_the_session() {
+            let mut rig = DisplayRig::start(Some(false), true, vec![monitor(100)], Default::default()).await;
+            // The headless display is the host's, not the viewer's to remove.
+            assert!(matches!(rig.next().await, Control::MonitorList { monitors } if monitors == vec![monitor(100)]));
+            assert_eq!(rig.backend.owned(), vec![100]);
+            assert_eq!(rig.backend.live()[0].1, DisplaySpec::headless());
+            assert_eq!(*rig.notices.lock().unwrap(), [DisplayNotice::HeadlessAdded]);
+            let backend = rig.end().await;
+            assert!(backend.owned().is_empty(), "the headless display goes with the session");
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_headless_host_that_cannot_add_a_display_says_so() {
+            for (allow, backend) in [(false, vdisplay::fake::FakeDisplays::default()), (true, vdisplay::fake::FakeDisplays::unsupported())] {
+                let rig = DisplayRig::start(Some(false), allow, Vec::new(), backend).await;
+                assert!(rig.control.is_none());
+                let error = timeout(Duration::from_secs(10), rig.viewer).await.unwrap().unwrap().expect_err("no screen ends the session");
+                assert_eq!(crate::reconnect::rejection_code(&error.message), Some(reject_code::NO_DISPLAY), "{}", error.message);
+                assert!(crate::reconnect::stop_message(&error.message, error.reason, false).contains("no screen connected"));
+            }
         }
 
         #[tokio::test(flavor = "multi_thread")]
