@@ -5,7 +5,7 @@ use scap::capturer::Options;
 use scap::frame::{Frame, FrameType};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc as std_mpsc, Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 // Scap 0.0.8 supplies the platform engines here: ScreenCaptureKit on macOS,
 // Windows.Graphics.Capture on Windows, and PipeWire/portal on Linux. The
@@ -47,11 +47,27 @@ pub trait ScreenCapturer {
     fn monitors(&self) -> Vec<MonitorInfo> { Vec::new() }
 
     fn select_monitor(&mut self, _id: u32) -> bool { false }
+
+    /// Since when capture has been down and is being restarted; `None`
+    /// while it runs.
+    fn stalled_since(&self) -> Option<Instant> { None }
+
+    /// The displays, when they changed since the last call.
+    fn monitors_changed(&mut self) -> Option<Vec<MonitorInfo>> { None }
 }
 
 /// How long the capture thread waits for a frame before it checks for
 /// monitor switches and shutdown.
 const CAPTURE_POLL: Duration = Duration::from_millis(20);
+/// How often the capture thread looks for added or removed displays.
+const MONITOR_CHECK: Duration = Duration::from_secs(2);
+/// First wait before restarting a stopped capture; doubles per failed
+/// attempt up to [`MAX_RESTART_DELAY`].
+const FIRST_RESTART_DELAY: Duration = Duration::from_millis(250);
+const MAX_RESTART_DELAY: Duration = Duration::from_secs(2);
+/// A restarted capture counts as working once it delivers a frame, or runs
+/// this long without failing (a static screen may send nothing).
+const RESTART_CONFIRM: Duration = Duration::from_secs(2);
 
 /// Newest frame published by the capture thread, tagged with the monitor
 /// generation it was captured for.
@@ -63,6 +79,17 @@ struct LatestFrame {
     /// Bumped by every requested monitor switch; frames tagged with an older
     /// generation come from the previous monitor and are discarded.
     generation: AtomicU64,
+    /// See [`ScreenCapturer::stalled_since`].
+    stalled: Mutex<Option<Instant>>,
+    /// A new display list the session has not taken yet.
+    monitors: Mutex<Option<Vec<MonitorInfo>>>,
+}
+
+impl LatestFrame {
+    fn publish(&self, generation: u64, frame: RawFrame) {
+        *self.slot.lock().unwrap_or_else(|poison| poison.into_inner()) = Some((generation, frame));
+        self.arrived.notify_all();
+    }
 }
 
 enum CaptureCommand {
@@ -102,12 +129,13 @@ impl ScapCapturer {
         let worker = std::thread::Builder::new()
             .name("opendesk-capture".into())
             .spawn(move || {
-                let Some(stream) = CaptureStream::start(None) else {
+                let mut platform = Scap;
+                let Some(stream) = platform.start(None) else {
                     let _ = ready_tx.send(false);
                     return;
                 };
                 let _ = ready_tx.send(true);
-                capture_loop(stream, &command_rx, &shared);
+                capture_loop(platform, stream, &command_rx, &shared, MONITOR_CHECK);
             })
             .ok()?;
         if !ready_rx.recv().unwrap_or(false) {
@@ -215,50 +243,170 @@ impl Drop for CaptureStream {
     }
 }
 
+/// The platform side of the capture thread, faked in tests.
+trait CapturePlatform {
+    type Stream: FrameSource;
+
+    /// Starts capturing `display`, or the main display if `None`.
+    fn start(&mut self, display: Option<u32>) -> Option<Self::Stream>;
+
+    fn monitors(&mut self) -> Vec<MonitorInfo>;
+}
+
+trait FrameSource {
+    /// Waits up to `timeout` for the newest frame. `Err` means the stream
+    /// stopped for good.
+    fn newest_frame(&self, timeout: Duration) -> Result<Option<RawFrame>, ()>;
+}
+
+struct Scap;
+
+impl CapturePlatform for Scap {
+    type Stream = CaptureStream;
+
+    fn start(&mut self, display: Option<u32>) -> Option<CaptureStream> {
+        match display {
+            Some(id) => CaptureStream::start_display(id),
+            None => CaptureStream::start(None),
+        }
+    }
+
+    fn monitors(&mut self) -> Vec<MonitorInfo> { list_monitors() }
+}
+
+impl FrameSource for CaptureStream {
+    fn newest_frame(&self, timeout: Duration) -> Result<Option<RawFrame>, ()> { CaptureStream::newest_frame(self, timeout) }
+}
+
+/// Restart state after capture stopped: when it stopped, and when to try
+/// again.
+#[derive(Debug, Default)]
+struct Recovery {
+    since: Option<Instant>,
+    failures: u32,
+    next_try: Option<Instant>,
+    restarted_at: Option<Instant>,
+}
+
+impl Recovery {
+    fn lost(&mut self, now: Instant) {
+        self.since.get_or_insert(now);
+        self.restarted_at = None;
+        self.next_try = Some(now + restart_delay(self.failures));
+    }
+
+    fn retry_due(&self, now: Instant) -> bool { self.next_try.is_some_and(|at| now >= at) }
+
+    fn failed(&mut self, now: Instant) {
+        self.failures = self.failures.saturating_add(1);
+        self.next_try = Some(now + restart_delay(self.failures));
+    }
+
+    /// A stream started; it still has to prove itself if capture was down.
+    fn started(&mut self, now: Instant) {
+        self.next_try = None;
+        if self.since.is_some() {
+            self.restarted_at = Some(now);
+        }
+    }
+
+    /// The running stream delivered a frame (`frame`) or nothing.
+    fn running(&mut self, now: Instant, frame: bool) {
+        if frame || self.restarted_at.is_some_and(|at| now.saturating_duration_since(at) >= RESTART_CONFIRM) {
+            *self = Self::default();
+        }
+    }
+}
+
+fn restart_delay(failures: u32) -> Duration {
+    FIRST_RESTART_DELAY.saturating_mul(1 << failures.min(8)).min(MAX_RESTART_DELAY)
+}
+
 /// Body of the capture thread. Returns when the capturer is dropped.
-fn capture_loop(
-    mut stream: CaptureStream,
+///
+/// A stream that stops (display unplugged or asleep, permission revoked) is
+/// restarted with backoff: on the same display, else on the main one. The
+/// display list is checked every `monitor_check`; a change is published for
+/// the session, and losing the captured display counts as a stop.
+fn capture_loop<P: CapturePlatform>(
+    mut platform: P,
+    stream: P::Stream,
     commands: &std_mpsc::Receiver<CaptureCommand>,
     latest: &LatestFrame,
+    monitor_check: Duration,
 ) {
+    let mut stream = Some(stream);
+    // The display being captured; `None` is the main display.
+    let mut display = None;
     let mut generation = 0;
+    let mut known = platform.monitors();
+    let mut next_check = Instant::now() + monitor_check;
+    let mut recovery = Recovery::default();
     loop {
         match commands.try_recv() {
             Ok(CaptureCommand::SelectMonitor { id, generation: requested }) => {
                 // The new engine starts before the old one stops, so a failed
                 // switch keeps capturing the current monitor.
-                if let Some(next) = CaptureStream::start_display(id) {
-                    stream = next;
+                if let Some(next) = platform.start(Some(id)) {
+                    stream = Some(next);
+                    display = Some(id);
                     generation = requested;
+                    recovery.started(Instant::now());
                 }
                 continue;
             }
             Err(std_mpsc::TryRecvError::Empty) => {}
             Err(std_mpsc::TryRecvError::Disconnected) => return,
         }
-        match stream.newest_frame(CAPTURE_POLL) {
-            Ok(Some(frame)) => {
-                *latest.slot.lock().unwrap_or_else(|poison| poison.into_inner()) =
-                    Some((generation, frame));
-                latest.arrived.notify_all();
+        let now = Instant::now();
+        if now >= next_check {
+            next_check = now + monitor_check;
+            let monitors = platform.monitors();
+            if monitors != known {
+                let captured = display.or_else(|| known.iter().find(|monitor| monitor.is_primary).map(|monitor| monitor.id));
+                if stream.is_some() && captured.is_some_and(|id| !monitors.iter().any(|monitor| monitor.id == id)) {
+                    log::warn!("the captured display went away");
+                    stream = None;
+                    recovery.lost(now);
+                }
+                *latest.monitors.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(monitors.clone());
+                known = monitors;
             }
-            Ok(None) => {}
-            Err(()) => {
-                log::warn!("screen capture stopped delivering frames");
-                // Only a monitor switch can restart capture now.
-                loop {
-                    let Ok(CaptureCommand::SelectMonitor { id, generation: requested }) =
-                        commands.recv()
-                    else {
-                        return;
-                    };
-                    if let Some(next) = CaptureStream::start_display(id) {
-                        stream = next;
-                        generation = requested;
-                        break;
+        }
+        match &stream {
+            Some(current) => match current.newest_frame(CAPTURE_POLL) {
+                Ok(Some(frame)) => {
+                    latest.publish(generation, frame);
+                    recovery.running(Instant::now(), true);
+                }
+                Ok(None) => recovery.running(Instant::now(), false),
+                Err(()) => {
+                    log::warn!("screen capture stopped delivering frames; restarting it");
+                    stream = None;
+                    recovery.lost(Instant::now());
+                }
+            },
+            None if recovery.retry_due(now) => {
+                let restarted = display
+                    .and_then(|id| platform.start(Some(id)).map(|next| (next, Some(id))))
+                    .or_else(|| platform.start(None).map(|next| (next, None)));
+                match restarted {
+                    Some((next, on)) => {
+                        if on != display {
+                            log::info!("screen capture moved to the main display");
+                        }
+                        stream = Some(next);
+                        display = on;
+                        recovery.started(Instant::now());
                     }
+                    None => recovery.failed(Instant::now()),
                 }
             }
+            None => std::thread::sleep(CAPTURE_POLL),
+        }
+        let mut stalled = latest.stalled.lock().unwrap_or_else(|poison| poison.into_inner());
+        if *stalled != recovery.since {
+            *stalled = recovery.since;
         }
     }
 }
@@ -349,6 +497,30 @@ fn selected_monitor_id(monitors: &[MonitorInfo], id: u32) -> Option<u32> {
     monitors.iter().find(|monitor| monitor.id == id).map(|monitor| monitor.id)
 }
 
+fn list_monitors() -> Vec<MonitorInfo> {
+    scap::get_all_targets()
+        .into_iter()
+        .enumerate()
+        .filter_map(|target| match target {
+            (index, scap::Target::Display(display)) => {
+                // scap 0.0.8 exposes display IDs and titles publicly, but
+                // keeps get_target_dimensions private. Keep the metadata
+                // shape stable and report unknown dimensions as zero.
+                let (width, height) = (0, 0);
+                let primary = index == 0;
+                Some(MonitorInfo {
+                    id: display.id,
+                    name: display.title,
+                    width: u32::try_from(width).ok()?,
+                    height: u32::try_from(height).ok()?,
+                    is_primary: primary,
+                })
+            }
+            (_, scap::Target::Window(_)) => None,
+        })
+        .collect()
+}
+
 impl ScreenCapturer for ScapCapturer {
     fn next_frame(&mut self) -> Option<RawFrame> {
         let (generation, frame) =
@@ -367,28 +539,14 @@ impl ScreenCapturer for ScapCapturer {
         (generation == self.latest.generation.load(Ordering::Acquire)).then_some(frame)
     }
 
-    fn monitors(&self) -> Vec<MonitorInfo> {
-        scap::get_all_targets()
-            .into_iter()
-            .enumerate()
-            .filter_map(|target| match target {
-                (index, scap::Target::Display(display)) => {
-                    // scap 0.0.8 exposes display IDs and titles publicly, but
-                    // keeps get_target_dimensions private. Keep the metadata
-                    // shape stable and report unknown dimensions as zero.
-                    let (width, height) = (0, 0);
-                    let primary = index == 0;
-                    Some(MonitorInfo {
-                        id: display.id,
-                        name: display.title,
-                        width: u32::try_from(width).ok()?,
-                        height: u32::try_from(height).ok()?,
-                        is_primary: primary,
-                    })
-                }
-                (_, scap::Target::Window(_)) => None,
-            })
-            .collect()
+    fn monitors(&self) -> Vec<MonitorInfo> { list_monitors() }
+
+    fn stalled_since(&self) -> Option<Instant> {
+        *self.latest.stalled.lock().unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    fn monitors_changed(&mut self) -> Option<Vec<MonitorInfo>> {
+        self.latest.monitors.lock().unwrap_or_else(|poison| poison.into_inner()).take()
     }
 
     /// Asks the capture thread to switch to monitor `id`. Frames from the
@@ -460,6 +618,169 @@ mod tests {
         let f = c.next_frame().expect("frame");
         assert_eq!((f.width, f.height), (320, 240));
         assert!(!f.data.is_empty());
+    }
+
+    #[test]
+    fn restarts_back_off_and_a_restart_must_prove_itself() {
+        let start = Instant::now();
+        let ms = |ms| start + Duration::from_millis(ms);
+        let mut recovery = Recovery::default();
+        recovery.lost(start);
+        assert_eq!(recovery.since, Some(start));
+        assert!(!recovery.retry_due(ms(249)));
+        assert!(recovery.retry_due(ms(250)));
+        recovery.failed(ms(250));
+        assert!(!recovery.retry_due(ms(749)));
+        assert!(recovery.retry_due(ms(750)));
+        assert_eq!(restart_delay(10), MAX_RESTART_DELAY);
+
+        // A restart that fails again keeps the original stall time.
+        recovery.started(ms(800));
+        recovery.running(ms(900), false);
+        recovery.lost(ms(1_000));
+        assert_eq!(recovery.since, Some(start));
+
+        // Running quietly long enough, or a frame, ends the stall.
+        recovery.started(ms(2_000));
+        recovery.running(ms(2_000) + RESTART_CONFIRM, false);
+        assert_eq!(recovery.since, None);
+        recovery.lost(ms(5_000));
+        recovery.started(ms(5_300));
+        recovery.running(ms(5_310), true);
+        assert_eq!(recovery.since, None);
+    }
+
+    /// A stream that delivers a frame per poll until its flag is set.
+    struct FakeStream {
+        failed: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl FrameSource for FakeStream {
+        fn newest_frame(&self, _timeout: Duration) -> Result<Option<RawFrame>, ()> {
+            if self.failed.load(Ordering::SeqCst) {
+                return Err(());
+            }
+            std::thread::sleep(Duration::from_millis(5));
+            Ok(FakeCapturer::new(4, 4).next_frame())
+        }
+    }
+
+    /// Displays and start results the test controls; records every start.
+    #[derive(Clone, Default)]
+    struct FakePlatform {
+        monitors: Arc<Mutex<Vec<MonitorInfo>>>,
+        starts: Arc<Mutex<Vec<Option<u32>>>>,
+        /// Starts to refuse before one succeeds.
+        refuse: Arc<std::sync::atomic::AtomicUsize>,
+        /// Fails the stream started last.
+        current: Arc<Mutex<Arc<std::sync::atomic::AtomicBool>>>,
+    }
+
+    impl FakePlatform {
+        fn with_monitors(ids: &[u32]) -> Self {
+            let platform = Self::default();
+            *platform.monitors.lock().unwrap() = monitors(ids);
+            platform
+        }
+
+        fn fail_stream(&self) { self.current.lock().unwrap().store(true, Ordering::SeqCst); }
+
+        fn starts(&self) -> Vec<Option<u32>> { self.starts.lock().unwrap().clone() }
+    }
+
+    impl CapturePlatform for FakePlatform {
+        type Stream = FakeStream;
+
+        fn start(&mut self, display: Option<u32>) -> Option<FakeStream> {
+            self.starts.lock().unwrap().push(display);
+            let listed = display.is_none_or(|id| self.monitors.lock().unwrap().iter().any(|monitor| monitor.id == id));
+            let refused = self.refuse.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| left.checked_sub(1)).is_ok();
+            if !listed || refused {
+                return None;
+            }
+            let failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            *self.current.lock().unwrap() = Arc::clone(&failed);
+            Some(FakeStream { failed })
+        }
+
+        fn monitors(&mut self) -> Vec<MonitorInfo> { self.monitors.lock().unwrap().clone() }
+    }
+
+    fn monitors(ids: &[u32]) -> Vec<MonitorInfo> {
+        ids.iter().enumerate().map(|(index, &id)| MonitorInfo { id, name: format!("D{id}"), width: 0, height: 0, is_primary: index == 0 }).collect()
+    }
+
+    struct Loop {
+        latest: Arc<LatestFrame>,
+        commands: Option<std_mpsc::Sender<CaptureCommand>>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Loop {
+        fn start(mut platform: FakePlatform, monitor_check: Duration) -> Self {
+            let latest = Arc::new(LatestFrame::default());
+            let (commands, command_rx) = std_mpsc::channel();
+            let shared = Arc::clone(&latest);
+            let stream = platform.start(None).expect("first stream");
+            let thread = std::thread::spawn(move || capture_loop(platform, stream, &command_rx, &shared, monitor_check));
+            Self { latest, commands: Some(commands), thread: Some(thread) }
+        }
+
+        fn stalled(&self) -> bool { self.latest.stalled.lock().unwrap().is_some() }
+
+        /// Waits for `condition`, up to two seconds.
+        fn until(&self, what: &str, condition: impl Fn(&Self) -> bool) {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !condition(self) {
+                assert!(Instant::now() < deadline, "timed out waiting until {what}");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+
+        fn fresh_frame(&self) -> bool {
+            self.latest.slot.lock().unwrap().take();
+            self.until("a frame arrives", |capture| capture.latest.slot.lock().unwrap().is_some());
+            true
+        }
+    }
+
+    impl Drop for Loop {
+        fn drop(&mut self) {
+            self.commands.take();
+            if let Some(thread) = self.thread.take() { thread.join().unwrap(); }
+        }
+    }
+
+    #[test]
+    fn a_stopped_capture_restarts_with_backoff() {
+        let platform = FakePlatform::with_monitors(&[1]);
+        let capture = Loop::start(platform.clone(), Duration::from_secs(3600));
+        assert!(capture.fresh_frame());
+
+        platform.refuse.store(2, Ordering::SeqCst);
+        platform.fail_stream();
+        capture.until("the stall is reported", Loop::stalled);
+        capture.until("capture runs again", |capture| !capture.stalled());
+        assert!(capture.fresh_frame());
+        // The first stream, two refused restarts, then the one that worked.
+        assert_eq!(platform.starts(), [None, None, None, None]);
+    }
+
+    #[test]
+    fn a_lost_display_falls_back_to_the_main_one() {
+        let platform = FakePlatform::with_monitors(&[1, 7]);
+        let capture = Loop::start(platform.clone(), Duration::from_millis(20));
+        let generation = capture.latest.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        capture.commands.as_ref().unwrap().send(CaptureCommand::SelectMonitor { id: 7, generation }).unwrap();
+        capture.until("monitor 7 is captured", |_| platform.starts().len() == 2);
+
+        // Unplugged: the list changes and the stream on it is given up.
+        *platform.monitors.lock().unwrap() = monitors(&[1]);
+        capture.until("the new list is published", |capture| capture.latest.monitors.lock().unwrap().is_some());
+        assert_eq!(capture.latest.monitors.lock().unwrap().take(), Some(monitors(&[1])));
+        capture.until("capture runs again", |capture| platform.starts().len() == 4 && !capture.stalled());
+        assert!(capture.fresh_frame());
+        assert_eq!(platform.starts(), [None, Some(7), Some(7), None], "the same display first, then the main one");
     }
 
     #[test]

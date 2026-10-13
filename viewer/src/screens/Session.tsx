@@ -53,9 +53,11 @@ export default function Session({ remoteId, role, status = "in_session", onDisco
   useEffect(() => {
     if (role !== "viewer") return;
     let stop: (() => void) | undefined;
+    // The host resends the list when its displays change and keeps
+    // capturing the chosen one while it is still there.
     const listener = api.onMonitorList(({ monitors: next }) => {
       setMonitors(next);
-      setSelectedMonitor(next.find((monitor) => monitor.is_primary)?.id ?? next[0]?.id);
+      setSelectedMonitor((current) => next.some((monitor) => monitor.id === current) ? current : next.find((monitor) => monitor.is_primary)?.id ?? next[0]?.id);
     });
     void listener.then((unlisten) => { stop = unlisten; });
     return () => { if (stop) stop(); else void listener.then((unlisten) => unlisten()); };

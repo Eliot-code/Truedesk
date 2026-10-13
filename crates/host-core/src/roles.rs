@@ -180,6 +180,10 @@ pub const DEAD_PEER_TIMEOUT: Duration = Duration::from_secs(45);
 /// until the request is answered: a minute is enough to notice the prompt
 /// and walk over, without locking the host out for long when nobody is there.
 pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long capture may stay down mid-session (display unplugged or asleep,
+/// permission revoked) while it is restarted. Past that the session ends and
+/// the viewer is told the host cannot share its screen.
+pub const CAPTURE_RESTORE_WINDOW: Duration = Duration::from_secs(10);
 
 /// Liveness timings of a session; tests shorten them.
 #[derive(Debug, Clone, Copy)]
@@ -187,10 +191,13 @@ struct SessionTimings {
     keepalive: Duration,
     dead_peer: Duration,
     approval: Duration,
+    capture_restore: Duration,
 }
 
 impl Default for SessionTimings {
-    fn default() -> Self { Self { keepalive: KEEPALIVE_INTERVAL, dead_peer: DEAD_PEER_TIMEOUT, approval: APPROVAL_TIMEOUT } }
+    fn default() -> Self {
+        Self { keepalive: KEEPALIVE_INTERVAL, dead_peer: DEAD_PEER_TIMEOUT, approval: APPROVAL_TIMEOUT, capture_restore: CAPTURE_RESTORE_WINDOW }
+    }
 }
 
 fn seal_control(sealer: &SharedSealer, control: &Control) -> Vec<u8> {
@@ -569,7 +576,7 @@ where
     // nonce sequence) on this key: a second Sealer::new on control_send_key
     // would restart the counter at 0 and reuse a nonce with MonitorList.
     let monitors = capturer.monitors();
-    let monitor_ids: Vec<u32> = monitors.iter().map(|monitor| monitor.id).collect();
+    let mut monitor_ids: Vec<u32> = monitors.iter().map(|monitor| monitor.id).collect();
     let monitor_list = Control::MonitorList { monitors };
     reliable.sender().send_frame(Tag::Control, &seal_control(&control_sealer, &monitor_list)).await?;
     let path = transport.path();
@@ -592,7 +599,7 @@ where
     // mapping dimensions once the first frame is in.
     let dims = Arc::new(AtomicU32::new(0));
     let rate = transport_tx.rate_control();
-    let video = VideoSource::start(capturer, encoder_factory, Arc::clone(&dims), rate).await?;
+    let (video, mut video_events) = VideoSource::start(capturer, encoder_factory, Arc::clone(&dims), rate, timings.capture_restore).await?;
     // Input injection makes blocking OS calls, so it runs on its own thread
     // and never stalls capture/encode/send or audio. The injector is built on
     // that thread because platform injectors (Enigo) can be thread-affine.
@@ -636,6 +643,21 @@ where
                         let _ = sender.send_frame(Tag::Control, &seal_control(&control_sealer, &Control::Pong { sent_us })).await;
                     }
                     _ => {}
+                }
+            },
+            Some(event) = video_events.recv() => match event {
+                VideoEvent::Monitors(monitors) => {
+                    monitor_ids = monitors.iter().map(|monitor| monitor.id).collect();
+                    // Capture left a vanished monitor for the main one.
+                    if unpack_display(display.load(Ordering::Acquire)).is_some_and(|id| !monitor_ids.contains(&id)) {
+                        display.store(pack_display(None), Ordering::Release);
+                    }
+                    let _ = sender.send_frame(Tag::Control, &seal_control(&control_sealer, &Control::MonitorList { monitors })).await;
+                }
+                VideoEvent::CaptureLost => {
+                    log::warn!("screen capture stopped and could not be restarted; ending the session");
+                    send_rejection(&sender, &control_sealer, reject_code::CAPTURE_UNAVAILABLE).await;
+                    return Err(Box::new(SessionError("screen capture stopped and could not be restarted")));
                 }
             },
             ended = &mut input_forwarder.0 => {
@@ -791,6 +813,15 @@ enum VideoCommand {
     RequestKeyframe,
 }
 
+/// News from the encode thread for the session loop.
+#[derive(Debug)]
+enum VideoEvent {
+    /// The host's displays changed; the viewer needs the new list.
+    Monitors(Vec<protocol::control::MonitorInfo>),
+    /// Capture stayed down past the restore window.
+    CaptureLost,
+}
+
 /// Async-side handle of the capture/encode thread. Dropping it stops the
 /// thread (which then drops the capturer and encoder) within one poll.
 struct VideoSource {
@@ -801,7 +832,9 @@ struct VideoSource {
 impl VideoSource {
     /// Starts the encode thread and waits until the first frame was captured
     /// and the encoder created (or either failed).
-    async fn start<C, E, F>(capturer: C, encoder_factory: F, dims: Arc<AtomicU32>, rate: Arc<transport::RateControl>) -> SessionResult<Self>
+    async fn start<C, E, F>(
+        capturer: C, encoder_factory: F, dims: Arc<AtomicU32>, rate: Arc<transport::RateControl>, capture_restore: Duration,
+    ) -> SessionResult<(Self, mpsc::UnboundedReceiver<VideoEvent>)>
     where
         C: ScreenCapturer + Send + 'static,
         E: Encoder + 'static,
@@ -810,15 +843,17 @@ impl VideoSource {
         let (commands, command_rx) = std::sync::mpsc::channel();
         let units = Arc::new(UnitSlot::default());
         let (ready_tx, ready_rx) = oneshot::channel();
+        let (events, event_rx) = mpsc::unbounded_channel();
         let thread_units = Arc::clone(&units);
         std::thread::Builder::new()
             .name("opendesk-video-encode".into())
             .spawn(move || {
                 let _close = CloseOnExit(&thread_units);
-                run_video_thread(capturer, encoder_factory, dims, rate, &command_rx, &thread_units, ready_tx);
+                let link = VideoLink { commands: &command_rx, units: &thread_units, events, capture_restore };
+                run_video_thread(capturer, encoder_factory, dims, rate, link, ready_tx);
             })?;
         match ready_rx.await {
-            Ok(Ok(())) => Ok(Self { commands, units }),
+            Ok(Ok(())) => Ok((Self { commands, units }, event_rx)),
             Ok(Err(message)) => Err(message.into()),
             Err(_) => Err(Box::new(SessionError("video encode thread stopped"))),
         }
@@ -839,16 +874,25 @@ impl Drop for CloseOnExit<'_> {
     fn drop(&mut self) { self.0.close(); }
 }
 
+/// How the encode thread talks to the session loop.
+struct VideoLink<'a> {
+    commands: &'a std::sync::mpsc::Receiver<VideoCommand>,
+    units: &'a UnitSlot,
+    events: mpsc::UnboundedSender<VideoEvent>,
+    capture_restore: Duration,
+}
+
 /// Body of the encode thread: encode each new capture as soon as it arrives
 /// and the transport has taken the previous access unit; on a static screen
-/// repeat the last frame slowly.
+/// repeat the last frame slowly. While capture restarts the last frame
+/// keeps going out; the session hears of display changes and of capture
+/// that could not be restored.
 fn run_video_thread<C, E, F>(
     mut capturer: C,
     encoder_factory: F,
     dims: Arc<AtomicU32>,
     rate: Arc<transport::RateControl>,
-    commands: &std::sync::mpsc::Receiver<VideoCommand>,
-    units: &UnitSlot,
+    link: VideoLink<'_>,
     ready: oneshot::Sender<Result<(), String>>,
 ) where
     C: ScreenCapturer,
@@ -878,6 +922,7 @@ fn run_video_thread<C, E, F>(
     if ready.send(Ok(())).is_err() {
         return;
     }
+    let VideoLink { commands, units, events, capture_restore } = link;
     let mut last_encode: Option<Instant> = None;
     loop {
         loop {
@@ -889,6 +934,15 @@ fn run_video_thread<C, E, F>(
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
             }
+        }
+        if let Some(monitors) = capturer.monitors_changed() {
+            let _ = events.send(VideoEvent::Monitors(monitors));
+        }
+        if capturer.stalled_since().is_some_and(|since| since.elapsed() >= capture_restore) {
+            let _ = events.send(VideoEvent::CaptureLost);
+            // Keep the unit slot open until the session has told the viewer.
+            while commands.recv().is_ok() {}
+            return;
         }
         // Encode only once the previous access unit is on its way: while the
         // link is busy the capturer keeps just the newest frame.
@@ -2560,6 +2614,137 @@ mod tests {
             assert_eq!(error.reason, DisconnectReason::CleanUserDisconnect);
             assert!(!crate::reconnect::should_reconnect(error.reason));
             host.abort();
+        }
+
+        /// A capturer whose displays and health the test changes mid-session.
+        #[derive(Clone, Default)]
+        struct Scripted(Arc<Mutex<Script>>);
+
+        #[derive(Default)]
+        struct Script {
+            stalled_since: Option<Instant>,
+            monitors: Vec<protocol::control::MonitorInfo>,
+            changed: Option<Vec<protocol::control::MonitorInfo>>,
+        }
+
+        impl Scripted {
+            fn script(&self) -> std::sync::MutexGuard<'_, Script> { self.0.lock().unwrap() }
+        }
+
+        impl crate::capture::ScreenCapturer for Scripted {
+            fn next_frame(&mut self) -> Option<encode::RawFrame> {
+                if self.script().stalled_since.is_some() { return None; }
+                FakeCapturer::new(64, 64).next_frame()
+            }
+
+            fn wait_frame(&mut self, timeout: Duration) -> Option<encode::RawFrame> {
+                std::thread::sleep(timeout.min(Duration::from_millis(16)));
+                self.next_frame()
+            }
+
+            fn monitors(&self) -> Vec<protocol::control::MonitorInfo> { self.script().monitors.clone() }
+
+            fn stalled_since(&self) -> Option<Instant> { self.script().stalled_since }
+
+            fn monitors_changed(&mut self) -> Option<Vec<protocol::control::MonitorInfo>> { self.script().changed.take() }
+        }
+
+        fn monitor(id: u32) -> protocol::control::MonitorInfo {
+            protocol::control::MonitorInfo { id, name: format!("D{id}"), width: 0, height: 0, is_primary: id == 1 }
+        }
+
+        fn spawn_scripted_host(ws: WebSocketStream<DuplexStream>, timings: SessionTimings, capturer: Scripted) -> JoinHandle<SessionResult<()>> {
+            tokio::spawn(async move {
+                run_host_session_with_data_and_accept_and_2fa_with_factory(
+                    ws, PASSWORD, SESSION, || Some(capturer),
+                    |width, height| H264Encoder::new(width, height, 15, 1_000_000),
+                    || Box::new(NoopInjector::default()) as Box<dyn InputInjector>,
+                    false, false, None, || async { true }, None, timings,
+                ).await
+            })
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn lost_capture_ends_the_session_and_tells_the_viewer() {
+            let timings = SessionTimings { capture_restore: Duration::from_millis(400), ..SessionTimings::default() };
+            let (_relay, host_ws, viewer_ws) = TestRelay::start(Duration::from_secs(3600)).await;
+            let capturer = Scripted::default();
+            let host = spawn_scripted_host(host_ws, timings, capturer.clone());
+            let mut viewer = spawn_viewer(viewer_ws, timings);
+            first_frame(&mut viewer).await;
+
+            capturer.script().stalled_since = Some(Instant::now());
+            let ended = timeout(Duration::from_secs(5), async {
+                loop {
+                    drain_frames(&mut viewer);
+                    if viewer.task.is_finished() { break; }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await;
+            assert!(ended.is_ok(), "the viewer kept getting a frozen picture");
+            let error = viewer.task.await.unwrap().expect_err("lost capture ends the session");
+            assert_eq!(crate::reconnect::rejection_code(&error.message), Some(reject_code::CAPTURE_UNAVAILABLE), "{}", error.message);
+            assert!(timeout(Duration::from_secs(3), host).await.expect("host kept running").unwrap().is_err());
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_brief_capture_stall_keeps_the_session() {
+            let timings = SessionTimings { capture_restore: Duration::from_secs(1), ..SessionTimings::default() };
+            let (_relay, host_ws, viewer_ws) = TestRelay::start(Duration::from_secs(3600)).await;
+            let capturer = Scripted::default();
+            let host = spawn_scripted_host(host_ws, timings, capturer.clone());
+            let mut viewer = spawn_viewer(viewer_ws, timings);
+            first_frame(&mut viewer).await;
+
+            capturer.script().stalled_since = Some(Instant::now());
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            capturer.script().stalled_since = None;
+            for _ in 0..6 {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                drain_frames(&mut viewer);
+            }
+            assert!(!host.is_finished(), "a restored capture must not end the session");
+            assert!(!viewer.task.is_finished());
+            host.abort();
+            viewer.task.abort();
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn changed_displays_reach_the_viewer() {
+            let timings = SessionTimings::default();
+            let (_relay, host_ws, viewer_ws) = TestRelay::start(Duration::from_secs(3600)).await;
+            let capturer = Scripted::default();
+            capturer.script().monitors = vec![monitor(1)];
+            let host = spawn_scripted_host(host_ws, timings, capturer.clone());
+            let (frame_tx, mut frames) = mpsc::channel(64);
+            let (monitor_tx, mut monitor_lists) = mpsc::channel(4);
+            let (_input, input_rx) = mpsc::channel(4);
+            let viewer = tokio::spawn(async move {
+                run_viewer_session_inner(viewer_ws, PASSWORD, SESSION, frame_tx, input_rx, None, Some(monitor_tx), None, None, timings).await
+            });
+            let list = |body: Vec<u8>| match Control::from_bytes(&body) {
+                Some(Control::MonitorList { monitors }) => monitors,
+                other => panic!("expected a monitor list, got {other:?}"),
+            };
+            let first = timeout(Duration::from_secs(20), monitor_lists.recv()).await.unwrap().unwrap();
+            assert_eq!(list(first), vec![monitor(1)]);
+            timeout(Duration::from_secs(20), frames.recv()).await.unwrap().unwrap();
+
+            capturer.script().changed = Some(vec![monitor(1), monitor(2)]);
+            let second = timeout(Duration::from_secs(3), async {
+                loop {
+                    tokio::select! {
+                        body = monitor_lists.recv() => break body.unwrap(),
+                        _ = frames.recv() => {}
+                    }
+                }
+            })
+            .await
+            .expect("the viewer never heard about the new display");
+            assert_eq!(list(second), vec![monitor(1), monitor(2)]);
+            host.abort();
+            viewer.abort();
         }
 
         #[tokio::test(flavor = "multi_thread")]

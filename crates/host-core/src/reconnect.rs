@@ -135,7 +135,7 @@ pub fn auth_failure_message(error: &str, after_session: bool) -> String {
         }
         Some(reject_code::NO_ANSWER) => "Nobody answered the connection request on the other device. Try again when someone is there.".to_owned(),
         Some(reject_code::CAPTURE_UNAVAILABLE) => {
-            "The other device can't share its screen. On that device, allow Screen Recording for OpenDesk, restart it, and connect again.".to_owned()
+            "The other device can't share its screen. On that device, check that a display is on and Screen Recording is allowed for OpenDesk, restart it, and connect again.".to_owned()
         }
         Some(other) => format!("The host rejected the session ({other})."),
         None => format!("{error}; authentication failed—check the password and connect again (it changes after every session)"),

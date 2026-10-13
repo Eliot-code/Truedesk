@@ -12,7 +12,7 @@ const { startVideo, requestKeyframe, closeDecoder, onAudioFrame, onMonitorList, 
   requestKeyframe: vi.fn(() => Promise.resolve()),
   closeDecoder: vi.fn(),
   onAudioFrame: vi.fn(() => Promise.resolve(vi.fn())),
-  onMonitorList: vi.fn(() => Promise.resolve(vi.fn())),
+  onMonitorList: vi.fn<(handler: (payload: { monitors: { id: number; name: string; width: number; height: number; is_primary: boolean }[] }) => void) => Promise<() => void>>(() => Promise.resolve(vi.fn())),
   onLinkStats: vi.fn<(handler: (payload: { path: "direct" | "relay"; rtt_ms: number | null }) => void) => Promise<() => void>>(() => Promise.resolve(vi.fn())),
   onFileOffer: vi.fn(() => Promise.resolve(vi.fn())),
   onFileProgress: vi.fn(() => Promise.resolve(vi.fn())),
@@ -127,6 +127,21 @@ describe("Session viewer transport", () => {
     fireEvent.click(view.getByRole("button", { name: "Record" }));
     await waitFor(() => expect(notify).toHaveBeenCalledWith("Could not start recording: Recording Downloads path must be a regular directory."));
     vi.unstubAllGlobals();
+  });
+
+  it("keeps the chosen monitor when the host's displays change", () => {
+    const view = render(<Session remoteId="123" role="viewer" status="in_session" onDisconnect={vi.fn()} />);
+    const list = onMonitorList.mock.calls[onMonitorList.mock.calls.length - 1][0];
+    const monitor = (id: number) => ({ id, name: `D${id}`, width: 0, height: 0, is_primary: id === 1 });
+    act(() => list({ monitors: [monitor(1), monitor(2)] }));
+    const select = () => view.getByRole("combobox", { name: "Monitor" }) as HTMLSelectElement;
+    fireEvent.change(select(), { target: { value: "2" } });
+    expect(selectMonitor).toHaveBeenLastCalledWith(2);
+    act(() => list({ monitors: [monitor(1), monitor(2), monitor(3)] }));
+    expect(select().value).toBe("2");
+    // Unplugged: the host went back to the main display.
+    act(() => list({ monitors: [monitor(1), monitor(3)] }));
+    expect(select().value).toBe("1");
   });
 
   it("shows link reports in the toolbar and clears them while reconnecting", () => {
