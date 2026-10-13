@@ -40,6 +40,7 @@ export default function Permissions({ onContinue }: PermissionsProps) {
         <h1>Permissions</h1>
         <p className="permissions-lead">Other devices can only see and control this computer once these are granted. You can still control other devices without them.</p>
         <div className="permission-cards">{statusCard("Screen Recording", screenGranted, "screen")}{statusCard("Accessibility", accessibilityGranted, "accessibility")}</div>
+        {grantedCount < 2 && <p className="permissions-hint">Already enabled in System Settings? After an update macOS may ignore it: select OpenDesk, remove it with −, add it again with +, then restart OpenDesk.</p>}
         <div className="permissions-progress"><span>{grantedCount} of 2 granted</span><div className="progress-track"><div style={{ width: `${grantedCount * 50}%` }} /></div></div>
         {grantedCount === 2
           ? <button className="primary-button permissions-continue" type="button" onClick={onContinue}>Continue</button>
