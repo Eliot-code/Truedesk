@@ -82,6 +82,8 @@ pub const VIRTUAL_DISPLAY_LIMIT: &str = "limit";
 pub const VIRTUAL_DISPLAY_NOT_ALLOWED: &str = "not_allowed";
 pub const VIRTUAL_DISPLAY_FAILED: &str = "failed";
 pub const VIRTUAL_DISPLAY_UNKNOWN: &str = "unknown_display";
+/// The host can only remove its newest virtual display (Windows).
+pub const VIRTUAL_DISPLAY_NOT_NEWEST: &str = "not_newest";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MonitorInfo {
