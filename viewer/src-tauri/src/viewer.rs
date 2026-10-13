@@ -165,8 +165,9 @@ pub(crate) fn connect(
             };
             let session = match protocol::control::Control::from_bytes(body) {
                 Some(protocol::control::Control::Paired { session, .. }) => session,
-                Some(protocol::control::Control::Error { code }) if code == protocol::control::ERROR_PEER_UNAVAILABLE => {
-                    return Err(host_core::reconnect::PEER_UNAVAILABLE_MESSAGE.into());
+                Some(protocol::control::Control::Error { code }) => {
+                    let refusal = host_core::reconnect::connect_refusal_message(&code);
+                    return Err(refusal.unwrap_or("invalid pairing message").into());
                 }
                 _ => return Err("invalid pairing message".into()),
             };
@@ -272,15 +273,13 @@ pub(crate) fn connect(
                         task_app.state::<AppState>().lock().viewer_input = None;
                         let media_received = media_received.load(Ordering::Relaxed);
                         let reason = host_core::reconnect::classify_viewer_error(&message);
-                        if reason == host_core::reconnect::DisconnectReason::AuthFailure {
-                            // Only explicit signals land here (failed PAKE or the
-                            // host's Control::Error rejection). Never retry: the
-                            // password/2FA code will not get better (a TOTP code
-                            // is single-use), and a host user already declined.
-                            break Err(host_core::reconnect::auth_failure_message(&message, session_started));
-                        }
+                        // Auth failures are only explicit signals (failed PAKE
+                        // or the host's Control::Error rejection) and never
+                        // retry: the password/2FA code will not get better (a
+                        // TOTP code is single-use), and a host user already
+                        // declined.
                         if !host_core::reconnect::should_retry_viewer(reason, session_started) {
-                            break Err(message);
+                            break Err(host_core::reconnect::stop_message(&message, reason, session_started));
                         }
                         if media_received {
                             reconnect_attempt = 0;

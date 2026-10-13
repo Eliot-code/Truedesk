@@ -16,6 +16,8 @@ pub enum DisconnectReason {
     CleanUserDisconnect,
     AuthFailure,
     PeerUnavailable,
+    RelayRefused,
+    KeyNotConfirmed,
 }
 
 /// Backoff for the `attempt`-th retry (0-based): 500ms, 1s, 2s, 4s, 4s…
@@ -29,16 +31,33 @@ pub fn viewer_retry_delay(attempt: u32, elapsed: Duration) -> Option<Duration> {
     Some(backoff_delay(attempt).min(remaining))
 }
 
-/// An unavailable peer ends a first connect at once, but is retried after a
-/// session ran: the host re-registers right after a drop.
+/// An unavailable peer, a relay refusal or an unconfirmed key ends a first
+/// connect at once, but is retried after a session ran: the host
+/// re-registers right after a drop.
 pub fn should_retry_viewer(reason: DisconnectReason, session_started: bool) -> bool {
     match reason {
-        DisconnectReason::PeerUnavailable => session_started,
+        DisconnectReason::PeerUnavailable | DisconnectReason::RelayRefused | DisconnectReason::KeyNotConfirmed => session_started,
         reason => matches!(reason, DisconnectReason::Transient),
     }
 }
 
 pub const PEER_UNAVAILABLE_MESSAGE: &str = "That device is offline or already in a session.";
+pub const RELAY_LIMITED_MESSAGE: &str = "The relay is limiting connections from your network. Wait a minute and connect again.";
+pub const RELAY_REFUSED_MESSAGE: &str = "The relay didn't accept the connection request. Check the ID, and update OpenDesk if it keeps happening.";
+
+pub fn connect_refusal_message(code: &str) -> Option<&'static str> {
+    use protocol::control::*;
+    match code {
+        ERROR_PEER_UNAVAILABLE => Some(PEER_UNAVAILABLE_MESSAGE),
+        ERROR_CONNECT_RATE | ERROR_RELAY_BUSY => Some(RELAY_LIMITED_MESSAGE),
+        ERROR_INVALID_CONNECT | ERROR_INVALID_CONTROL => Some(RELAY_REFUSED_MESSAGE),
+        _ => None,
+    }
+}
+
+/// The host closed after the key exchange but before confirming the key
+/// (beta.5 hosts do this on a wrong password).
+pub const KEY_NOT_CONFIRMED: &str = "connection closed during KEX confirmation";
 pub const HOST_ENDED_MESSAGE: &str = "The host ended the session.";
 
 pub mod reject_code {
@@ -65,6 +84,12 @@ pub fn classify_viewer_error(error: &str) -> DisconnectReason {
     }
     if error == PEER_UNAVAILABLE_MESSAGE {
         return DisconnectReason::PeerUnavailable;
+    }
+    if error == RELAY_LIMITED_MESSAGE || error == RELAY_REFUSED_MESSAGE {
+        return DisconnectReason::RelayRefused;
+    }
+    if error == KEY_NOT_CONFIRMED {
+        return DisconnectReason::KeyNotConfirmed;
     }
     let lower = error.to_ascii_lowercase();
     if lower.contains("invalid spake2") || lower.contains("key confirmation failed")
@@ -97,7 +122,17 @@ pub fn auth_failure_message(error: &str, after_session: bool) -> String {
             "The other device can't share its screen. On that device, check that a display is on and Screen Recording is allowed for OpenDesk, restart it, and connect again.".to_owned()
         }
         Some(other) => format!("The host rejected the session ({other})."),
+        None if error == KEY_NOT_CONFIRMED => {
+            "The other device hung up while checking the password, so the password is probably wrong. It changes after every session: get the current one and connect again.".to_owned()
+        }
         None => format!("{error}; authentication failed—check the password and connect again (it changes after every session)"),
+    }
+}
+
+pub fn stop_message(error: &str, reason: DisconnectReason, session_started: bool) -> String {
+    match reason {
+        DisconnectReason::AuthFailure | DisconnectReason::KeyNotConfirmed => auth_failure_message(error, session_started),
+        _ => error.to_owned(),
     }
 }
 
@@ -115,11 +150,8 @@ pub enum NextStep {
 /// it has lasted; both restart once an attempt streams video.
 pub fn after_failure(message: &str, session_started: bool, attempt: u32, outage: Duration) -> NextStep {
     let reason = classify_viewer_error(message);
-    if reason == DisconnectReason::AuthFailure {
-        return NextStep::Stop { message: auth_failure_message(message, session_started) };
-    }
     if !should_retry_viewer(reason, session_started) {
-        return NextStep::Stop { message: message.to_owned() };
+        return NextStep::Stop { message: stop_message(message, reason, session_started) };
     }
     match viewer_retry_delay(attempt, outage) {
         Some(delay) => NextStep::Retry {
@@ -140,6 +172,13 @@ mod tests {
     fn wrong_password_stops_with_the_password_hint() {
         let NextStep::Stop { message } = after_failure("key confirmation failed", false, 0, Duration::ZERO) else { panic!() };
         assert!(message.contains("check the password"), "{message}");
+    }
+
+    #[test]
+    fn a_hang_up_before_key_confirmation_stops_a_first_connect() {
+        let NextStep::Stop { message } = after_failure(KEY_NOT_CONFIRMED, false, 0, Duration::ZERO) else { panic!() };
+        assert!(message.contains("password is probably wrong"), "{message}");
+        assert!(matches!(after_failure(KEY_NOT_CONFIRMED, true, 0, Duration::ZERO), NextStep::Retry { .. }));
     }
 
     #[test]

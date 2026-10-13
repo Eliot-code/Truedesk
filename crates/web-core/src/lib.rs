@@ -14,11 +14,11 @@ pub mod reconnect;
 mod wasm;
 
 use protocol::{
-    control::{Control, ERROR_PEER_UNAVAILABLE},
+    control::Control,
     crypto::{Opener, Sealer},
     frame, kex, pake, Tag,
 };
-use reconnect::{rejection_error, HOST_ENDED_MESSAGE, PEER_UNAVAILABLE_MESSAGE};
+use reconnect::{rejection_error, HOST_ENDED_MESSAGE};
 
 const KEX_MSG: u8 = 0x01;
 const KEX_CONFIRM: u8 = 0x02;
@@ -198,7 +198,7 @@ impl ViewerSession {
                 self.kex_deadline = now_ms + KEX_DEADLINE_MS;
                 vec![Event::Send(kex_frame(KEX_MSG, &my_message))]
             }
-            Some(Control::Error { code }) if code == ERROR_PEER_UNAVAILABLE => self.end(PEER_UNAVAILABLE_MESSAGE),
+            Some(Control::Error { code }) => self.end(reconnect::connect_refusal_message(&code).unwrap_or("invalid pairing message")),
             _ => self.end("invalid pairing message"),
         }
     }
@@ -394,9 +394,20 @@ mod tests {
 
     #[test]
     fn unavailable_peer_uses_the_desktop_message() {
+        use protocol::control::ERROR_PEER_UNAVAILABLE;
         let mut viewer = ViewerSession::new("pw", "");
         let error = frame::wrap(Tag::Control, &Control::Error { code: ERROR_PEER_UNAVAILABLE.into() }.to_bytes());
-        assert_eq!(viewer.receive(&error, 0.0), vec![Event::Ended(PEER_UNAVAILABLE_MESSAGE.into())]);
+        assert_eq!(viewer.receive(&error, 0.0), vec![Event::Ended(reconnect::PEER_UNAVAILABLE_MESSAGE.into())]);
+    }
+
+    #[test]
+    fn relay_refusals_use_the_desktop_messages() {
+        let refused = |code: &str| {
+            let mut viewer = ViewerSession::new("pw", "");
+            viewer.receive(&frame::wrap(Tag::Control, &Control::Error { code: code.into() }.to_bytes()), 0.0)
+        };
+        assert_eq!(refused(protocol::control::ERROR_CONNECT_RATE), vec![Event::Ended(reconnect::RELAY_LIMITED_MESSAGE.into())]);
+        assert_eq!(refused("from_a_newer_relay"), vec![Event::Ended("invalid pairing message".into())]);
     }
 
     #[test]

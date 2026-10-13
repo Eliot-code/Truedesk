@@ -25,6 +25,11 @@ pub enum DisconnectReason {
     AuthFailure,
     /// The relay says the target ID is offline or already in a session.
     PeerUnavailable,
+    /// The relay refused the connect request (rate limit, busy, bad request).
+    RelayRefused,
+    /// The host hung up before confirming the key. beta.5 and older hosts do
+    /// this on a wrong password; otherwise it is a drop like any other.
+    KeyNotConfirmed,
 }
 
 /// Viewer backoff for the `attempt`-th retry (0-based): 500ms, 1s, 2s, 4s, 4s…
@@ -44,17 +49,40 @@ pub fn should_reconnect(reason: DisconnectReason) -> bool {
     matches!(reason, DisconnectReason::Transient)
 }
 
-/// Viewer retry rule. An unavailable peer ends a first connect at once, but
-/// is retried after a session ran: the host re-registers right after a drop.
+/// Viewer retry rule. An unavailable peer, a relay refusal or an unconfirmed
+/// key ends a first connect at once, but is retried after a session ran: the
+/// host re-registers right after a drop, and a drop can land anywhere.
 pub fn should_retry_viewer(reason: DisconnectReason, session_started: bool) -> bool {
     match reason {
-        DisconnectReason::PeerUnavailable => session_started,
+        DisconnectReason::PeerUnavailable | DisconnectReason::RelayRefused | DisconnectReason::KeyNotConfirmed => session_started,
         reason => should_reconnect(reason),
     }
 }
 
 /// Viewer error text when the relay reports the target as unavailable.
 pub const PEER_UNAVAILABLE_MESSAGE: &str = "That device is offline or already in a session.";
+
+/// Viewer error text when the relay limits connections from this network.
+pub const RELAY_LIMITED_MESSAGE: &str = "The relay is limiting connections from your network. Wait a minute and connect again.";
+
+/// Viewer error text when the relay can't read the connect request.
+pub const RELAY_REFUSED_MESSAGE: &str = "The relay didn't accept the connection request. Check the ID, and update OpenDesk if it keeps happening.";
+
+/// Viewer error text for a relay refusing a `connect` with `code`, or `None`
+/// for codes this build doesn't know.
+pub fn connect_refusal_message(code: &str) -> Option<&'static str> {
+    use protocol::control::*;
+    match code {
+        ERROR_PEER_UNAVAILABLE => Some(PEER_UNAVAILABLE_MESSAGE),
+        ERROR_CONNECT_RATE | ERROR_RELAY_BUSY => Some(RELAY_LIMITED_MESSAGE),
+        ERROR_INVALID_CONNECT | ERROR_INVALID_CONTROL => Some(RELAY_REFUSED_MESSAGE),
+        _ => None,
+    }
+}
+
+/// The viewer's error when the host closes the connection after the key
+/// exchange but before confirming the key.
+pub const KEY_NOT_CONFIRMED: &str = "connection closed during KEX confirmation";
 
 /// Stable `Control::Error` codes a host sends when it rejects a viewer after
 /// the key exchange.
@@ -100,6 +128,12 @@ pub fn classify_viewer_error(error: &str) -> DisconnectReason {
     if error == PEER_UNAVAILABLE_MESSAGE {
         return DisconnectReason::PeerUnavailable;
     }
+    if error == RELAY_LIMITED_MESSAGE || error == RELAY_REFUSED_MESSAGE {
+        return DisconnectReason::RelayRefused;
+    }
+    if error == KEY_NOT_CONFIRMED {
+        return DisconnectReason::KeyNotConfirmed;
+    }
     let lower = error.to_ascii_lowercase();
     if lower.contains("invalid spake2") || lower.contains("key confirmation failed")
         || lower.contains("session rejected") {
@@ -138,7 +172,18 @@ pub fn auth_failure_message(error: &str, after_session: bool) -> String {
             "The other device can't share its screen. On that device, check that a display is on and Screen Recording is allowed for OpenDesk, restart it, and connect again.".to_owned()
         }
         Some(other) => format!("The host rejected the session ({other})."),
+        None if error == KEY_NOT_CONFIRMED => {
+            "The other device hung up while checking the password, so the password is probably wrong. It changes after every session: get the current one and connect again.".to_owned()
+        }
         None => format!("{error}; authentication failed—check the password and connect again (it changes after every session)"),
+    }
+}
+
+/// What the viewer shows once [`should_retry_viewer`] says to stop.
+pub fn stop_message(error: &str, reason: DisconnectReason, session_started: bool) -> String {
+    match reason {
+        DisconnectReason::AuthFailure | DisconnectReason::KeyNotConfirmed => auth_failure_message(error, session_started),
+        _ => error.to_owned(),
     }
 }
 
@@ -252,6 +297,34 @@ mod tests {
         assert!(should_retry_viewer(reason, true));
         assert!(should_retry_viewer(DisconnectReason::Transient, false));
         assert!(!should_retry_viewer(DisconnectReason::AuthFailure, true));
+    }
+
+    /// A beta.5 host hangs up on a wrong password without confirming the
+    /// key. On a first connect that is what it almost always means; on a
+    /// reconnect it is still treated as a drop.
+    #[test]
+    fn a_hang_up_before_key_confirmation_stops_a_first_connect() {
+        let error = "connection closed during KEX confirmation";
+        let reason = classify_viewer_error(error);
+        assert!(!should_retry_viewer(reason, false));
+        let message = stop_message(error, reason, false);
+        assert!(message.contains("password is probably wrong") && message.contains("changes after every session"), "{message}");
+        assert!(should_retry_viewer(reason, true));
+        assert!(should_retry_viewer(classify_viewer_error("connection closed during KEX"), false));
+    }
+
+    #[test]
+    fn relay_refusals_of_a_connect_are_explained() {
+        use protocol::control::*;
+        for code in [ERROR_CONNECT_RATE, ERROR_RELAY_BUSY, ERROR_INVALID_CONNECT, ERROR_INVALID_CONTROL] {
+            let message = connect_refusal_message(code).unwrap();
+            let reason = classify_viewer_error(message);
+            assert!(!should_retry_viewer(reason, false), "{code}");
+            assert!(should_retry_viewer(reason, true), "{code}");
+            assert_eq!(stop_message(message, reason, false), message);
+        }
+        assert_eq!(connect_refusal_message(ERROR_PEER_UNAVAILABLE), Some(PEER_UNAVAILABLE_MESSAGE));
+        assert_eq!(connect_refusal_message("from_a_newer_relay"), None);
     }
 
     #[test]

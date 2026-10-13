@@ -217,7 +217,10 @@ fn reconnect_rules_match_host_core() {
         "key confirmation failed",
         "invalid SPAKE2 message",
         "connection closed during KEX",
+        "connection closed during KEX confirmation",
         "connection closed during session",
+        desktop::RELAY_LIMITED_MESSAGE,
+        desktop::RELAY_REFUSED_MESSAGE,
         "connection closed: host stopped responding for 45s",
         "relay closed while connecting",
         "invalid pairing message",
@@ -245,7 +248,22 @@ fn reconnect_rules_match_host_core() {
                 desktop::should_retry_viewer(desktop::classify_viewer_error(message), started),
                 "{message}"
             );
+            assert_eq!(
+                reconnect::stop_message(message, reconnect::classify_viewer_error(message), started),
+                desktop::stop_message(message, desktop::classify_viewer_error(message), started),
+                "{message}"
+            );
         }
+    }
+    for code in [
+        protocol::control::ERROR_PEER_UNAVAILABLE,
+        protocol::control::ERROR_CONNECT_RATE,
+        protocol::control::ERROR_RELAY_BUSY,
+        protocol::control::ERROR_INVALID_CONNECT,
+        protocol::control::ERROR_INVALID_CONTROL,
+        "from_a_newer_relay",
+    ] {
+        assert_eq!(reconnect::connect_refusal_message(code), desktop::connect_refusal_message(code), "{code}");
     }
     assert_eq!(reconnect::rejection_error("x"), desktop::rejection_error("x"));
     for attempt in 0..12 {
