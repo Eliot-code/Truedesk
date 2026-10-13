@@ -96,6 +96,30 @@ approval dialog shows a placeholder fingerprint. Treat the peer ID and
 password as trust-on-first-use identifiers, not as a certificate-backed
 identity.
 
+## Virtual displays on Windows
+
+Windows has no built-in way to add a display, so OpenDesk uses Amyuni's
+free `usbmmidd_v2` indirect display driver, the one RustDesk uses. It is
+third-party code running in Windows' user-mode driver host, signed by
+Microsoft through the Windows Hardware Compatibility Program. OpenDesk
+doesn't ship it. **Install virtual display driver** on Home (shown only
+when "Let viewers add virtual displays" is on) downloads it from
+`amyuni.com` over HTTPS and refuses any file whose SHA-256 differs from the
+one pinned in `viewer/src-tauri/src/vdriver.rs`. It then runs itself as
+administrator (Windows asks first), checks the hash again, unpacks only the
+INF, catalog and 64-bit DLL into a folder that only administrators can
+write to, and installs them through Windows' own driver installer, which
+also checks the Microsoft signature. Amyuni's bundled installer is never
+run. **Uninstall driver** removes the device.
+
+The driver lets anyone signed in to the computer, not just administrators,
+add and remove its displays. OpenDesk only removes the ones it added, newest
+first, and leaves a display in place rather than take away one that another
+program added after it. The package's licence mentions an "advertisement
+page". Neither the driver nor anything OpenDesk installs from the package
+can show one: the driver has no networking or UI code, and Amyuni's
+installer, which OpenDesk skips, only shows a standard error box.
+
 ## Known limitations and threat model
 
 - Password strength matters. SPAKE2 keeps the password off the wire and

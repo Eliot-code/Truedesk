@@ -13,6 +13,7 @@ export function virtualDisplayRefusal(code: string): string {
     case "not_allowed": return "The other computer doesn't allow adding virtual displays.";
     case "failed": return "The other computer couldn't add a virtual display.";
     case "unknown_display": return "That virtual display is already gone.";
+    case "not_newest": return "Remove the newest virtual display first: Windows takes them away in reverse order.";
     default: return `The other computer couldn't change its displays (${code}).`;
   }
 }

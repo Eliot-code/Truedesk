@@ -49,8 +49,9 @@ pub async fn connect(url: &str) -> Result<RelayWebSocket, tokio_tungstenite::tun
 }
 
 /// rustls needs a process-wide crypto provider before the first TLS handshake.
-/// Errors only mean one is already installed, which is fine.
-fn install_crypto_provider() {
+/// Errors only mean one is already installed, which is fine. Public for
+/// the app's other TLS clients.
+pub fn install_crypto_provider() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         let _ = rustls::crypto::ring::default_provider().install_default();

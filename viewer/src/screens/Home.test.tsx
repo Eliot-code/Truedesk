@@ -7,7 +7,7 @@ import { NotifyContext } from "../lib/notify";
 
 vi.mock("../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
-  return { ...actual, getIdentity: vi.fn(), getConfig: vi.fn(), getUnattendedStatus: vi.fn(), listContacts: vi.fn(), listAllowed: vi.fn(), startHosting: vi.fn(), closeKeepsRunning: vi.fn(), quitApp: vi.fn(), connect: vi.fn(), setUnattendedAccess: vi.fn(), setUnattended2fa: vi.fn(), confirmUnattended2fa: vi.fn(), rotatePassword: vi.fn(), addContact: vi.fn(), getStartAtSignIn: vi.fn(), setStartAtSignIn: vi.fn(), onIdentityChanged: vi.fn(), resetIdentity: vi.fn(), getIdentityConflicts: vi.fn(), onIdentityConflicts: vi.fn(), setAllowVirtualDisplays: vi.fn() };
+  return { ...actual, getIdentity: vi.fn(), getConfig: vi.fn(), getUnattendedStatus: vi.fn(), listContacts: vi.fn(), listAllowed: vi.fn(), startHosting: vi.fn(), closeKeepsRunning: vi.fn(), quitApp: vi.fn(), connect: vi.fn(), setUnattendedAccess: vi.fn(), setUnattended2fa: vi.fn(), confirmUnattended2fa: vi.fn(), rotatePassword: vi.fn(), addContact: vi.fn(), getStartAtSignIn: vi.fn(), setStartAtSignIn: vi.fn(), onIdentityChanged: vi.fn(), resetIdentity: vi.fn(), getIdentityConflicts: vi.fn(), onIdentityConflicts: vi.fn(), setAllowVirtualDisplays: vi.fn(), getDisplayDriver: vi.fn(), installDisplayDriver: vi.fn(), uninstallDisplayDriver: vi.fn() };
 });
 describe("Home", () => {
   afterEach(cleanup);
@@ -24,6 +24,7 @@ describe("Home", () => {
     vi.mocked(api.getIdentityConflicts).mockResolvedValue([]);
     vi.mocked(api.onIdentityConflicts).mockResolvedValue(() => {});
     vi.mocked(api.resetIdentity).mockReset();
+    vi.mocked(api.getDisplayDriver).mockResolvedValue({ applies: false, installed: false, license: "" });
   });
   it("renders the identity returned by the backend", async () => { render(<Home status="online" onConnect={vi.fn()} incomingRequest={null} onDismissRequest={vi.fn()} />); expect(await screen.findByText("123456789")).toBeTruthy(); });
   it("shows a replacement ID when the relay says the old one is taken", async () => {
@@ -43,6 +44,40 @@ describe("Home", () => {
     expect(toggle().checked).toBe(false);
     fireEvent.click(toggle());
     await waitFor(() => expect(toggle().checked).toBe(false));
+  });
+
+  it("installs Windows' virtual display driver after showing its licence", async () => {
+    const license = "Copyright 2014-2021 Amyuni Technologies Inc.";
+    vi.mocked(api.getDisplayDriver).mockResolvedValue({ applies: true, installed: false, license });
+    vi.mocked(api.installDisplayDriver).mockRejectedValueOnce("Nothing was changed: Windows' administrator prompt was declined.")
+      .mockResolvedValueOnce({ status: { applies: true, installed: true, license }, restart: false });
+    vi.mocked(api.uninstallDisplayDriver).mockResolvedValueOnce({ status: { applies: true, installed: false, license }, restart: true });
+    render(<Home status="online" onConnect={vi.fn()} incomingRequest={null} onDismissRequest={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Install virtual display driver" }));
+    // Nothing happens until the licence is accepted.
+    expect(screen.getByText(license)).toBeTruthy();
+    expect(api.installDisplayDriver).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Accept and install" }));
+    // Declined at the prompt: still offered.
+    await waitFor(() => expect(api.installDisplayDriver).toHaveBeenCalledTimes(1));
+    fireEvent.click(await screen.findByRole("button", { name: "Accept and install" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Uninstall driver" }));
+    await waitFor(() => expect(api.uninstallDisplayDriver).toHaveBeenCalledTimes(1));
+    expect(await screen.findByRole("button", { name: "Install virtual display driver" })).toBeTruthy();
+  });
+
+  it("offers the driver only on Windows and while virtual displays are allowed", async () => {
+    vi.mocked(api.getDisplayDriver).mockResolvedValue({ applies: true, installed: false, license: "" });
+    vi.mocked(api.getConfig).mockResolvedValue({ relay_url: "wss://relay", relay_urls: ["wss://relay"], recent_ids: [], clipboard_sync: false, allow_virtual_displays: false });
+    render(<Home status="online" onConnect={vi.fn()} incomingRequest={null} onDismissRequest={vi.fn()} />);
+    expect(await screen.findByText("123456789")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Install virtual display driver" })).toBeNull();
+    cleanup();
+    vi.mocked(api.getDisplayDriver).mockResolvedValue({ applies: false, installed: false, license: "" });
+    vi.mocked(api.getConfig).mockResolvedValue({ relay_url: "wss://relay", relay_urls: ["wss://relay"], recent_ids: [], clipboard_sync: false, allow_virtual_displays: true });
+    render(<Home status="online" onConnect={vi.fn()} incomingRequest={null} onDismissRequest={vi.fn()} />);
+    expect(await screen.findByText("123456789")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Install virtual display driver" })).toBeNull();
   });
 
   it("offers to start hosting only while offline", async () => {

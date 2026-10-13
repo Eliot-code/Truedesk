@@ -71,6 +71,14 @@ export const requestKeyframe = () => invoke<void>("request_keyframe");
 export const addVirtualDisplay = (width: number, height: number, hidpi: boolean) => invoke<void>("add_virtual_display", { width, height, hidpi });
 export const removeVirtualDisplay = (id: number) => invoke<void>("remove_virtual_display", { id });
 export const setAllowVirtualDisplays = (enabled: boolean) => invoke<void>("set_allow_virtual_displays", { enabled });
+/** Windows' virtual display driver (Amyuni's): `applies` only on 64-bit Windows; `license` is Amyuni's, shown before installing. */
+export interface DisplayDriver { applies: boolean; installed: boolean; license: string }
+/** `restart`: Windows wants a restart to finish. */
+export interface DisplayDriverChange { status: DisplayDriver; restart: boolean }
+export const getDisplayDriver = () => invoke<DisplayDriver>("virtual_display_driver_status");
+/** Downloads the driver from amyuni.com, checks it, and installs it (Windows asks for administrator approval). */
+export const installDisplayDriver = () => invoke<DisplayDriverChange>("install_virtual_display_driver");
+export const uninstallDisplayDriver = () => invoke<DisplayDriverChange>("uninstall_virtual_display_driver");
 /**
  * Stream video frame messages (raw bytes: header plus access unit, see
  * video.ts) to `handler` over a binary channel. Call the returned function to

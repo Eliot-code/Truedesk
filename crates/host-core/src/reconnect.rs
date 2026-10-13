@@ -103,7 +103,7 @@ pub mod reject_code {
 }
 
 /// What the viewer shows when the host has no screen to share.
-pub const NO_DISPLAY_MESSAGE: &str = "That computer has no screen connected. Plug in a monitor or an HDMI dummy plug. Or, on a Mac, turn on \"Let viewers add virtual displays\" in OpenDesk there; on Windows, install the free Virtual Display Driver (github.com/VirtualDrivers/Virtual-Display-Driver).";
+pub const NO_DISPLAY_MESSAGE: &str = "That computer has no screen connected. Plug in a monitor or an HDMI dummy plug, or turn on \"Let viewers add virtual displays\" in OpenDesk there (on Windows, also click \"Install virtual display driver\").";
 
 const REJECTION_PREFIX: &str = "session rejected by host: ";
 
@@ -346,7 +346,7 @@ mod tests {
         assert_eq!(classify_viewer_error(&error), DisconnectReason::AuthFailure);
         let message = auth_failure_message(&error, false);
         assert!(message.contains("no screen connected") && message.contains("HDMI dummy plug"), "{message}");
-        assert!(message.contains("Virtual Display Driver") && !message.contains("Screen Recording"), "{message}");
+        assert!(message.contains("Install virtual display driver") && !message.contains("Screen Recording"), "{message}");
     }
 
     #[test]

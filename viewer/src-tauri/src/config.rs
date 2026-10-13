@@ -54,8 +54,9 @@ pub struct Config {
     /// it shares clipboard contents with the remote peer in both directions.
     #[serde(default)]
     pub clipboard_sync: bool,
-    /// Viewers may add virtual displays during a session (macOS), and a
-    /// computer with no screen gets one. On by default: it gives a viewer
+    /// Viewers may add virtual displays during a session (macOS, or Windows
+    /// with the driver from Home), and a computer with no screen gets
+    /// one. On by default: it gives a viewer
     /// nothing their control of the mouse and keyboard doesn't, and the
     /// displays go when the session ends.
     #[serde(default = "default_true")]

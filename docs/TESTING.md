@@ -48,10 +48,19 @@ Run the relay where both machines can reach it, then point both apps at it
 | 18 | Pick **Add display…** again, then once more | A second display is added; the third try says the session can't add more |
 | 19 | With a virtual display shown, click **Remove**, then end the session with another still added | The stream goes back to the main display and the removed one disappears; after Disconnect the host has no extra displays left (System Settings → Displays) |
 | 20 | Untick **Let viewers add virtual displays** on the host, reconnect | The viewer's monitor menu has no **Add display…** |
-| 21 | Headless host (no monitor or dummy plug), then connect. Mac: with the setting on, and again with it off | Setting on: the viewer sees a 1920x1080 virtual display. Off, or a Windows host: the viewer stops with "That computer has no screen connected…" instead of the Screen Recording message |
+| 21 | Headless host (no monitor or dummy plug), then connect. Mac: with the setting on, and again with it off | Setting on: the viewer sees a 1920x1080 virtual display. Off, or a Windows host without the driver: the viewer stops with "That computer has no screen connected…" instead of the Screen Recording message |
+| 22 | Windows host: on Home click **Install virtual display driver**, read the licence, **Accept and install**, say No at the Windows prompt; then again and say Yes | No: "Nothing was changed…". Yes: "The virtual display driver is installed." and Device Manager → Display adapters lists "USB Mobile Monitor Virtual Display"; Home now offers **Uninstall driver** |
+| 23 | Windows host with the driver: rows 17 to 20 | As on a Mac, except sizes snap to the nearest of the driver's modes (1280x720 … 3840x2160) and the monitor menu shows the real size; Settings → Display shows the new displays while added and none after Disconnect |
+| 24 | Windows host: add two displays, then **Remove** the first | "Remove the newest virtual display first…"; the stream stays on it. Removing the second, then the first, works |
+| 25 | Windows host: add one display yourself first (`deviceinstaller64 enableidd 1` from Amyuni's zip), then connect and add and remove one, and Disconnect | Yours stays throughout; OpenDesk's comes and goes |
+| 26 | Windows host: add a display, then quit OpenDesk from the tray | The display goes away with the app |
+| 27 | Headless Windows host (no monitor or dummy plug) with the driver and the setting on | The viewer sees a 1920x1080 virtual display; after Disconnect it is gone |
+| 28 | Windows host: **Uninstall driver** | It disappears from Device Manager; Home offers **Install virtual display driver** again |
 
 `cargo run -p host-core --example virtual_display` on a Mac adds a 1280x720
-display and a 2560x1440 HiDPI one for two seconds each and removes them.
+display and a 2560x1440 HiDPI one for two seconds each and removes them. On
+Windows (with the driver) it adds the same two, checks the older one can't
+be removed first, and removes both.
 
 macOS asks for **Screen Recording** and **Accessibility** permission the first
 time; restart the app after granting them. When you report an issue, include

@@ -8,6 +8,7 @@ mod files;
 mod host;
 mod machine;
 mod startup;
+mod vdriver;
 mod viewer;
 
 use config::ConfigStore;
@@ -561,6 +562,11 @@ fn disconnect(state: tauri::State<'_, AppState>, app: AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // The elevated copy that installs the virtual display driver (Windows)
+    // does only that, before anything else starts.
+    if let Some(code) = vdriver::run_helper(&std::env::args_os().skip(1).collect::<Vec<_>>()) {
+        std::process::exit(code);
+    }
     let background = startup::launched_in_background(std::env::args_os().skip(1));
     let app = tauri::Builder::default()
         // Must be registered first. A second launch would register the same
@@ -667,6 +673,9 @@ pub fn run() {
             set_allow_virtual_displays,
             add_virtual_display,
             remove_virtual_display,
+            vdriver::virtual_display_driver_status,
+            vdriver::install_virtual_display_driver,
+            vdriver::uninstall_virtual_display_driver,
             set_audio_muted,
             send_file,
             respond_file,
@@ -682,10 +691,15 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
-    app.run(|_app, _event| {
+    app.run(|_app, event| {
+        // Windows keeps virtual displays after their process is gone, so
+        // take ours away on the way out (macOS does it by itself).
+        if let tauri::RunEvent::Exit = event {
+            host_core::vdisplay::remove_owned();
+        }
         // Clicking the Dock icon brings back a window hidden to the tray.
         #[cfg(target_os = "macos")]
-        if let tauri::RunEvent::Reopen { has_visible_windows: false, .. } = _event {
+        if let tauri::RunEvent::Reopen { has_visible_windows: false, .. } = event {
             startup::show_main_window(_app);
         }
     });

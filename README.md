@@ -241,3 +241,25 @@ Issues and PRs are welcome. The codebase prefers small, focused crates and test-
 You can use, modify, and self-host OpenDesk freely. If you distribute a
 modified version, or run one that others use over a network (for example a
 modified relay), you must make your source available under the same license.
+
+### Third-party software
+
+On Windows, OpenDesk can download and install Amyuni Technologies'
+`usbmmidd_v2` virtual display driver for you (see
+[docs/SECURITY.md](docs/SECURITY.md#virtual-displays-on-windows)). It is
+not part of OpenDesk and comes under its own licence:
+
+```text
+Copyright 2014-2021 Amyuni Technologies Inc.
+https://www.amyuni.com
+
+This software is provided 'as-is', without any express or implied warranty. In no event will the authors be held liable for any damages arising from the use of this software.
+By using this software, you accept to be prompted with an advertisement page which is not always under the control of the author. A fully commercial version is available for users who do not wisth to see those advertisements.
+
+Permission is granted to anyone to use this software for any purpose subject to the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must not claim that you wrote the original software.
+   If you use this software in a product, an acknowledgment in the product documentation would be required.
+2. Altered versions must be plainly marked as such, and must not be misrepresented as being the original software.
+3. This notice may not be removed or altered from any distribution.
+```

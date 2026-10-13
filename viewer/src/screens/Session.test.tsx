@@ -39,7 +39,7 @@ vi.mock("../lib/decode", async (importOriginal) => ({
   makeDecoder: vi.fn(() => ({ push: decode, close: closeDecoder })),
 }));
 
-import Session from "./Session";
+import Session, { virtualDisplayRefusal } from "./Session";
 import { makeDecoder } from "../lib/decode";
 import { NotifyContext } from "../lib/notify";
 
@@ -175,6 +175,8 @@ describe("Session viewer transport", () => {
     expect(removeVirtualDisplay).toHaveBeenLastCalledWith(7);
     act(() => last(onVirtualDisplayRefused)({ code: "failed" }));
     await waitFor(() => expect(notify).toHaveBeenCalledWith("The other computer couldn't add a virtual display."));
+    // Windows hosts remove the newest first.
+    expect(virtualDisplayRefusal("not_newest")).toContain("newest virtual display first");
   });
 
   it("shows link reports in the toolbar and clears them while reconnecting", () => {
