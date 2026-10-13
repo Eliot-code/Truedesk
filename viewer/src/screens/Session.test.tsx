@@ -2,7 +2,7 @@
 import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { onVirtualDisplaySupport, onVirtualDisplayAdded, onVirtualDisplayRefused, addVirtualDisplay, removeVirtualDisplay, startVideo, requestKeyframe, closeDecoder, onAudioFrame, onMonitorList, onLinkStats, onFileOffer, onFileProgress, onFileDone, onFileError, onFileDrop, pickFile, startRecording, appendRecording, finishRecording, sendFile, respondFile, sendInput, selectMonitor, setAudioMuted, setClipboardSync, getConfig, onChatMessage, sendChat, decode } = vi.hoisted(() => ({
+const { onVirtualDisplaySupport, onVirtualDisplayAdded, onVirtualDisplayRefused, addVirtualDisplay, removeVirtualDisplay, startVideo, requestKeyframe, closeDecoder, onAudioFrame, onMonitorList, onLinkStats, onFileOffer, onFileProgress, onFileDone, onFileError, onFileDrop, pickFile, startRecording, appendRecording, finishRecording, sendFile, respondFile, sendInput, selectMonitor, setAudioMuted, setClipboardSync, getConfig, onChatMessage, sendChat, onSecureAttentionSupport, sendSecureAttention, decode } = vi.hoisted(() => ({
   onVirtualDisplaySupport: vi.fn<(handler: (payload: { max: number }) => void) => Promise<() => void>>(() => Promise.resolve(vi.fn())),
   onVirtualDisplayAdded: vi.fn<(handler: (payload: { id: number }) => void) => Promise<() => void>>(() => Promise.resolve(vi.fn())),
   onVirtualDisplayRefused: vi.fn<(handler: (payload: { code: string }) => void) => Promise<() => void>>(() => Promise.resolve(vi.fn())),
@@ -32,10 +32,12 @@ const { onVirtualDisplaySupport, onVirtualDisplayAdded, onVirtualDisplayRefused,
   getConfig: vi.fn(() => Promise.resolve({ relay_url: "", relay_urls: [], recent_ids: [], clipboard_sync: false, allow_virtual_displays: true })),
   onChatMessage: vi.fn<(handler: (payload: { text: string }) => void) => Promise<() => void>>(() => Promise.resolve(vi.fn())),
   sendChat: vi.fn(() => Promise.resolve()),
+  onSecureAttentionSupport: vi.fn<(handler: () => void) => Promise<() => void>>(() => Promise.resolve(vi.fn())),
+  sendSecureAttention: vi.fn(() => Promise.resolve()),
   decode: vi.fn(),
 }));
 
-vi.mock("../lib/api", () => ({ onVirtualDisplaySupport, onVirtualDisplayAdded, onVirtualDisplayRefused, addVirtualDisplay, removeVirtualDisplay, startVideo, requestKeyframe, onAudioFrame, onMonitorList, onLinkStats, onFileOffer, onFileProgress, onFileDone, onFileError, onFileDrop, pickFile, startRecording, appendRecording, finishRecording, sendFile, respondFile, sendInput, selectMonitor, setAudioMuted, setClipboardSync, getConfig, onChatMessage, sendChat }));
+vi.mock("../lib/api", () => ({ onVirtualDisplaySupport, onVirtualDisplayAdded, onVirtualDisplayRefused, addVirtualDisplay, removeVirtualDisplay, startVideo, requestKeyframe, onAudioFrame, onMonitorList, onLinkStats, onFileOffer, onFileProgress, onFileDone, onFileError, onFileDrop, pickFile, startRecording, appendRecording, finishRecording, sendFile, respondFile, sendInput, selectMonitor, setAudioMuted, setClipboardSync, getConfig, onChatMessage, sendChat, onSecureAttentionSupport, sendSecureAttention }));
 vi.mock("../lib/decode", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/decode")>()),
   makeDecoder: vi.fn(() => ({ push: decode, close: closeDecoder })),

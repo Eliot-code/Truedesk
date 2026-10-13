@@ -12,7 +12,7 @@ const { listeners, mocks } = vi.hoisted(() => {
     startVideo: () => () => {}, requestKeyframe: vi.fn(), onAudioFrame: on("audio_frame"), onMonitorList: on("monitor_list"), onLinkStats: on("link_stats"),
     onVirtualDisplaySupport: on("virtual_display_support"), onVirtualDisplayAdded: on("virtual_display_added"), onVirtualDisplayRefused: on("virtual_display_refused"), onHostNotice: on("host_notice"),
     onFileOffer: on("file_offer"), onFileProgress: on("file_progress"), onFileDone: on("file_done"), onFileError: on("file_error"),
-    onChatMessage: on("chat_message"), sendChat: vi.fn(),
+    onChatMessage: on("chat_message"), sendChat: vi.fn(), onSecureAttentionSupport: on("secure_attention_support"), sendSecureAttention: vi.fn(),
     onFileDrop: on("drop"), onPasswordRotated: on("password_rotated"), onIdentityChanged: on("identity_changed"),
     onIdentityConflicts: on("identity_conflicts"), getIdentityConflicts: () => Promise.resolve([]),
     permissionStatus: vi.fn(), connect: vi.fn(), disconnect: vi.fn(),

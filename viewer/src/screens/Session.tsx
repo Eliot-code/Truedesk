@@ -47,6 +47,7 @@ export default function Session({ remoteId, role, status = "in_session", onDisco
   const [viewOnly, setViewOnly] = useState(false);
   const viewOnlyRef = useRef(false);
   useEffect(() => { viewOnlyRef.current = viewOnly; }, [viewOnly]);
+  const [canSecureAttention, setCanSecureAttention] = useState(false);
   // Off until the saved preference loads (clipboard sync defaults off).
   const [clipboardSync, setClipboardSync] = useState(false);
   const [audioMuted, setAudioMuted] = useState(false);
@@ -90,6 +91,16 @@ export default function Session({ remoteId, role, status = "in_session", onDisco
   };
 
   const toggleChat = () => setChatOpen((open) => { if (!open) setChatUnread(0); return !open; });
+
+  // The host signals it can deliver Ctrl+Alt+Del; hosts that can't never do.
+  useEffect(() => {
+    let stop: (() => void) | undefined;
+    const listener = api.onSecureAttentionSupport(() => setCanSecureAttention(true));
+    void listener.then((unlisten) => { stop = unlisten; });
+    return () => { if (stop) stop(); else void listener.then((unlisten) => unlisten()); };
+  }, []);
+
+  const sendSecureAttention = () => void api.sendSecureAttention().catch((error: unknown) => notify(friendlyError(error)));
 
   useEffect(() => {
     if (role !== "viewer") return;
@@ -262,7 +273,7 @@ export default function Session({ remoteId, role, status = "in_session", onDisco
     <main className={`session-screen session-screen--${role}`}>
       {role === "viewer" && <canvas ref={canvasRef} className="session-canvas" tabIndex={0} aria-label="Remote screen" />}
       {role === "host" && <div className="session-host-overlay"><span className="eyebrow">OPENDESK · SECURE SESSION</span><h1>You are being controlled by {remoteId}</h1><p>Your screen is shared for this session.</p></div>}
-      <Toolbar remoteId={remoteId} role={role} status={status} link={link} monitors={monitors} selectedMonitor={selectedMonitor} onMonitorChange={chooseMonitor} canAddDisplay={canAddDisplay} onAddDisplay={addDisplay} onRemoveDisplay={removeDisplay} clipboardSync={clipboardSync} onClipboardSyncChange={toggleClipboardSync} audioMuted={audioMuted} onAudioMutedChange={toggleAudioMuted} recordingActive={recordingActive} recordingElapsed={recordingElapsed} onRecordingToggle={() => void toggleRecording()} filesOpen={filesOpen} onFilesToggle={() => setFilesOpen((open) => !open)} chatOpen={chatOpen} onChatToggle={toggleChat} chatUnread={chatUnread} viewOnly={viewOnly} onViewOnlyChange={setViewOnly} onDisconnect={onDisconnect} />
+      <Toolbar remoteId={remoteId} role={role} status={status} link={link} monitors={monitors} selectedMonitor={selectedMonitor} onMonitorChange={chooseMonitor} canAddDisplay={canAddDisplay} onAddDisplay={addDisplay} onRemoveDisplay={removeDisplay} clipboardSync={clipboardSync} onClipboardSyncChange={toggleClipboardSync} audioMuted={audioMuted} onAudioMutedChange={toggleAudioMuted} recordingActive={recordingActive} recordingElapsed={recordingElapsed} onRecordingToggle={() => void toggleRecording()} filesOpen={filesOpen} onFilesToggle={() => setFilesOpen((open) => !open)} chatOpen={chatOpen} onChatToggle={toggleChat} chatUnread={chatUnread} viewOnly={viewOnly} onViewOnlyChange={setViewOnly} canSecureAttention={canSecureAttention} onSecureAttention={sendSecureAttention} onDisconnect={onDisconnect} />
       {role === "viewer" && <FileTransfer open={filesOpen} onOpenChange={onFilesOpenChange} />}
       {role === "viewer" && <ChatPanel open={chatOpen} messages={messages} onSend={sendChat} onClose={() => setChatOpen(false)} />}
     </main>
