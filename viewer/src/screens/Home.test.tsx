@@ -51,6 +51,7 @@ describe("Home", () => {
     render(<Home status="online" onConnect={vi.fn()} />);
     fireEvent.click(await screen.findByRole("button", { name: "Quit OpenDesk" }));
     expect(api.quitApp).toHaveBeenCalledOnce();
+  });
   it("explains relays that refuse the ID", async () => {
     vi.mocked(api.getIdentityConflicts).mockResolvedValue([{ relay: "wss://a", kind: "taken", message: "ID 123456789 now belongs to another device on wss://a." }]);
     render(<Home status="connecting" onConnect={vi.fn()} />);
