@@ -134,3 +134,29 @@ async fn ice_burst_after_pairing_is_not_rate_limited() {
         index += 1;
     }
 }
+
+/// A browser's upgrade carries an Origin, offers permessage-deflate and
+/// names no subprotocol. The relay takes it like any other client.
+#[tokio::test]
+async fn browser_style_upgrade_pairs() {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let addr = relay::spawn_test_server().await;
+    let url = format!("ws://{addr}/ws");
+    let (mut host, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    host.send(control(Control::Register { peer_id: "123456789".into(), token: "00".repeat(32), ver: 1 })).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let mut request = url.into_client_request().unwrap();
+    request.headers_mut().insert("Origin", "https://treeot.github.io".parse().unwrap());
+    request.headers_mut().insert("Sec-WebSocket-Extensions", "permessage-deflate; client_max_window_bits".parse().unwrap());
+    let (mut browser, response) = tokio_tungstenite::connect_async(request).await.unwrap();
+    assert!(response.headers().get("Sec-WebSocket-Extensions").is_none(), "no compression is negotiated");
+    assert!(response.headers().get("Sec-WebSocket-Protocol").is_none());
+    browser.send(control(Control::Connect { target: "123456789".into(), peer_id: "987654321".into(), ver: 1 })).await.unwrap();
+    let paired = browser.next().await.unwrap().unwrap().into_data();
+    assert!(matches!(frame::unwrap(&paired), Some((Tag::Control, body)) if matches!(Control::from_bytes(body), Some(Control::Paired { .. }))));
+
+    let payload = frame::wrap(Tag::Video, b"sealed");
+    host.send(Message::Binary(payload.clone().into())).await.unwrap();
+    assert_eq!(browser.next().await.unwrap().unwrap().into_data(), payload);
+}
