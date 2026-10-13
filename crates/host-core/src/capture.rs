@@ -694,7 +694,9 @@ mod tests {
         fn start(&mut self, display: Option<u32>) -> Option<FakeStream> {
             self.starts.lock().unwrap().push(display);
             let listed = display.is_none_or(|id| self.monitors.lock().unwrap().iter().any(|monitor| monitor.id == id));
-            let refused = self.refuse.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| left.checked_sub(1)).is_ok();
+            let left = self.refuse.load(Ordering::SeqCst);
+            let refused = left > 0;
+            if refused { self.refuse.store(left - 1, Ordering::SeqCst); }
             if !listed || refused {
                 return None;
             }
