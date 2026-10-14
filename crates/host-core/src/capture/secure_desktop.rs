@@ -10,11 +10,10 @@ use super::ScreenCapturer;
 use crate::encode::{PixelFormat, RawFrame};
 use protocol::control::MonitorInfo;
 use std::time::Duration;
-use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Gdi::{
-    BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
-    GetDIBits, GetDeviceCaps, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-    DIB_RGB_COLORS, HGDIOBJ, HORZRES, SRCCOPY, VERTRES,
+    BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
+    GetDeviceCaps, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+    HORZRES, SRCCOPY, VERTRES,
 };
 use windows::Win32::System::StationsAndDesktops::{
     CloseDesktop, OpenInputDesktop, SetThreadDesktop, DESKTOP_READOBJECTS,
@@ -29,13 +28,13 @@ pub struct SecureDesktopCapturer {
 
 impl SecureDesktopCapturer {
     pub fn new() -> Option<Self> {
-        let dc = unsafe { GetDC(HWND(0)) };
+        let dc = unsafe { GetDC(None) };
         if dc.is_invalid() {
             return None;
         }
         let width = unsafe { GetDeviceCaps(dc, HORZRES) };
         let height = unsafe { GetDeviceCaps(dc, VERTRES) };
-        unsafe { ReleaseDC(HWND(0), dc) };
+        unsafe { ReleaseDC(None, dc) };
         let width = u16::try_from(width).ok()?.min(u16::MAX);
         let height = u16::try_from(height).ok()?.min(u16::MAX);
         (width > 0 && height > 0).then(|| Self {
@@ -57,23 +56,23 @@ impl SecureDesktopCapturer {
         let width = i32::from(self.width);
         let height = i32::from(self.height);
         unsafe {
-            let source = GetDC(HWND(0));
+            let source = GetDC(None);
             if source.is_invalid() {
                 return None;
             }
-            let memory = CreateCompatibleDC(source);
+            let memory = CreateCompatibleDC(Some(source));
             if memory.is_invalid() {
-                ReleaseDC(HWND(0), source);
+                ReleaseDC(None, source);
                 return None;
             }
             let bitmap = CreateCompatibleBitmap(source, width, height);
             if bitmap.is_invalid() {
                 DeleteDC(memory);
-                ReleaseDC(HWND(0), source);
+                ReleaseDC(None, source);
                 return None;
             }
-            let previous = SelectObject(memory, HGDIOBJ(bitmap.0));
-            let copied = BitBlt(memory, 0, 0, width, height, source, 0, 0, SRCCOPY).is_ok();
+            let previous = SelectObject(memory, bitmap.into());
+            let copied = BitBlt(memory, 0, 0, width, height, Some(source), 0, 0, SRCCOPY).is_ok();
             let mut data = vec![0u8; usize::from(self.width) * usize::from(self.height) * 4];
             let mut info = BITMAPINFO {
                 bmiHeader: BITMAPINFOHEADER {
@@ -88,14 +87,22 @@ impl SecureDesktopCapturer {
                 ..Default::default()
             };
             let rows = if copied {
-                GetDIBits(memory, bitmap, 0, height as u32, Some(data.as_mut_ptr().cast()), &mut info, DIB_RGB_COLORS)
+                GetDIBits(
+                    memory,
+                    bitmap,
+                    0,
+                    height as u32,
+                    Some(data.as_mut_ptr().cast()),
+                    &mut info,
+                    DIB_RGB_COLORS,
+                )
             } else {
                 0
             };
             SelectObject(memory, previous);
-            DeleteObject(HGDIOBJ(bitmap.0));
+            DeleteObject(bitmap.into());
             DeleteDC(memory);
-            ReleaseDC(HWND(0), source);
+            ReleaseDC(None, source);
             (copied && rows == height).then_some(RawFrame {
                 width: self.width,
                 height: self.height,
@@ -123,7 +130,9 @@ impl SecureDesktopCapturer {
 
 impl ScreenCapturer for SecureDesktopCapturer {
     fn next_frame(&mut self) -> Option<RawFrame> {
-        self.select_input_desktop().then(|| self.capture()).flatten()
+        self.select_input_desktop()
+            .then(|| self.capture())
+            .flatten()
     }
 
     fn wait_frame(&mut self, timeout: Duration) -> Option<RawFrame> {
@@ -131,7 +140,11 @@ impl ScreenCapturer for SecureDesktopCapturer {
         self.next_frame()
     }
 
-    fn monitors(&self) -> Vec<MonitorInfo> { vec![self.monitor.clone()] }
+    fn monitors(&self) -> Vec<MonitorInfo> {
+        vec![self.monitor.clone()]
+    }
 
-    fn select_monitor(&mut self, id: u32) -> bool { id == self.monitor.id }
+    fn select_monitor(&mut self, id: u32) -> bool {
+        id == self.monitor.id
+    }
 }

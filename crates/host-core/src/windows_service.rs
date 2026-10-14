@@ -13,18 +13,20 @@ pub fn helper_active() -> bool {
 /// `SendSAS` is intentionally loaded dynamically: it is an OS service export,
 /// not a normal application API and is absent on older Windows versions.
 pub fn send_secure_attention() -> Result<(), SecureAttentionError> {
-    use std::ffi::c_void;
     use windows::core::PCSTR;
     use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
 
     unsafe {
         let library = LoadLibraryA(PCSTR(b"sas.dll\0".as_ptr()));
-        let Ok(library) = library else { return Err(SecureAttentionError::Unsupported) };
+        let Ok(library) = library else {
+            return Err(SecureAttentionError::Unsupported);
+        };
         let Some(address) = GetProcAddress(library, PCSTR(b"SendSAS\0".as_ptr())) else {
             return Err(SecureAttentionError::Unsupported);
         };
-        let send_sas: extern "system" fn(bool) = std::mem::transmute::<*const c_void, _>(address);
-        send_sas(true);
+        let send_sas: unsafe extern "system" fn(i32) =
+            std::mem::transmute::<unsafe extern "system" fn() -> isize, _>(address);
+        send_sas(1);
     }
     Ok(())
 }
