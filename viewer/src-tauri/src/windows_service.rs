@@ -96,11 +96,11 @@ mod platform {
         use windows_sys::{Win32::{Foundation::{CloseHandle, HANDLE}, Security::{DuplicateTokenEx, SetTokenInformation, SecurityImpersonation, TokenPrimary, TokenSessionId, TOKEN_ALL_ACCESS}, System::{RemoteDesktop::WTSGetActiveConsoleSessionId, Threading::{CreateProcessAsUserW, GetCurrentProcess, OpenProcessToken, CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION, STARTUPINFOW}}}};
         let session = unsafe { WTSGetActiveConsoleSessionId() };
         if session == u32::MAX { return Err("no active console session".into()); }
-        let mut source: HANDLE = 0;
-        let mut token: HANDLE = 0;
+        let mut source: HANDLE = std::ptr::null_mut();
+        let mut token: HANDLE = std::ptr::null_mut();
         let opened = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &mut source) } != 0;
         let duplicated = opened && unsafe { DuplicateTokenEx(source, TOKEN_ALL_ACCESS, std::ptr::null(), SecurityImpersonation, TokenPrimary, &mut token) } != 0;
-        unsafe { if source != 0 { CloseHandle(source); } }
+        unsafe { if !source.is_null() { CloseHandle(source); } }
         if !duplicated { return Err("could not duplicate the SYSTEM token".into()); }
         if unsafe { SetTokenInformation(token, TokenSessionId, (&session as *const u32).cast(), std::mem::size_of::<u32>() as u32) } == 0 { unsafe { CloseHandle(token); } return Err("could not assign the console session".into()); }
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
