@@ -31,8 +31,8 @@ impl SecureDesktopCapturer {
         if dc.is_invalid() {
             return None;
         }
-        let width = unsafe { GetDeviceCaps(dc, HORZRES) };
-        let height = unsafe { GetDeviceCaps(dc, VERTRES) };
+        let width = unsafe { GetDeviceCaps(Some(dc), HORZRES) };
+        let height = unsafe { GetDeviceCaps(Some(dc), VERTRES) };
         unsafe { ReleaseDC(None, dc) };
         let width = u16::try_from(width).ok()?.min(u16::MAX);
         let height = u16::try_from(height).ok()?.min(u16::MAX);
