@@ -2,18 +2,18 @@ Beta build for testing. Expect rough edges, and please report what breaks.
 
 ## What's new
 
-- **Text chat** during a session, with a chat button in the toolbar.
-- **View only:** a toggle that lets you watch without sending any input.
-- **Virtual displays:** add a screen to a computer that has none, or a second
-  screen sized to your window, on macOS and Windows.
-- **Connection badge:** the toolbar shows Direct or Relayed and the latency.
-- Steadier sessions: clearer messages when a computer is busy, offline or has
-  no screen, and better recovery after a network drop or a display change.
-- Your ID stays yours: a cloned or taken ID is detected, with a warning and a
-  one-click way to get a new one.
+- **Host controls:** while someone controls your computer, a panel lets you
+  switch off their input, file transfer, clipboard or audio, see a log of
+  what's happened, and disconnect them without stopping hosting.
+- **Windows sign-in screen (new, experimental):** an optional service lets a
+  viewer reach the Windows sign-in screen, UAC prompts and the lock screen,
+  and send Ctrl+Alt+Del. Turn it on under hosting settings. It needs an
+  administrator prompt and is still rough — please report what breaks.
+- Unattended secrets are now encrypted at rest on Windows.
+- A security update to the TLS library.
 
-If you installed beta.5, this one arrives as an "Update available" banner on
-the home screen. On macOS you may need to grant Screen Recording and
+If you installed an earlier beta, this one arrives as an "Update available"
+banner on the home screen. On macOS you may need to grant Screen Recording and
 Accessibility again after updating.
 
 ## Install
