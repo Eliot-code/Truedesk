@@ -10,6 +10,8 @@ mod machine;
 mod startup;
 mod vdriver;
 mod windows_service;
+#[cfg(windows)]
+pub use windows_service::run_windows_service;
 mod viewer;
 
 use config::ConfigStore;
