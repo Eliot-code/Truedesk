@@ -23,7 +23,6 @@ pub struct SecureDesktopCapturer {
     width: u16,
     height: u16,
     monitor: MonitorInfo,
-    desktop_selected: bool,
 }
 
 impl SecureDesktopCapturer {
@@ -48,7 +47,6 @@ impl SecureDesktopCapturer {
                 is_primary: true,
                 is_virtual: false,
             },
-            desktop_selected: false,
         })
     }
 
@@ -113,16 +111,19 @@ impl SecureDesktopCapturer {
         }
     }
 
-    fn select_input_desktop(&mut self) -> bool {
-        if self.desktop_selected {
-            return true;
-        }
+    /// Attach this thread to whatever desktop currently has the input. Windows
+    /// swaps the input desktop when a UAC prompt appears (to the secure
+    /// desktop) and at the lock screen, so this must run before every frame:
+    /// a thread left on the previous desktop captures a stale, frozen image.
+    /// No window or hook is ever created on the capture thread, so
+    /// `SetThreadDesktop` is free to switch it each time.
+    fn select_input_desktop(&self) -> bool {
         unsafe {
-            let desktop = OpenInputDesktop(Default::default(), false, DESKTOP_READOBJECTS).ok();
-            let Some(desktop) = desktop else { return false };
+            let Ok(desktop) = OpenInputDesktop(Default::default(), false, DESKTOP_READOBJECTS) else {
+                return false;
+            };
             let selected = SetThreadDesktop(desktop).is_ok();
             let _ = CloseDesktop(desktop);
-            self.desktop_selected = selected;
             selected
         }
     }
