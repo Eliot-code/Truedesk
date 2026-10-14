@@ -34,6 +34,7 @@ export default defineConfig({
         { label: "Overview", link: "/docs/" },
         "docs/getting-started",
         "docs/sessions",
+        "docs/host-controls",
         "docs/unattended",
         "docs/browser-viewer",
         "docs/virtual-displays",

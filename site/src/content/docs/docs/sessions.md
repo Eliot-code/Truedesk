@@ -21,9 +21,9 @@ across the top. From left to right:
 
 An **Encrypted** label sits in the bottom-right corner for the whole session.
 
-The host sees a smaller toolbar with the timer, the **Clipboard** toggle and
-**Disconnect**, and a message saying *You are being controlled by* the
-viewer's ID.
+The host sees a [control panel](/docs/host-controls/) instead: who is
+connected, switches for what they're allowed to do, a log of what's happened,
+and a button to disconnect them.
 
 ## Direct or Relayed
 
