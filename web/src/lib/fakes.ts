@@ -31,6 +31,7 @@ export class FakeViewer implements Viewer {
     return { kind: next.kind, text: next.text ?? "", takeBytes: () => new Uint8Array(next.bytes ?? []), free: () => {} };
   }
   input(event: Uint8Array) { return new Uint8Array([0x12, ...event]); }
+  clipboard(text: string) { return new Uint8Array([0x13, ...new TextEncoder().encode(text)]); }
   requestKeyframe() { return new Uint8Array([0x01, 0xaa]); }
   selectMonitor(id: number) { return new Uint8Array([0x01, id]); }
   bye() { return new Uint8Array([0x01, 0xbb]); }

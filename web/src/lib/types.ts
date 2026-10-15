@@ -4,9 +4,9 @@
  */
 
 export interface ViewerEvent {
-  /** "send", "authenticated", "video", "monitors" or "ended". */
+  /** "send", "authenticated", "video", "monitors", "clipboard" or "ended". */
   readonly kind: string;
-  /** Monitors JSON or the end message. */
+  /** Monitors JSON, clipboard text or the end message. */
   readonly text: string;
   takeBytes(): Uint8Array;
   free(): void;
@@ -18,6 +18,7 @@ export interface Viewer {
   tick(nowMs: number): void;
   nextEvent(): ViewerEvent | undefined;
   input(event: Uint8Array): Uint8Array | undefined;
+  clipboard(text: string): Uint8Array | undefined;
   requestKeyframe(): Uint8Array | undefined;
   selectMonitor(id: number): Uint8Array | undefined;
   bye(): Uint8Array | undefined;

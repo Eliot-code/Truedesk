@@ -14,8 +14,10 @@ pub mod reconnect;
 mod wasm;
 
 use protocol::{
+    clipboard::{ClipboardMsg, MAX_CLIPBOARD},
     control::Control,
     crypto::{Opener, Sealer},
+    datamsg::DataMsg,
     frame, kex, pake, Tag,
 };
 use reconnect::{rejection_error, HOST_ENDED_MESSAGE};
@@ -43,6 +45,8 @@ pub enum Event {
     Video(Vec<u8>),
     /// The host's monitors as a JSON array of `MonitorInfo`.
     Monitors(String),
+    /// Inbound clipboard text from the host (already capped at 1 MB).
+    Clipboard(String),
     /// The session is over. The text matches the desktop viewer's errors,
     /// so [`reconnect::after_failure`] can decide what to do next.
     Ended(String),
@@ -107,6 +111,9 @@ struct Live {
     opener: Opener,
     control_sealer: Sealer,
     control_opener: Opener,
+    data_sealer: Sealer,
+    data_opener: Opener,
+    clip_seq: u64,
     gate: VideoGate,
     next_keepalive: f64,
     peer_deadline: f64,
@@ -115,6 +122,11 @@ struct Live {
 impl Live {
     fn control(&mut self, control: &Control) -> Vec<u8> {
         frame::wrap(Tag::Control, &self.control_sealer.seal(&[Tag::Control as u8], &control.to_bytes()))
+    }
+
+    /// Seal a `DataMsg` for the reliable Data channel.
+    fn data(&mut self, message: &DataMsg) -> Vec<u8> {
+        frame::wrap(Tag::Data, &self.data_sealer.seal(&[Tag::Data as u8], &message.to_bytes()))
     }
 }
 
@@ -206,11 +218,15 @@ impl ViewerSession {
     fn authenticated(&mut self, shared: &[u8; 32], now_ms: f64) -> Vec<Event> {
         let (send_key, recv_key) = kex::derive_keys(shared, false);
         let (control_send_key, control_recv_key) = kex::derive_control_keys(shared, false);
+        let (data_send_key, data_recv_key) = kex::derive_data_keys(shared, false);
         let mut live = Box::new(Live {
             sealer: Sealer::new(send_key),
             opener: Opener::new(recv_key),
             control_sealer: Sealer::new(control_send_key),
             control_opener: Opener::new(control_recv_key),
+            data_sealer: Sealer::new(data_send_key),
+            data_opener: Opener::new(data_recv_key),
+            clip_seq: 0,
             gate: VideoGate::new(),
             next_keepalive: now_ms + KEEPALIVE_INTERVAL_MS,
             peer_deadline: now_ms + DEAD_PEER_TIMEOUT_MS,
@@ -249,7 +265,16 @@ impl ViewerSession {
                 }
                 events
             }
-            // Audio, file transfer and clipboard are not supported here.
+            Some((Tag::Data, sealed)) => {
+                let Some(plaintext) = live.data_opener.open(&[Tag::Data as u8], sealed) else { return Vec::new() };
+                live.peer_deadline = now_ms + DEAD_PEER_TIMEOUT_MS;
+                match DataMsg::from_bytes(&plaintext) {
+                    Some(DataMsg::Clipboard(clip)) => vec![Event::Clipboard(clip.text)],
+                    // File transfer and chat are handled elsewhere.
+                    _ => Vec::new(),
+                }
+            }
+            // Audio is not opened here.
             _ => Vec::new(),
         }
     }
@@ -307,6 +332,18 @@ impl ViewerSession {
         Some(frame::wrap(Tag::Input, &live.sealer.seal(&[Tag::Input as u8], event)))
     }
 
+    /// Seal local clipboard text for the host. Text only, capped at 1 MB:
+    /// oversize text is dropped (`None`). `None` before authentication.
+    pub fn clipboard(&mut self, text: &str) -> Option<Vec<u8>> {
+        if text.len() > MAX_CLIPBOARD {
+            return None;
+        }
+        let live = self.live()?;
+        live.clip_seq += 1;
+        let message = DataMsg::Clipboard(ClipboardMsg { seq: live.clip_seq, text: text.to_owned() });
+        Some(live.data(&message))
+    }
+
     /// Ask the host for a keyframe, e.g. after a decoder error.
     pub fn request_keyframe(&mut self) -> Option<Vec<u8>> {
         Some(self.live()?.control(&Control::RequestKeyframe))
@@ -344,7 +381,7 @@ mod tests {
     }
 
     /// A host-side mirror of roles.rs, enough to authenticate a viewer.
-    struct FakeHost { shared: [u8; 32], control_sealer: Sealer, control_opener: Opener, sealer: Sealer, opener: Opener }
+    struct FakeHost { shared: [u8; 32], control_sealer: Sealer, control_opener: Opener, sealer: Sealer, opener: Opener, data_sealer: Sealer, data_opener: Opener }
 
     fn authenticate(viewer: &mut ViewerSession, host_password: &str) -> Result<FakeHost, Vec<Event>> {
         let out = viewer.receive(&paired(), 0.0);
@@ -360,7 +397,8 @@ mod tests {
         if viewer.is_ended() { return Err(out); }
         let (send, recv) = kex::derive_keys(&shared, true);
         let (control_send, control_recv) = kex::derive_control_keys(&shared, true);
-        let mut host = FakeHost { shared, control_sealer: Sealer::new(control_send), control_opener: Opener::new(control_recv), sealer: Sealer::new(send), opener: Opener::new(recv) };
+        let (data_send, data_recv) = kex::derive_data_keys(&shared, true);
+        let mut host = FakeHost { shared, control_sealer: Sealer::new(control_send), control_opener: Opener::new(control_recv), sealer: Sealer::new(send), opener: Opener::new(recv), data_sealer: Sealer::new(data_send), data_opener: Opener::new(data_recv) };
         let auth = sent(&out).remove(0);
         let (Tag::Control, sealed) = frame::unwrap(&auth).unwrap() else { panic!() };
         let plain = host.control_opener.open(&[Tag::Control as u8], sealed).unwrap();
@@ -381,6 +419,13 @@ mod tests {
         fn open_control(&mut self, message: &[u8]) -> Option<Control> {
             let (Tag::Control, sealed) = frame::unwrap(message)? else { return None };
             Control::from_bytes(&self.control_opener.open(&[Tag::Control as u8], sealed)?)
+        }
+        fn data(&mut self, message: &DataMsg) -> Vec<u8> {
+            frame::wrap(Tag::Data, &self.data_sealer.seal(&[Tag::Data as u8], &message.to_bytes()))
+        }
+        fn open_data(&mut self, message: &[u8]) -> Option<DataMsg> {
+            let (Tag::Data, sealed) = frame::unwrap(message)? else { return None };
+            DataMsg::from_bytes(&self.data_opener.open(&[Tag::Data as u8], sealed)?)
         }
     }
 
@@ -444,6 +489,21 @@ mod tests {
         let bye = host.control(&Control::Bye { session: String::new() });
         assert_eq!(viewer.receive(&bye, 9.0), vec![Event::Ended(HOST_ENDED_MESSAGE.into())]);
         assert!(viewer.input(&[1]).is_none());
+    }
+
+    #[test]
+    fn clipboard_opens_inbound_and_seals_outbound() {
+        use protocol::clipboard::ClipboardMsg;
+        let mut viewer = ViewerSession::new("pw", "");
+        let mut host = authenticate(&mut viewer, "pw").unwrap();
+        // Inbound clipboard surfaces as a Clipboard event.
+        let clip = host.data(&DataMsg::Clipboard(ClipboardMsg { seq: 1, text: "hello".into() }));
+        assert_eq!(viewer.receive(&clip, 3.0), vec![Event::Clipboard("hello".into())]);
+        // Outbound clipboard is sealed on the Data channel.
+        let sealed = viewer.clipboard("copied").unwrap();
+        assert_eq!(host.open_data(&sealed), Some(DataMsg::Clipboard(ClipboardMsg { seq: 1, text: "copied".into() })));
+        // Oversize text is dropped.
+        assert!(viewer.clipboard(&"x".repeat(protocol::clipboard::MAX_CLIPBOARD + 1)).is_none());
     }
 
     #[test]

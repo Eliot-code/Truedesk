@@ -26,6 +26,8 @@ export interface ConnectionHandlers {
   status(status: ConnectionStatus): void;
   video(frame: Uint8Array): void;
   monitors(monitors: MonitorInfo[]): void;
+  /** Inbound clipboard text from the host. */
+  clipboard(text: string): void;
   /** The connection is over: `error` is null after the user disconnected. */
   ended(error: string | null): void;
 }
@@ -150,6 +152,7 @@ export class Connection {
           }
           this.handlers.video(event.takeBytes());
         } else if (kind === "monitors") this.handlers.monitors(JSON.parse(event.text) as MonitorInfo[]);
+        else if (kind === "clipboard") this.handlers.clipboard(event.text);
         else if (kind === "ended") {
           const message = event.text;
           event.free();
@@ -225,5 +228,9 @@ export class Connection {
 
   selectMonitor(id: number) {
     this.send(this.viewer?.selectMonitor(id));
+  }
+
+  sendClipboard(text: string) {
+    this.send(this.viewer?.clipboard(text));
   }
 }

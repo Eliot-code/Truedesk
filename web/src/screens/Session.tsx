@@ -11,6 +11,10 @@ export interface SessionControls {
   selectMonitor(id: number): void;
   /** Where video frames go; the session screen sets it while mounted. */
   setVideoSink(sink: ((frame: Uint8Array) => void) | null): void;
+  /** Send local clipboard text to the host. */
+  sendClipboard(text: string): void;
+  /** Where inbound clipboard text goes while the sync toggle is on. */
+  setClipboardSink(sink: ((text: string) => void) | null): void;
 }
 
 export interface SessionProps {
@@ -39,6 +43,7 @@ export default function Session({ remoteId, status, monitors, controls, onDiscon
   const screenRef = useRef<HTMLElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [selected, setSelected] = useState<number>();
+  const [clipboardOn, setClipboardOn] = useState(false);
 
   useEffect(() => {
     setSelected(monitors.find((monitor) => monitor.is_primary)?.id ?? monitors[0]?.id);
@@ -61,6 +66,36 @@ export default function Session({ remoteId, status, monitors, controls, onDiscon
       decoder.close();
     };
   }, [controls]);
+
+  // Clipboard sync is off by default, like the desktop viewer. While on,
+  // inbound text is written to the page clipboard and local text is sent back
+  // on focus. The same value is never echoed straight back to its origin.
+  useEffect(() => {
+    if (!clipboardOn) {
+      controls.setClipboardSink(null);
+      return;
+    }
+    const clip = navigator.clipboard;
+    let last = "";
+    controls.setClipboardSink((text) => {
+      last = text;
+      void clip?.writeText?.(text).catch(() => {});
+    });
+    const pull = () => {
+      void clip?.readText?.().then((text) => {
+        if (text && text !== last && text.length <= 1_000_000) {
+          last = text;
+          controls.sendClipboard(text);
+        }
+      }).catch(() => {});
+    };
+    window.addEventListener("focus", pull);
+    pull();
+    return () => {
+      controls.setClipboardSink(null);
+      window.removeEventListener("focus", pull);
+    };
+  }, [clipboardOn, controls]);
 
   const toggleFullscreen = () => {
     if (document.fullscreenElement) void document.exitFullscreen();
@@ -96,6 +131,12 @@ export default function Session({ remoteId, status, monitors, controls, onDiscon
               <path d="M8 3H5a2 2 0 0 0-2 2v3" /><path d="M21 8V5a2 2 0 0 0-2-2h-3" /><path d="M3 16v3a2 2 0 0 0 2 2h3" /><path d="M16 21h3a2 2 0 0 0 2-2v-3" />
             </svg>
             <span className="session-toolbar__icon-text" aria-hidden="true">Fullscreen</span>
+          </button>
+          <button className="session-toolbar__icon" type="button" aria-pressed={clipboardOn} aria-label="Clipboard sync" title={clipboardOn ? "Clipboard sync on" : "Clipboard sync off"} onClick={() => setClipboardOn((on) => !on)}>
+            <svg className="session-toolbar__svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <rect x="8" y="2" width="8" height="4" rx="1" /><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
+            </svg>
+            <span className="session-toolbar__icon-text" aria-hidden="true">Clipboard</span>
           </button>
           {monitors.length > 1 && (
             <label className="session-toolbar__select-chip">

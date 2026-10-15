@@ -41,6 +41,7 @@ impl From<Event> for ViewerEvent {
             Event::Authenticated => ("authenticated", Vec::new(), String::new()),
             Event::Video(bytes) => ("video", bytes, String::new()),
             Event::Monitors(json) => ("monitors", Vec::new(), json),
+            Event::Clipboard(text) => ("clipboard", Vec::new(), text),
             Event::Ended(message) => ("ended", Vec::new(), message),
         };
         Self { kind, bytes, text }
@@ -73,6 +74,9 @@ impl Viewer {
     pub fn next_event(&mut self) -> Option<ViewerEvent> { self.events.pop_front().map(Into::into) }
 
     pub fn input(&mut self, event: &[u8]) -> Option<Vec<u8>> { self.session.input(event) }
+
+    /// Seal local clipboard text for the host. `None` if too large or not yet live.
+    pub fn clipboard(&mut self, text: &str) -> Option<Vec<u8>> { self.session.clipboard(text) }
 
     #[wasm_bindgen(js_name = requestKeyframe)]
     pub fn request_keyframe(&mut self) -> Option<Vec<u8>> { self.session.request_keyframe() }

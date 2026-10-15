@@ -10,14 +10,15 @@ function setup(core = new FakeCore(), overrides: Partial<typeof target> = {}) {
   const statuses: ConnectionStatus[] = [];
   const frames: number[][] = [];
   const monitors: MonitorInfo[][] = [];
+  const clipboard: string[] = [];
   const ended: (string | null)[] = [];
   let clock = 0;
   const connection = new Connection(
     { ...target, ...overrides },
-    { status: (s) => statuses.push(s), video: (f) => frames.push([...f]), monitors: (m) => monitors.push(m), ended: (e) => ended.push(e) },
+    { status: (s) => statuses.push(s), video: (f) => frames.push([...f]), monitors: (m) => monitors.push(m), clipboard: (t) => clipboard.push(t), ended: (e) => ended.push(e) },
     { core, openSocket: (url) => new FakeSocket(url), now: () => clock },
   );
-  return { core, connection, statuses, frames, monitors, ended, advance: (ms: number) => { clock += ms; } };
+  return { core, connection, statuses, frames, monitors, clipboard, ended, advance: (ms: number) => { clock += ms; } };
 }
 
 beforeEach(() => {
