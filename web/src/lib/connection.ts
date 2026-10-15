@@ -3,7 +3,7 @@
  * and the desktop viewer's reconnect loop. Decisions (crypto, retry rules,
  * error wording) come from web-core; this file only moves bytes and time.
  */
-import type { Core, MonitorInfo, Viewer } from "./types";
+import type { Core, FileSignal, MonitorInfo, Viewer } from "./types";
 
 export type ConnectionStatus =
   /** Pairing and key exchange. */
@@ -30,6 +30,8 @@ export interface ConnectionHandlers {
   monitors(monitors: MonitorInfo[]): void;
   /** Inbound clipboard text from the host. */
   clipboard(text: string): void;
+  /** A file-transfer update (offer, progress, result). */
+  file(signal: FileSignal): void;
   /** The connection is over: `error` is null after the user disconnected. */
   ended(error: string | null): void;
 }
@@ -156,6 +158,12 @@ export class Connection {
         } else if (kind === "audio") this.handlers.audio(event.takeBytes(), Number(event.text) || 2);
         else if (kind === "monitors") this.handlers.monitors(JSON.parse(event.text) as MonitorInfo[]);
         else if (kind === "clipboard") this.handlers.clipboard(event.text);
+        else if (kind.startsWith("file-")) {
+          const record = JSON.parse(event.text) as Omit<FileSignal, "kind" | "data">;
+          const signal: FileSignal = { ...record, kind: kind as FileSignal["kind"] };
+          if (kind === "file-received") signal.data = event.takeBytes();
+          this.handlers.file(signal);
+        }
         else if (kind === "ended") {
           const message = event.text;
           event.free();
@@ -235,5 +243,17 @@ export class Connection {
 
   sendClipboard(text: string) {
     this.send(this.viewer?.clipboard(text));
+  }
+
+  sendFile(id: number, name: string, data: Uint8Array) {
+    this.send(this.viewer?.sendFile(id, name, data));
+  }
+
+  acceptFile(id: number) {
+    this.send(this.viewer?.acceptFile(id));
+  }
+
+  rejectFile(id: number) {
+    this.send(this.viewer?.rejectFile(id));
   }
 }

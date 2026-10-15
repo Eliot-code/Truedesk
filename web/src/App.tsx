@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Connection, type ConnectionStatus, type Socket } from "./lib/connection";
 import { friendlyError, unsupportedReason } from "./lib/errors";
 import { DEFAULT_RELAY, saveRelay, savedRelay, viewerId } from "./lib/settings";
-import type { Core, MonitorInfo } from "./lib/types";
+import type { Core, FileSignal, MonitorInfo } from "./lib/types";
 import ConnectForm, { type ConnectRequest } from "./screens/ConnectForm";
 import Session, { type SessionControls } from "./screens/Session";
 
@@ -28,6 +28,7 @@ export default function App({ loadCore, openSocket, unsupported = unsupportedRea
   const videoSink = useRef<((frame: Uint8Array) => void) | null>(null);
   const audioSink = useRef<((payload: Uint8Array, channels: number) => void) | null>(null);
   const clipboardSink = useRef<((text: string) => void) | null>(null);
+  const fileSink = useRef<((signal: FileSignal) => void) | null>(null);
 
   const controls = useMemo<SessionControls>(() => ({
     sendInput: (event) => connection.current?.sendInput(event),
@@ -37,6 +38,10 @@ export default function App({ loadCore, openSocket, unsupported = unsupportedRea
     setAudioSink: (sink) => { audioSink.current = sink; },
     sendClipboard: (text) => connection.current?.sendClipboard(text),
     setClipboardSink: (sink) => { clipboardSink.current = sink; },
+    sendFile: (id, name, data) => connection.current?.sendFile(id, name, data),
+    acceptFile: (id) => connection.current?.acceptFile(id),
+    rejectFile: (id) => connection.current?.rejectFile(id),
+    setFileSink: (sink) => { fileSink.current = sink; },
   }), []);
 
   // Leaving the page ends the session on the host right away.
@@ -68,6 +73,7 @@ export default function App({ loadCore, openSocket, unsupported = unsupportedRea
         audio: (payload, channels) => audioSink.current?.(payload, channels),
         monitors: setMonitors,
         clipboard: (text) => clipboardSink.current?.(text),
+        file: (signal) => fileSink.current?.(signal),
         ended: (error) => {
           if (connection.current === conn) connection.current = null;
           setActive(null);

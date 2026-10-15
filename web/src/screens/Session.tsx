@@ -3,8 +3,9 @@ import { makeDecoder } from "../../../viewer/src/lib/decode";
 import { makeAudioPlayer } from "../lib/audio";
 import { attachInput } from "../../../viewer/src/lib/input";
 import type { ConnectionStatus } from "../lib/connection";
+import { downloadBytes, formatSize, nextFileId } from "../lib/files";
 import { formatId } from "../lib/settings";
-import type { MonitorInfo } from "../lib/types";
+import type { FileSignal, MonitorInfo } from "../lib/types";
 
 export interface SessionControls {
   sendInput(event: Uint8Array): void;
@@ -18,6 +19,51 @@ export interface SessionControls {
   sendClipboard(text: string): void;
   /** Where inbound clipboard text goes while the sync toggle is on. */
   setClipboardSink(sink: ((text: string) => void) | null): void;
+  /** Offer a local file to the host. */
+  sendFile(id: number, name: string, data: Uint8Array): void;
+  /** Accept or reject an incoming file offer. */
+  acceptFile(id: number): void;
+  rejectFile(id: number): void;
+  /** Where file-transfer updates go while the session is mounted. */
+  setFileSink(sink: ((signal: FileSignal) => void) | null): void;
+}
+
+type TransferState = "pending" | "active" | "done" | "error";
+
+interface Transfer {
+  id: number;
+  name: string;
+  total: number;
+  transferred: number;
+  sending: boolean;
+  state: TransferState;
+  message?: string;
+}
+
+function applySignal(transfers: Transfer[], signal: FileSignal): Transfer[] {
+  const index = transfers.findIndex((transfer) => transfer.id === signal.id);
+  const next = [...transfers];
+  const patch = (changes: Partial<Transfer>) => {
+    if (index >= 0) next[index] = { ...next[index], ...changes };
+  };
+  switch (signal.kind) {
+    case "file-offer":
+      if (index < 0) {
+        next.push({ id: signal.id, name: signal.name ?? "file", total: signal.size ?? 0, transferred: 0, sending: false, state: "pending" });
+      }
+      break;
+    case "file-progress":
+      patch({ transferred: signal.transferred ?? 0, total: signal.total ?? next[index]?.total ?? 0, state: "active" });
+      break;
+    case "file-received":
+    case "file-sent":
+      patch({ state: "done", transferred: next[index]?.total ?? 0 });
+      break;
+    case "file-error":
+      patch({ state: "error", message: signal.message });
+      break;
+  }
+  return next;
 }
 
 export interface SessionProps {
@@ -48,6 +94,9 @@ export default function Session({ remoteId, status, monitors, controls, onDiscon
   const [selected, setSelected] = useState<number>();
   const [clipboardOn, setClipboardOn] = useState(false);
   const [soundOn, setSoundOn] = useState(false);
+  const [filesOpen, setFilesOpen] = useState(false);
+  const [transfers, setTransfers] = useState<Transfer[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     setSelected(monitors.find((monitor) => monitor.is_primary)?.id ?? monitors[0]?.id);
@@ -121,6 +170,40 @@ export default function Session({ remoteId, status, monitors, controls, onDiscon
     };
   }, [soundOn, controls]);
 
+  // File transfers run for the whole session. Incoming offers wait for the
+  // user's Accept or Reject; received files download; a pending offer opens
+  // the panel so the prompt is seen.
+  useEffect(() => {
+    controls.setFileSink((signal) => {
+      setTransfers((prev) => applySignal(prev, signal));
+      if (signal.kind === "file-received" && signal.data && signal.name) {
+        downloadBytes(signal.name, signal.data);
+      }
+      if (signal.kind === "file-offer") setFilesOpen(true);
+    });
+    return () => controls.setFileSink(null);
+  }, [controls]);
+
+  const acceptOffer = (id: number) => {
+    controls.acceptFile(id);
+    setTransfers((prev) => prev.map((transfer) => (transfer.id === id ? { ...transfer, state: "active" } : transfer)));
+  };
+
+  const rejectOffer = (id: number) => {
+    controls.rejectFile(id);
+    setTransfers((prev) => prev.filter((transfer) => transfer.id !== id));
+  };
+
+  const chooseFiles = async (list: FileList | null) => {
+    if (!list) return;
+    for (const file of Array.from(list)) {
+      const id = nextFileId();
+      const data = new Uint8Array(await file.arrayBuffer());
+      setTransfers((prev) => [...prev, { id, name: file.name, total: file.size, transferred: 0, sending: true, state: "active" }]);
+      controls.sendFile(id, file.name, data);
+    }
+  };
+
   const toggleFullscreen = () => {
     if (document.fullscreenElement) void document.exitFullscreen();
     else void screenRef.current?.requestFullscreen?.().then(() => canvasRef.current?.focus());
@@ -132,6 +215,7 @@ export default function Session({ remoteId, status, monitors, controls, onDiscon
   };
 
   const overlay = overlays[status];
+  const pendingOffers = transfers.filter((transfer) => transfer.state === "pending").length;
 
   return (
     <main ref={screenRef} className="session-screen web-session">
@@ -169,6 +253,13 @@ export default function Session({ remoteId, status, monitors, controls, onDiscon
             </svg>
             <span className="session-toolbar__icon-text" aria-hidden="true">Sound</span>
           </button>
+          <button className="session-toolbar__icon" type="button" aria-pressed={filesOpen} aria-label="Files" title="File transfer" onClick={() => setFilesOpen((open) => !open)}>
+            <svg className="session-toolbar__svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2z" />
+            </svg>
+            <span className="session-toolbar__icon-text" aria-hidden="true">Files</span>
+            {pendingOffers > 0 && <span className="session-toolbar__badge" aria-hidden="true">{pendingOffers}</span>}
+          </button>
           {monitors.length > 1 && (
             <label className="session-toolbar__select-chip">
               <select aria-label="Monitor" value={selected ?? monitors[0].id} onChange={(event) => chooseMonitor(Number(event.target.value))}>
@@ -181,6 +272,45 @@ export default function Session({ remoteId, status, monitors, controls, onDiscon
           <button className="session-toolbar__disconnect" type="button" onClick={onDisconnect}>Disconnect</button>
         </div>
       </div>
+      {filesOpen && (
+        <aside className="file-panel" aria-label="File transfer">
+          <div className="file-panel__head">
+            <h2>Files</h2>
+            <button type="button" className="file-panel__close" aria-label="Close files" onClick={() => setFilesOpen(false)}>×</button>
+          </div>
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            className="sr-only"
+            onChange={(event) => { void chooseFiles(event.target.files); event.target.value = ""; }}
+          />
+          <button type="button" className="file-panel__send" onClick={() => fileInputRef.current?.click()}>Send a file</button>
+          <ul className="file-panel__list">
+            {transfers.length === 0 && <li className="file-panel__empty">No transfers yet.</li>}
+            {transfers.map((transfer) => (
+              <li key={transfer.id} className="file-panel__item" data-state={transfer.state}>
+                <div className="file-panel__row">
+                  <span className="file-panel__name" title={transfer.name}>{transfer.sending ? "↑" : "↓"} {transfer.name}</span>
+                  <span className="file-panel__size mono">{formatSize(transfer.total)}</span>
+                </div>
+                {transfer.state === "pending" ? (
+                  <div className="file-panel__actions">
+                    <button type="button" onClick={() => acceptOffer(transfer.id)}>Accept</button>
+                    <button type="button" className="file-panel__reject" onClick={() => rejectOffer(transfer.id)}>Reject</button>
+                  </div>
+                ) : (
+                  <div className="file-panel__progress" aria-hidden={transfer.state === "done"}>
+                    <div className="file-panel__bar" style={{ width: `${transfer.total ? Math.round((transfer.transferred / transfer.total) * 100) : 100}%` }} />
+                  </div>
+                )}
+                {transfer.state === "done" && <span className="file-panel__status">Done</span>}
+                {transfer.state === "error" && <span className="file-panel__status file-panel__status--error">{transfer.message ?? "Failed"}</span>}
+              </li>
+            ))}
+          </ul>
+        </aside>
+      )}
       <div className="session-security-chip mono">Encrypted</div>
     </main>
   );

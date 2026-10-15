@@ -32,6 +32,9 @@ export class FakeViewer implements Viewer {
   }
   input(event: Uint8Array) { return new Uint8Array([0x12, ...event]); }
   clipboard(text: string) { return new Uint8Array([0x13, ...new TextEncoder().encode(text)]); }
+  sendFile(id: number, _name: string, _data: Uint8Array) { return new Uint8Array([0x13, 0x01, id & 0xff]); }
+  acceptFile(id: number) { return new Uint8Array([0x13, 0x02, id & 0xff]); }
+  rejectFile(id: number) { return new Uint8Array([0x13, 0x03, id & 0xff]); }
   requestKeyframe() { return new Uint8Array([0x01, 0xaa]); }
   selectMonitor(id: number) { return new Uint8Array([0x01, id]); }
   bye() { return new Uint8Array([0x01, 0xbb]); }

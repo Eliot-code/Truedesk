@@ -1,7 +1,7 @@
 //! JavaScript bindings. Calls return nothing; events queue up and the page
 //! drains them with `nextEvent`.
 
-use crate::{reconnect, Event, ViewerSession};
+use crate::{filexfer::FileEvent, reconnect, Event, ViewerSession};
 use std::collections::VecDeque;
 use std::time::Duration;
 use wasm_bindgen::prelude::*;
@@ -44,7 +44,38 @@ impl From<Event> for ViewerEvent {
             Event::Audio(payload, channels) => ("audio", payload, channels.to_string()),
             Event::Monitors(json) => ("monitors", Vec::new(), json),
             Event::Clipboard(text) => ("clipboard", Vec::new(), text),
+            Event::File(file) => return file.into(),
             Event::Ended(message) => ("ended", Vec::new(), message),
+        };
+        Self { kind, bytes, text }
+    }
+}
+
+impl From<FileEvent> for ViewerEvent {
+    fn from(event: FileEvent) -> Self {
+        // `text` carries a small JSON record; `bytes` carries received data.
+        let (kind, bytes, text) = match event {
+            FileEvent::Offer { id, name, size } => (
+                "file-offer",
+                Vec::new(),
+                serde_json::json!({ "id": id, "name": name, "size": size }).to_string(),
+            ),
+            FileEvent::Progress { id, transferred, total, sending } => (
+                "file-progress",
+                Vec::new(),
+                serde_json::json!({ "id": id, "transferred": transferred, "total": total, "sending": sending }).to_string(),
+            ),
+            FileEvent::Received { id, name, data } => (
+                "file-received",
+                data,
+                serde_json::json!({ "id": id, "name": name }).to_string(),
+            ),
+            FileEvent::Sent { id } => ("file-sent", Vec::new(), serde_json::json!({ "id": id }).to_string()),
+            FileEvent::Failed { id, message } => (
+                "file-error",
+                Vec::new(),
+                serde_json::json!({ "id": id, "message": message }).to_string(),
+            ),
         };
         Self { kind, bytes, text }
     }
@@ -79,6 +110,20 @@ impl Viewer {
 
     /// Seal local clipboard text for the host. `None` if too large or not yet live.
     pub fn clipboard(&mut self, text: &str) -> Option<Vec<u8>> { self.session.clipboard(text) }
+
+    /// Offer a local file under the page-chosen `id` (unique, below 2^53).
+    #[wasm_bindgen(js_name = sendFile)]
+    pub fn send_file(&mut self, id: f64, name: &str, data: Vec<u8>) -> Option<Vec<u8>> {
+        self.session.send_file(id as u64, name, data)
+    }
+
+    /// Accept an incoming file offer.
+    #[wasm_bindgen(js_name = acceptFile)]
+    pub fn accept_file(&mut self, id: f64) -> Option<Vec<u8>> { self.session.accept_file(id as u64) }
+
+    /// Reject an incoming file offer.
+    #[wasm_bindgen(js_name = rejectFile)]
+    pub fn reject_file(&mut self, id: f64) -> Option<Vec<u8>> { self.session.reject_file(id as u64) }
 
     #[wasm_bindgen(js_name = requestKeyframe)]
     pub fn request_keyframe(&mut self) -> Option<Vec<u8>> { self.session.request_keyframe() }

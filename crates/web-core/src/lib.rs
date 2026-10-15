@@ -9,16 +9,19 @@
 //! path, so the host's ICE signals are ignored and the host falls back to
 //! the relay when its ICE deadline passes.
 
+pub mod filexfer;
 pub mod reconnect;
 #[cfg(target_arch = "wasm32")]
 mod wasm;
 
+use filexfer::{FileEvent, Transfers};
 use protocol::{
     audio::AudioFrame,
     clipboard::{ClipboardMsg, MAX_CLIPBOARD},
     control::Control,
     crypto::{Opener, Sealer},
     datamsg::DataMsg,
+    filexfer::FileMsg,
     frame, kex, pake, Tag,
 };
 use reconnect::{rejection_error, HOST_ENDED_MESSAGE};
@@ -50,6 +53,8 @@ pub enum Event {
     Monitors(String),
     /// Inbound clipboard text from the host (already capped at 1 MB).
     Clipboard(String),
+    /// A file-transfer update for the page (offers, progress, results).
+    File(FileEvent),
     /// The session is over. The text matches the desktop viewer's errors,
     /// so [`reconnect::after_failure`] can decide what to do next.
     Ended(String),
@@ -117,6 +122,7 @@ struct Live {
     data_sealer: Sealer,
     data_opener: Opener,
     clip_seq: u64,
+    transfers: Transfers,
     gate: VideoGate,
     next_keepalive: f64,
     peer_deadline: f64,
@@ -130,6 +136,11 @@ impl Live {
     /// Seal a `DataMsg` for the reliable Data channel.
     fn data(&mut self, message: &DataMsg) -> Vec<u8> {
         frame::wrap(Tag::Data, &self.data_sealer.seal(&[Tag::Data as u8], &message.to_bytes()))
+    }
+
+    /// Seal one file-transfer message for the Data channel.
+    fn file(&mut self, message: FileMsg) -> Vec<u8> {
+        self.data(&DataMsg::FileTransfer(message))
     }
 }
 
@@ -230,6 +241,7 @@ impl ViewerSession {
             data_sealer: Sealer::new(data_send_key),
             data_opener: Opener::new(data_recv_key),
             clip_seq: 0,
+            transfers: Transfers::default(),
             gate: VideoGate::new(),
             next_keepalive: now_ms + KEEPALIVE_INTERVAL_MS,
             peer_deadline: now_ms + DEAD_PEER_TIMEOUT_MS,
@@ -273,7 +285,13 @@ impl ViewerSession {
                 live.peer_deadline = now_ms + DEAD_PEER_TIMEOUT_MS;
                 match DataMsg::from_bytes(&plaintext) {
                     Some(DataMsg::Clipboard(clip)) => vec![Event::Clipboard(clip.text)],
-                    // File transfer and chat are handled elsewhere.
+                    Some(DataMsg::FileTransfer(message)) => {
+                        let (sends, file_events) = live.transfers.on_message(message);
+                        let mut events: Vec<Event> = sends.into_iter().map(|msg| Event::Send(live.file(msg))).collect();
+                        events.extend(file_events.into_iter().map(Event::File));
+                        events
+                    }
+                    // Chat is not surfaced in the browser viewer.
                     _ => Vec::new(),
                 }
             }
@@ -354,6 +372,28 @@ impl ViewerSession {
         live.clip_seq += 1;
         let message = DataMsg::Clipboard(ClipboardMsg { seq: live.clip_seq, text: text.to_owned() });
         Some(live.data(&message))
+    }
+
+    /// Offer a local file to the host under the page-chosen `id` (unique and
+    /// below 2^53). Returns the sealed Offer, or `None`.
+    pub fn send_file(&mut self, id: u64, name: &str, data: Vec<u8>) -> Option<Vec<u8>> {
+        let live = self.live()?;
+        let offer = live.transfers.send_file(id, name, data)?;
+        Some(live.file(offer))
+    }
+
+    /// Accept an incoming offer. Returns the sealed Accept, or `None`.
+    pub fn accept_file(&mut self, id: u64) -> Option<Vec<u8>> {
+        let live = self.live()?;
+        let accept = live.transfers.accept(id)?;
+        Some(live.file(accept))
+    }
+
+    /// Reject an incoming offer. Returns the sealed Reject, or `None`.
+    pub fn reject_file(&mut self, id: u64) -> Option<Vec<u8>> {
+        let live = self.live()?;
+        let reject = live.transfers.reject(id)?;
+        Some(live.file(reject))
     }
 
     /// Ask the host for a keyframe, e.g. after a decoder error.
@@ -530,6 +570,30 @@ mod tests {
         assert_eq!(host.open_data(&sealed), Some(DataMsg::Clipboard(ClipboardMsg { seq: 1, text: "copied".into() })));
         // Oversize text is dropped.
         assert!(viewer.clipboard(&"x".repeat(protocol::clipboard::MAX_CLIPBOARD + 1)).is_none());
+    }
+
+    #[test]
+    fn file_transfer_offers_open_and_incoming_offers_surface() {
+        use protocol::filexfer::FileMsg;
+        let mut viewer = ViewerSession::new("pw", "");
+        let mut host = authenticate(&mut viewer, "pw").unwrap();
+        // Outgoing: the viewer's offer opens on the host as a file Offer.
+        let sealed = viewer.send_file(42, "note.txt", b"hello".to_vec()).unwrap();
+        match host.open_data(&sealed) {
+            Some(DataMsg::FileTransfer(FileMsg::Offer { id, name, size, .. })) => {
+                assert_eq!((id, name.as_str(), size), (42, "note.txt", 5));
+            }
+            other => panic!("expected a file offer, got {other:?}"),
+        }
+        // Incoming: a host offer surfaces as a File(Offer) event.
+        let offer = host.data(&DataMsg::FileTransfer(FileMsg::Offer { id: 9, name: "in.bin".into(), size: 3, hash: [0; 32] }));
+        assert_eq!(
+            viewer.receive(&offer, 3.0),
+            vec![Event::File(filexfer::FileEvent::Offer { id: 9, name: "in.bin".into(), size: 3 })],
+        );
+        // Accepting seals an Accept the host can open.
+        let accept = viewer.accept_file(9).unwrap();
+        assert_eq!(host.open_data(&accept), Some(DataMsg::FileTransfer(FileMsg::Accept { id: 9 })));
     }
 
     #[test]
