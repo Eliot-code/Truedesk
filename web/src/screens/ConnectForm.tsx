@@ -77,8 +77,7 @@ export default function ConnectForm({ viewerId, relay: savedRelay, defaultRelay,
           </details>
         </form>
         <p className="caption web-reassure">
-          Everything you see and do stays encrypted all the way to the other computer. The relay only passes sealed data through &mdash; it can't read your screen or what you type.
-          For sound, file transfer and clipboard sharing, use the desktop app.
+          Everything you see and do stays encrypted all the way to the other computer. The relay only passes sealed data through; it can't read your screen or what you type.
         </p>
       </section>
     </main>

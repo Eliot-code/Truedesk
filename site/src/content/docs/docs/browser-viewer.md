@@ -25,14 +25,15 @@ same relay the host uses, and it must start with `wss://`.
 ## What works
 
 - The remote screen, mouse and keyboard.
-- **Fullscreen**.
-- Choosing a monitor, when the host has more than one.
+- The host's **sound**.
+- **File transfer**, both ways, with a prompt before anything is accepted.
+- **Clipboard** text sync, when you turn it on.
+- **Recording** the remote screen to a `.webm` file.
+- **Fullscreen** and choosing a monitor when the host has more than one.
 - Reconnecting after a short network drop.
 
 ## What doesn't, yet
 
-- **No sound, file transfer, clipboard sync or recording.** Use the desktop
-  app for those.
 - **Always relayed.** Browsers can't join the direct UDP path, so the session
   always goes through the relay. It's still end-to-end encrypted, but
   usually slower than the app's direct connection.

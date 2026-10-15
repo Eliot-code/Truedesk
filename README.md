@@ -72,7 +72,7 @@ covers each step in more detail.
 | **macOS** 12.3+ | ✅ | ✅ | Most tested. Needs Screen Recording and Accessibility |
 | **Windows** 10 1803+ | ✅ | ✅ | Less runtime-tested than macOS |
 | **Linux** | ✅ | ✅ | PipeWire + xdg-desktop-portal; Wayland input is limited |
-| **Browser** | — | ✅ | Relay only; no audio, files, clipboard or recording yet |
+| **Browser** | — | ✅ | Relay only (no direct connection); can't host |
 
 Release builds are not code-signed. The
 [install guide](https://opendesk.treeot.dev/docs/getting-started/) shows how to
@@ -143,11 +143,11 @@ To run two instances on one machine, see [`docs/TESTING.md`](docs/TESTING.md).
 Bigger pieces that would bring OpenDesk closer to a full TeamViewer or AnyDesk
 replacement, in rough priority order:
 
-- **Accounts and a web console** — sign-in, synced address book, and device
+- **Accounts and a web console**: sign-in, synced address book, and device
   and user management for teams.
-- **Native mobile apps** — Android and iOS, beyond today's browser viewer.
-- **More codecs** — H.265 and VP8/VP9, and hardware encoding on Linux.
-- **Session extras** — remote restart with auto-reconnect, swapping which side
+- **Native mobile apps**: Android and iOS, beyond today's browser viewer.
+- **More codecs**: H.265 and VP8/VP9, and hardware encoding on Linux.
+- **Session extras**: remote restart with auto-reconnect, swapping which side
   controls, and remote printing.
 
 ## Contributing

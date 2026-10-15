@@ -130,7 +130,7 @@ is always relayed.
 
 Sound needs Windows, macOS 14.6 or later (allow **System Audio Recording**
 when asked), or Linux with PulseAudio or PipeWire. Check that **Sound** in
-the toolbar isn't set to **Muted**. The browser viewer has no sound.
+the toolbar isn't set to **Muted**, on the desktop app or the browser viewer.
 
 ## Where are the logs?
 
