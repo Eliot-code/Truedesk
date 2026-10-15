@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { makeDecoder } from "../../../viewer/src/lib/decode";
+import { makeAudioPlayer } from "../lib/audio";
 import { attachInput } from "../../../viewer/src/lib/input";
 import type { ConnectionStatus } from "../lib/connection";
 import { formatId } from "../lib/settings";
@@ -11,6 +12,8 @@ export interface SessionControls {
   selectMonitor(id: number): void;
   /** Where video frames go; the session screen sets it while mounted. */
   setVideoSink(sink: ((frame: Uint8Array) => void) | null): void;
+  /** Where audio packets go while sound is on. */
+  setAudioSink(sink: ((payload: Uint8Array, channels: number) => void) | null): void;
   /** Send local clipboard text to the host. */
   sendClipboard(text: string): void;
   /** Where inbound clipboard text goes while the sync toggle is on. */
@@ -44,6 +47,7 @@ export default function Session({ remoteId, status, monitors, controls, onDiscon
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [selected, setSelected] = useState<number>();
   const [clipboardOn, setClipboardOn] = useState(false);
+  const [soundOn, setSoundOn] = useState(false);
 
   useEffect(() => {
     setSelected(monitors.find((monitor) => monitor.is_primary)?.id ?? monitors[0]?.id);
@@ -97,6 +101,26 @@ export default function Session({ remoteId, status, monitors, controls, onDiscon
     };
   }, [clipboardOn, controls]);
 
+  // Sound is off by default. Toggling it on happens inside a click (a user
+  // gesture), so the AudioContext is allowed to start. If WebCodecs audio is
+  // missing, makeAudioPlayer returns null and we simply play nothing.
+  useEffect(() => {
+    if (!soundOn) {
+      controls.setAudioSink(null);
+      return;
+    }
+    const player = makeAudioPlayer();
+    if (!player) {
+      controls.setAudioSink(null);
+      return;
+    }
+    controls.setAudioSink((payload, channels) => player.push(payload, channels));
+    return () => {
+      controls.setAudioSink(null);
+      player.close();
+    };
+  }, [soundOn, controls]);
+
   const toggleFullscreen = () => {
     if (document.fullscreenElement) void document.exitFullscreen();
     else void screenRef.current?.requestFullscreen?.().then(() => canvasRef.current?.focus());
@@ -137,6 +161,13 @@ export default function Session({ remoteId, status, monitors, controls, onDiscon
               <rect x="8" y="2" width="8" height="4" rx="1" /><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
             </svg>
             <span className="session-toolbar__icon-text" aria-hidden="true">Clipboard</span>
+          </button>
+          <button className="session-toolbar__icon" type="button" aria-pressed={soundOn} aria-label="Sound" title={soundOn ? "Sound on" : "Sound off"} onClick={() => setSoundOn((on) => !on)}>
+            <svg className="session-toolbar__svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M11 5 6 9H2v6h4l5 4V5z" />
+              {soundOn ? <><path d="M15.5 8.5a5 5 0 0 1 0 7" /><path d="M18.5 5.5a9 9 0 0 1 0 13" /></> : <path d="M22 9l-6 6M16 9l6 6" />}
+            </svg>
+            <span className="session-toolbar__icon-text" aria-hidden="true">Sound</span>
           </button>
           {monitors.length > 1 && (
             <label className="session-toolbar__select-chip">

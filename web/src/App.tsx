@@ -26,6 +26,7 @@ export default function App({ loadCore, openSocket, unsupported = unsupportedRea
   const [busy, setBusy] = useState(false);
   const connection = useRef<Connection | null>(null);
   const videoSink = useRef<((frame: Uint8Array) => void) | null>(null);
+  const audioSink = useRef<((payload: Uint8Array, channels: number) => void) | null>(null);
   const clipboardSink = useRef<((text: string) => void) | null>(null);
 
   const controls = useMemo<SessionControls>(() => ({
@@ -33,6 +34,7 @@ export default function App({ loadCore, openSocket, unsupported = unsupportedRea
     requestKeyframe: () => connection.current?.requestKeyframe(),
     selectMonitor: (id) => connection.current?.selectMonitor(id),
     setVideoSink: (sink) => { videoSink.current = sink; },
+    setAudioSink: (sink) => { audioSink.current = sink; },
     sendClipboard: (text) => connection.current?.sendClipboard(text),
     setClipboardSink: (sink) => { clipboardSink.current = sink; },
   }), []);
@@ -63,6 +65,7 @@ export default function App({ loadCore, openSocket, unsupported = unsupportedRea
       {
         status: (status) => setActive({ remoteId: request.target, status }),
         video: (frame) => videoSink.current?.(frame),
+        audio: (payload, channels) => audioSink.current?.(payload, channels),
         monitors: setMonitors,
         clipboard: (text) => clipboardSink.current?.(text),
         ended: (error) => {

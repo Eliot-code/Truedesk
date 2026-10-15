@@ -40,6 +40,8 @@ impl From<Event> for ViewerEvent {
             Event::Send(bytes) => ("send", bytes, String::new()),
             Event::Authenticated => ("authenticated", Vec::new(), String::new()),
             Event::Video(bytes) => ("video", bytes, String::new()),
+            // `text` carries the channel count so the page can configure audio.
+            Event::Audio(payload, channels) => ("audio", payload, channels.to_string()),
             Event::Monitors(json) => ("monitors", Vec::new(), json),
             Event::Clipboard(text) => ("clipboard", Vec::new(), text),
             Event::Ended(message) => ("ended", Vec::new(), message),

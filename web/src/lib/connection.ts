@@ -25,6 +25,8 @@ export interface ConnectionTarget {
 export interface ConnectionHandlers {
   status(status: ConnectionStatus): void;
   video(frame: Uint8Array): void;
+  /** One Opus packet from the host and its channel count. */
+  audio(payload: Uint8Array, channels: number): void;
   monitors(monitors: MonitorInfo[]): void;
   /** Inbound clipboard text from the host. */
   clipboard(text: string): void;
@@ -151,7 +153,8 @@ export class Connection {
             this.handlers.status("streaming");
           }
           this.handlers.video(event.takeBytes());
-        } else if (kind === "monitors") this.handlers.monitors(JSON.parse(event.text) as MonitorInfo[]);
+        } else if (kind === "audio") this.handlers.audio(event.takeBytes(), Number(event.text) || 2);
+        else if (kind === "monitors") this.handlers.monitors(JSON.parse(event.text) as MonitorInfo[]);
         else if (kind === "clipboard") this.handlers.clipboard(event.text);
         else if (kind === "ended") {
           const message = event.text;

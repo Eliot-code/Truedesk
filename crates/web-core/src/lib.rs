@@ -14,6 +14,7 @@ pub mod reconnect;
 mod wasm;
 
 use protocol::{
+    audio::AudioFrame,
     clipboard::{ClipboardMsg, MAX_CLIPBOARD},
     control::Control,
     crypto::{Opener, Sealer},
@@ -43,6 +44,8 @@ pub enum Event {
     Authenticated,
     /// Opened video: the 18-byte header, then an H.264 access unit.
     Video(Vec<u8>),
+    /// Opened audio: one Opus packet (48 kHz, 20 ms) and its channel count.
+    Audio(Vec<u8>, u8),
     /// The host's monitors as a JSON array of `MonitorInfo`.
     Monitors(String),
     /// Inbound clipboard text from the host (already capped at 1 MB).
@@ -274,7 +277,16 @@ impl ViewerSession {
                     _ => Vec::new(),
                 }
             }
-            // Audio is not opened here.
+            Some((Tag::Audio, sealed)) => {
+                // Audio shares the media opener (one host-side sealer seals
+                // both video and audio), so opening here keeps replay state.
+                let Some(plaintext) = live.opener.open(&[Tag::Audio as u8], sealed) else { return Vec::new() };
+                live.peer_deadline = now_ms + DEAD_PEER_TIMEOUT_MS;
+                match AudioFrame::from_bytes(&plaintext) {
+                    Some(frame) => vec![Event::Audio(frame.payload, frame.channels)],
+                    None => Vec::new(),
+                }
+            }
             _ => Vec::new(),
         }
     }
@@ -416,6 +428,10 @@ mod tests {
             plain.extend_from_slice(&[0, 0, 0, 0, 1, u8::from(keyframe), 0, 64, 0, 64, 0, 0, 0, 1, 0x65]);
             frame::wrap(Tag::Video, &self.sealer.seal(&[Tag::Video as u8], &plain))
         }
+        fn audio(&mut self, payload: Vec<u8>, channels: u8) -> Vec<u8> {
+            let frame = AudioFrame { sample_rate: 48_000, channels, frame_duration_ms: 20, payload };
+            frame::wrap(Tag::Audio, &self.sealer.seal(&[Tag::Audio as u8], &frame.to_bytes()))
+        }
         fn open_control(&mut self, message: &[u8]) -> Option<Control> {
             let (Tag::Control, sealed) = frame::unwrap(message)? else { return None };
             Control::from_bytes(&self.control_opener.open(&[Tag::Control as u8], sealed)?)
@@ -489,6 +505,16 @@ mod tests {
         let bye = host.control(&Control::Bye { session: String::new() });
         assert_eq!(viewer.receive(&bye, 9.0), vec![Event::Ended(HOST_ENDED_MESSAGE.into())]);
         assert!(viewer.input(&[1]).is_none());
+    }
+
+    #[test]
+    fn audio_frames_open_with_the_media_opener() {
+        let mut viewer = ViewerSession::new("pw", "");
+        let mut host = authenticate(&mut viewer, "pw").unwrap();
+        // Video first (counter 0), then audio (counter 1): one media sealer.
+        assert!(matches!(&viewer.receive(&host.video(0, true), 3.0)[..], [Event::Video(_)]));
+        let audio = host.audio(vec![1, 2, 3, 4], 2);
+        assert_eq!(viewer.receive(&audio, 4.0), vec![Event::Audio(vec![1, 2, 3, 4], 2)]);
     }
 
     #[test]

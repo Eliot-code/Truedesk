@@ -4,9 +4,9 @@
  */
 
 export interface ViewerEvent {
-  /** "send", "authenticated", "video", "monitors", "clipboard" or "ended". */
+  /** "send", "authenticated", "video", "audio", "monitors", "clipboard" or "ended". */
   readonly kind: string;
-  /** Monitors JSON, clipboard text or the end message. */
+  /** Monitors JSON, clipboard text, the audio channel count or the end message. */
   readonly text: string;
   takeBytes(): Uint8Array;
   free(): void;
