@@ -244,6 +244,11 @@
   background: rgba(34, 211, 238, .12);
 }
 .web-session .session-toolbar__icon { position: relative; }
+.web-session .session-toolbar__icon[aria-label="Stop recording"] {
+  color: #f87171;
+  border-color: rgba(248, 113, 113, .4);
+  background: rgba(248, 113, 113, .14);
+}
 .web-session .session-toolbar__badge {
   position: absolute;
   top: -6px;

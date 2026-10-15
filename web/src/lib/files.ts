@@ -11,7 +11,11 @@ export function nextFileId(): number {
 
 /** Offer `data` to the user as a download named `name`. */
 export function downloadBytes(name: string, data: Uint8Array) {
-  const blob = new Blob([data as BlobPart]);
+  downloadBlob(name, new Blob([data as BlobPart]));
+}
+
+/** Offer `blob` to the user as a download named `name`. */
+export function downloadBlob(name: string, blob: Blob) {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;

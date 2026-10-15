@@ -3,7 +3,7 @@ import { makeDecoder } from "../../../viewer/src/lib/decode";
 import { makeAudioPlayer } from "../lib/audio";
 import { attachInput } from "../../../viewer/src/lib/input";
 import type { ConnectionStatus } from "../lib/connection";
-import { downloadBytes, formatSize, nextFileId } from "../lib/files";
+import { downloadBlob, downloadBytes, formatSize, nextFileId } from "../lib/files";
 import { formatId } from "../lib/settings";
 import type { FileSignal, MonitorInfo } from "../lib/types";
 
@@ -82,6 +82,13 @@ const overlays: Partial<Record<ConnectionStatus, { title: (id: string) => ReactN
 
 const statusDot: Record<ConnectionStatus, string> = { connecting: "connecting", waiting: "connecting", reconnecting: "connecting", streaming: "in_session" };
 
+function formatClock(ms: number): string {
+  const total = Math.floor(ms / 1000);
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+}
+
 function monitorName(monitor: MonitorInfo, index: number): string {
   const device = /^\\\\\.\\DISPLAY(\d+)$/i.exec(monitor.name.trim());
   const name = device ? `Display ${device[1]}` : monitor.name.trim() || `Display ${index + 1}`;
@@ -97,6 +104,9 @@ export default function Session({ remoteId, status, monitors, controls, onDiscon
   const [filesOpen, setFilesOpen] = useState(false);
   const [transfers, setTransfers] = useState<Transfer[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [recording, setRecording] = useState(false);
+  const [recordMs, setRecordMs] = useState(0);
+  const recorderRef = useRef<{ recorder: MediaRecorder; stream: MediaStream; timer: ReturnType<typeof setInterval> } | null>(null);
 
   useEffect(() => {
     setSelected(monitors.find((monitor) => monitor.is_primary)?.id ?? monitors[0]?.id);
@@ -204,6 +214,55 @@ export default function Session({ remoteId, status, monitors, controls, onDiscon
     }
   };
 
+  // Recording captures what the viewer sees (the decoded remote video) from
+  // the canvas to a local .webm via MediaRecorder. It is viewer-only: nothing
+  // is sent to the host. If MediaRecorder or captureStream is missing, the
+  // button stays disabled.
+  const canRecord = typeof MediaRecorder !== "undefined"
+    && typeof HTMLCanvasElement !== "undefined"
+    && "captureStream" in HTMLCanvasElement.prototype;
+
+  const stopRecording = () => {
+    const current = recorderRef.current;
+    if (!current) return;
+    recorderRef.current = null;
+    clearInterval(current.timer);
+    if (current.recorder.state !== "inactive") current.recorder.stop();
+    current.stream.getTracks().forEach((track) => track.stop());
+    setRecording(false);
+  };
+
+  const startRecording = () => {
+    const canvas = canvasRef.current;
+    if (!canvas || !canRecord || recorderRef.current) return;
+    const stream = (canvas as HTMLCanvasElement & { captureStream: (fps?: number) => MediaStream }).captureStream(30);
+    const preferred = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
+    const mimeType = preferred.find((type) => MediaRecorder.isTypeSupported(type));
+    let recorder: MediaRecorder;
+    try {
+      recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+    } catch (error) {
+      console.error("could not start recording:", error);
+      stream.getTracks().forEach((track) => track.stop());
+      return;
+    }
+    const chunks: Blob[] = [];
+    recorder.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data); };
+    recorder.onstop = () => {
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      downloadBlob(`opendesk-${stamp}.webm`, new Blob(chunks, { type: recorder.mimeType || "video/webm" }));
+    };
+    recorder.start(1000);
+    const start = performance.now();
+    setRecordMs(0);
+    const timer = setInterval(() => setRecordMs(performance.now() - start), 500);
+    recorderRef.current = { recorder, stream, timer };
+    setRecording(true);
+  };
+
+  // Always stop a recording when the session screen unmounts.
+  useEffect(() => () => stopRecording(), []);
+
   const toggleFullscreen = () => {
     if (document.fullscreenElement) void document.exitFullscreen();
     else void screenRef.current?.requestFullscreen?.().then(() => canvasRef.current?.focus());
@@ -260,6 +319,14 @@ export default function Session({ remoteId, status, monitors, controls, onDiscon
             <span className="session-toolbar__icon-text" aria-hidden="true">Files</span>
             {pendingOffers > 0 && <span className="session-toolbar__badge" aria-hidden="true">{pendingOffers}</span>}
           </button>
+          {canRecord && (
+            <button className="session-toolbar__icon" type="button" aria-pressed={recording} aria-label={recording ? "Stop recording" : "Record"} title={recording ? "Stop recording" : "Record the remote screen"} onClick={() => (recording ? stopRecording() : startRecording())}>
+              <svg className="session-toolbar__svg" viewBox="0 0 24 24" fill={recording ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                {recording ? <rect x="7" y="7" width="10" height="10" rx="1.5" /> : <circle cx="12" cy="12" r="6" />}
+              </svg>
+              <span className="session-toolbar__icon-text" aria-hidden="true">{recording ? formatClock(recordMs) : "Record"}</span>
+            </button>
+          )}
           {monitors.length > 1 && (
             <label className="session-toolbar__select-chip">
               <select aria-label="Monitor" value={selected ?? monitors[0].id} onChange={(event) => chooseMonitor(Number(event.target.value))}>
