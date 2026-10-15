@@ -8,7 +8,7 @@ const { listeners, mocks } = vi.hoisted(() => {
   const on = (name: string) => (handler: (payload: unknown) => void) => { listeners.set(name, handler); return Promise.resolve(() => {}); };
   const mocks = {
     onStatusChanged: on("status_changed"), onViewerStatus: on("viewer_status"), onIncomingRequest: on("incoming_request"), onSessionStarted: on("session_started"),
-    onSessionEnded: on("session_ended"), onError: on("error"),
+    onSessionEnded: on("session_ended"), onError: on("error"), onTwofaPrompt: on("twofa_prompt"),
     startVideo: () => () => {}, requestKeyframe: vi.fn(), onAudioFrame: on("audio_frame"), onMonitorList: on("monitor_list"), onLinkStats: on("link_stats"),
     onVirtualDisplaySupport: on("virtual_display_support"), onVirtualDisplayAdded: on("virtual_display_added"), onVirtualDisplayRefused: on("virtual_display_refused"), onHostNotice: on("host_notice"),
     onFileOffer: on("file_offer"), onFileProgress: on("file_progress"), onFileDone: on("file_done"), onFileError: on("file_error"),
@@ -99,6 +99,29 @@ describe("App", () => {
     emit("session_ended", { reason: "error" });
     expect(await screen.findByRole("alert")).toHaveProperty("textContent", expect.stringContaining("The host declined the connection request."));
     expect((screen.getByPlaceholderText("000 000 000") as HTMLInputElement).value).toBe("987654321");
+  });
+
+  it("prompts for a 2FA code and reconnects with it", async () => {
+    await startConnecting();
+    emit("twofa_prompt", { reason: "required" });
+    emit("session_ended", { reason: "error" });
+    const dialog = await screen.findByRole("dialog", { name: "Enter your 2FA code" });
+    expect(dialog.textContent).toContain("Enter the current 6-digit code");
+    fireEvent.change(screen.getByLabelText("Two-factor code"), { target: { value: "123456" } });
+    fireEvent.click(screen.getByRole("button", { name: "Submit" }));
+    await waitFor(() => expect(mocks.connect).toHaveBeenLastCalledWith("987654321", "secret", "123456"));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Enter your 2FA code" })).toBeNull());
+  });
+
+  it("reopens the 2FA popup with an error when the code is wrong", async () => {
+    await startConnecting();
+    emit("twofa_prompt", { reason: "invalid" });
+    emit("session_ended", { reason: "error" });
+    const dialog = await screen.findByRole("dialog", { name: "Enter your 2FA code" });
+    expect(dialog.textContent).toContain("That code didn't match");
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Enter your 2FA code" })).toBeNull());
+    expect(mocks.connect).toHaveBeenCalledTimes(1);
   });
 
   it("closes an incoming request that ended before it was answered", async () => {

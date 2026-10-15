@@ -17,6 +17,8 @@ export interface IncomingRequest { peer_id: string; fingerprint: string; known: 
 export interface SessionStarted { role: "host" | "viewer"; remote_id: string }
 export interface SessionEnded { reason: string }
 export interface ErrorEvent { message: string }
+/** The host wants a 2FA code: "required" (none sent) or "invalid" (rejected). */
+export interface TwofaPrompt { reason: "required" | "invalid" }
 export interface StatusChanged { state: Status }
 export interface AudioFrame { sample_rate: number; channels: number; samples: string } // base64 of little-endian i16 PCM
 export interface FileOffer { id: number; name: string; size: number; from: string }
@@ -148,6 +150,8 @@ export const onIncomingRequest = (handler: (payload: IncomingRequest) => void) =
 export const onSessionStarted = (handler: (payload: SessionStarted) => void) => on("session_started", handler);
 export const onSessionEnded = (handler: (payload: SessionEnded) => void) => on("session_ended", handler);
 export const onError = (handler: (payload: ErrorEvent) => void) => on("error", handler);
+/** The host requires a 2FA code; the UI opens a popup to collect it. */
+export const onTwofaPrompt = (handler: (payload: TwofaPrompt) => void) => on("twofa_prompt", handler);
 export const onMonitorList = (handler: (payload: { monitors: MonitorInfo[] }) => void) => on("monitor_list", handler);
 /** The host lets this viewer add up to `max` virtual displays; hosts that don't never send it. */
 export const onVirtualDisplaySupport = (handler: (payload: { max: number }) => void) => on("virtual_display_support", handler);

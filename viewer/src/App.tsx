@@ -5,6 +5,7 @@ import IncomingRequest from "./screens/IncomingRequest";
 import IncomingFiles from "./components/IncomingFiles";
 import Permissions from "./screens/Permissions";
 import Session from "./screens/Session";
+import TwofaPrompt from "./screens/TwofaPrompt";
 import Toast from "./components/Toast";
 import UpdateBanner from "./components/UpdateBanner";
 import * as api from "./lib/api";
@@ -20,6 +21,8 @@ export default function App() {
   const [request, setRequest] = useState<api.IncomingRequest | null>(null);
   const [session, setSession] = useState<api.SessionStarted | null>(null);
   const [target, setTarget] = useState("");
+  const [twofa, setTwofa] = useState<"required" | "invalid" | null>(null);
+  const lastConnect = useRef<{ id: string; password: string } | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const noticeId = useRef(0);
   const permissionsChecked = useRef(false);
@@ -35,6 +38,8 @@ export default function App() {
   // for the viewer-role session_started event, i.e. the host accepted.
   const handleConnect = async (remoteId: string, password: string, authCode?: string) => {
     setTarget(remoteId);
+    lastConnect.current = { id: remoteId, password };
+    setTwofa(null);
     setNotice(null);
     go("connecting");
     try {
@@ -69,6 +74,7 @@ export default function App() {
         if (!active) return;
         if (payload.role === "viewer" && screenRef.current !== "connecting") return;
         setRequest(null);
+        setTwofa(null);
         setSession(payload);
         go("session");
         setNotice(null);
@@ -80,6 +86,7 @@ export default function App() {
         go("home");
       }),
       api.onError(({ message }) => active && notify(friendlyError(message))),
+      api.onTwofaPrompt(({ reason }) => { if (active) setTwofa(reason); }),
       api.onHostNotice(({ message }) => active && notify(message, "info")),
     ]);
 
@@ -116,5 +123,10 @@ export default function App() {
     <UpdateBanner enabled={!import.meta.env.DEV} visible={screen === "home" && !request} />
     {session?.role === "host" && <IncomingFiles />}
     {request && <IncomingRequest peerId={request.peer_id} known={request.known} onResolved={() => setRequest(null)} />}
+    {twofa && <TwofaPrompt reason={twofa} onSubmit={(code) => {
+      const last = lastConnect.current;
+      setTwofa(null);
+      if (last) void handleConnect(last.id, last.password, code).catch((error: unknown) => notify(friendlyError(error)));
+    }} onCancel={() => setTwofa(null)} />}
   </NotifyContext.Provider>;
 }

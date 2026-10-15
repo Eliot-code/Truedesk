@@ -144,11 +144,12 @@ describe("Home", () => {
     await waitFor(() => expect(onConnect).toHaveBeenCalledWith("987654321", "remote-secret"));
     expect(prompt).not.toHaveBeenCalled();
   });
-  it("passes an entered 2FA code when connecting", async () => {
+  it("has no inline 2FA field; connecting uses ID and password only", async () => {
     const onConnect = vi.fn().mockResolvedValue(undefined);
     render(<Home status="online" onConnect={onConnect} incomingRequest={null} onDismissRequest={vi.fn()} />);
-    fireEvent.change(screen.getByPlaceholderText("000 000 000"), { target: { value: "987654321" } }); fireEvent.change(screen.getByPlaceholderText("Password"), { target: { value: "remote-secret" } }); fireEvent.change(screen.getByLabelText("2FA code (optional)"), { target: { value: "123456" } }); fireEvent.click(screen.getByRole("button", { name: "Connect" }));
-    await waitFor(() => expect(onConnect).toHaveBeenCalledWith("987654321", "remote-secret", "123456"));
+    expect(screen.queryByLabelText("2FA code (optional)")).toBeNull();
+    fireEvent.change(screen.getByPlaceholderText("000 000 000"), { target: { value: "987654321" } }); fireEvent.change(screen.getByPlaceholderText("Password"), { target: { value: "remote-secret" } }); fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(onConnect).toHaveBeenCalledWith("987654321", "remote-secret"));
   });
 
   it("fills a contact's ID and focuses the password instead of connecting", async () => {
