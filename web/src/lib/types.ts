@@ -46,6 +46,8 @@ export interface Core {
   createViewer(password: string, authCode: string): Viewer;
   connectFrame(target: string, viewerId: string): Uint8Array;
   afterFailure(message: string, sessionStarted: boolean, attempt: number, outageMs: number): Step;
+  /** The host's reject code inside a rejection error, e.g. "2fa_required". */
+  rejectionCode(error: string): string | undefined;
 }
 
 /** A file-transfer update from web-core, decoded from a ViewerEvent. */

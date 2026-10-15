@@ -62,6 +62,10 @@ export class FakeCore implements Core {
     this.failures.push({ message, sessionStarted, attempt, outageMs });
     return { ...this.decide(message, sessionStarted), free: () => {} };
   }
+  rejectionCode(error: string) {
+    const prefix = "session rejected by host: ";
+    return error.startsWith(prefix) ? error.slice(prefix.length) : undefined;
+  }
 }
 
 export class FakeSocket implements Socket {

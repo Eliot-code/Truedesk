@@ -1,4 +1,4 @@
-import init, { afterFailure, connectFrame, Viewer } from "../wasm/web_core.js";
+import init, { afterFailure, connectFrame, rejectionCode, Viewer } from "../wasm/web_core.js";
 import type { Core } from "./types";
 
 let ready: Promise<Core> | undefined;
@@ -9,6 +9,7 @@ export function loadCore(): Promise<Core> {
     createViewer: (password: string, authCode: string) => new Viewer(password, authCode),
     connectFrame,
     afterFailure,
+    rejectionCode: (error: string) => rejectionCode(error) ?? undefined,
   }));
   return ready;
 }

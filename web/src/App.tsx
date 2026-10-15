@@ -5,6 +5,7 @@ import { DEFAULT_RELAY, saveRelay, savedRelay, viewerId } from "./lib/settings";
 import type { Core, FileSignal, MonitorInfo } from "./lib/types";
 import ConnectForm, { type ConnectRequest } from "./screens/ConnectForm";
 import Session, { type SessionControls } from "./screens/Session";
+import TwofaPrompt from "./screens/TwofaPrompt";
 
 export interface AppProps {
   loadCore(): Promise<Core>;
@@ -24,6 +25,8 @@ export default function App({ loadCore, openSocket, unsupported = unsupportedRea
   const [message, setMessage] = useState<string>();
   const [lastTarget, setLastTarget] = useState("");
   const [busy, setBusy] = useState(false);
+  const [twofa, setTwofa] = useState<"required" | "invalid" | null>(null);
+  const lastRequest = useRef<ConnectRequest | null>(null);
   const connection = useRef<Connection | null>(null);
   const videoSink = useRef<((frame: Uint8Array) => void) | null>(null);
   const audioSink = useRef<((payload: Uint8Array, channels: number) => void) | null>(null);
@@ -54,6 +57,8 @@ export default function App({ loadCore, openSocket, unsupported = unsupportedRea
   const connect = async (request: ConnectRequest) => {
     setBusy(true);
     setMessage(undefined);
+    setTwofa(null);
+    lastRequest.current = request;
     let core: Core;
     try {
       core = await loadCore();
@@ -80,6 +85,7 @@ export default function App({ loadCore, openSocket, unsupported = unsupportedRea
           setBusy(false);
           setMessage(error === null ? undefined : friendlyError(error));
         },
+        twofa: (reason) => setTwofa(reason),
       },
       { core, openSocket },
     );
@@ -87,19 +93,37 @@ export default function App({ loadCore, openSocket, unsupported = unsupportedRea
     conn.start();
   };
 
+  const prompt = twofa && (
+    <TwofaPrompt
+      reason={twofa}
+      onSubmit={(code) => {
+        const base = lastRequest.current;
+        setTwofa(null);
+        if (base) void connect({ ...base, authCode: code });
+      }}
+      onCancel={() => setTwofa(null)}
+    />
+  );
+
   if (active) {
-    return <Session remoteId={active.remoteId} status={active.status} monitors={monitors} controls={controls} onDisconnect={() => connection.current?.disconnect()} />;
+    return <>
+      <Session remoteId={active.remoteId} status={active.status} monitors={monitors} controls={controls} onDisconnect={() => connection.current?.disconnect()} />
+      {prompt}
+    </>;
   }
   return (
-    <ConnectForm
-      viewerId={ownId}
-      relay={savedRelay()}
-      defaultRelay={DEFAULT_RELAY}
-      message={message}
-      unsupported={unsupported}
-      busy={busy}
-      initialTarget={lastTarget}
-      onConnect={(request) => void connect(request)}
-    />
+    <>
+      <ConnectForm
+        viewerId={ownId}
+        relay={savedRelay()}
+        defaultRelay={DEFAULT_RELAY}
+        message={message}
+        unsupported={unsupported}
+        busy={busy}
+        initialTarget={lastTarget}
+        onConnect={(request) => void connect(request)}
+      />
+      {prompt}
+    </>
   );
 }

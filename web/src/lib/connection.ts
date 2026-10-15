@@ -34,6 +34,8 @@ export interface ConnectionHandlers {
   file(signal: FileSignal): void;
   /** The connection is over: `error` is null after the user disconnected. */
   ended(error: string | null): void;
+  /** The host wants a 2FA code: "required" (none sent) or "invalid" (rejected). */
+  twofa?(reason: "required" | "invalid"): void;
 }
 
 /** The WebSocket surface used here, so tests can fake it. */
@@ -184,6 +186,14 @@ export class Connection {
   private failed(message: string) {
     this.teardown();
     if (this.stopped) return;
+    // A 2FA rejection ends the attempt and asks the viewer for a code through
+    // a popup, rather than showing it as an error and retrying.
+    const code = this.env.core.rejectionCode(message);
+    if (code === "2fa_required" || code === "2fa_invalid") {
+      this.handlers.twofa?.(code === "2fa_required" ? "required" : "invalid");
+      this.finish(null);
+      return;
+    }
     if (this.mediaReceived) {
       this.attempt = 0;
       this.outageStart = null;

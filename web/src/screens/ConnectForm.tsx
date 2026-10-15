@@ -24,7 +24,6 @@ export interface ConnectFormProps {
 export default function ConnectForm({ viewerId, relay: savedRelay, defaultRelay, message, unsupported, busy = false, initialTarget = "", onConnect }: ConnectFormProps) {
   const [target, setTarget] = useState(initialTarget);
   const [password, setPassword] = useState("");
-  const [authCode, setAuthCode] = useState("");
   const [relay, setRelay] = useState(savedRelay);
   const [problem, setProblem] = useState<string | null>(null);
 
@@ -33,13 +32,11 @@ export default function ConnectForm({ viewerId, relay: savedRelay, defaultRelay,
     const id = normalizeId(target);
     if (!/^\d{9}$/.test(id)) return setProblem("Enter the 9-digit ID.");
     if (!password) return setProblem("Enter the password shown on the other device.");
-    const code = authCode.trim();
-    if (code && !/^\d{6}$/.test(code)) return setProblem("The two-factor code has 6 digits.");
     const relayUrl = relay.trim() || defaultRelay;
     const relayProblem = relayUrlError(relayUrl);
     if (relayProblem) return setProblem(relayProblem);
     setProblem(null);
-    onConnect({ target: id, password, authCode: code, relay: relayUrl });
+    onConnect({ target: id, password, authCode: "", relay: relayUrl });
   };
 
   const notice = problem ?? message;
@@ -67,7 +64,6 @@ export default function ConnectForm({ viewerId, relay: savedRelay, defaultRelay,
           <div className="connect-fields">
             <input className="target-input mono" aria-label="Device ID" placeholder="Device ID (123 456 789)" inputMode="numeric" autoComplete="off" value={target} onChange={(event) => setTarget(event.target.value)} />
             <input className="remote-password-input" aria-label="Password" placeholder="Password" type="password" autoComplete="off" value={password} onChange={(event) => setPassword(event.target.value)} />
-            <input className="remote-password-input mono" aria-label="Two-factor code" placeholder="2FA code (if required)" inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={authCode} onChange={(event) => setAuthCode(event.target.value)} />
             <button className="primary-button" type="submit" disabled={busy || Boolean(unsupported)}>{busy ? "Connecting…" : "Connect"}</button>
           </div>
           <details className="web-advanced">
