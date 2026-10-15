@@ -284,6 +284,14 @@ pub(crate) fn connect(
                         // TOTP code is single-use), and a host user already
                         // declined.
                         if !host_core::reconnect::should_retry_viewer(reason, session_started) {
+                            // Keep the raw rejection for a 2FA code so the
+                            // final handler shows the popup, not an error toast.
+                            if matches!(
+                                host_core::reconnect::rejection_code(&message),
+                                Some(host_core::reconnect::reject_code::TWOFA_REQUIRED | host_core::reconnect::reject_code::TWOFA_INVALID)
+                            ) {
+                                break Err(message);
+                            }
                             break Err(host_core::reconnect::stop_message(&message, reason, session_started));
                         }
                         if media_received {
@@ -307,13 +315,15 @@ pub(crate) fn connect(
 
         if let Err(message) = &result {
             let message = message.clone();
-            emit(
-                &task_app,
-                "error",
-                ErrorEvent {
-                    message,
-                },
-            );
+            match host_core::reconnect::rejection_code(&message) {
+                Some(host_core::reconnect::reject_code::TWOFA_REQUIRED) => {
+                    emit(&task_app, "twofa_prompt", TwofaPromptEvent { reason: "required" });
+                }
+                Some(host_core::reconnect::reject_code::TWOFA_INVALID) => {
+                    emit(&task_app, "twofa_prompt", TwofaPromptEvent { reason: "invalid" });
+                }
+                _ => emit(&task_app, "error", ErrorEvent { message }),
+            }
         }
         task_app.state::<VideoSink>().clear();
         let app_state = task_app.state::<AppState>();

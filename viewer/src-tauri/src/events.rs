@@ -86,6 +86,13 @@ pub(crate) struct IdentityConflictsEvent {
 pub(crate) struct ErrorEvent {
     pub(crate) message: String,
 }
+/// The host wants a 2FA code before it will let the viewer in. `reason` is
+/// "required" (none was sent) or "invalid" (the code was wrong, expired, or
+/// already used). The UI shows a popup for the code instead of an error.
+#[derive(Serialize, Clone)]
+pub(crate) struct TwofaPromptEvent {
+    pub(crate) reason: &'static str,
+}
 /// Base64-encode bytes for an IPC event payload (avoids JSON `number[]`).
 /// Video skips events entirely and streams raw bytes (see `VideoSink`).
 pub(crate) fn b64(bytes: &[u8]) -> String {
@@ -182,7 +189,7 @@ pub(crate) fn emit_activity(app: &AppHandle, kind: &str, detail: impl Into<Strin
 
 /// Lifecycle events that also go to the log file, so a bug report can include
 /// what happened. Media and progress events are too frequent to log.
-pub(crate) const LOGGED_EVENTS: &[&str] = &["status_changed", VIEWER_STATUS, "session_started", "session_ended", "incoming_request", "error", "file_error", "identity_changed", "identity_conflicts", "chat_message", "activity"];
+pub(crate) const LOGGED_EVENTS: &[&str] = &["status_changed", VIEWER_STATUS, "session_started", "session_ended", "incoming_request", "error", "twofa_prompt", "file_error", "identity_changed", "identity_conflicts", "chat_message", "activity"];
 
 /// The outgoing (viewer) session's own status. `status_changed` is only ever
 /// the host's presence, so a host hiccup never shows up in a viewer session.

@@ -139,6 +139,13 @@ pub fn connect_frame(target: &str, viewer_id: &str) -> Result<Vec<u8>, JsError> 
     crate::connect_frame(target, viewer_id).map_err(|error| JsError::new(&error))
 }
 
+/// The host's reject code inside a session-rejection error, e.g. "2fa_required".
+/// `undefined` when the error is not a host rejection.
+#[wasm_bindgen(js_name = rejectionCode)]
+pub fn rejection_code(error: &str) -> Option<String> {
+    reconnect::rejection_code(error).map(str::to_owned)
+}
+
 /// What to do after a failed attempt. `retry` false means stop and show `message`.
 #[wasm_bindgen]
 pub struct Step {
