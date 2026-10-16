@@ -2,13 +2,14 @@ Beta build for testing. Expect rough edges, and please report what breaks.
 
 ## What's new
 
-- **Browser viewer, now with sound, files, clipboard and recording:** the
-  viewer at /connect plays the host's audio, transfers files both ways, syncs
-  the clipboard, and can record the session to a local video file.
-- **2FA prompt:** if the host asks for a 2FA code, you now connect with just
-  the ID and password and a popup asks for the code, the way AnyDesk does.
-  The separate "2FA code (optional)" box is gone.
-- Refreshed the app's icon and header mark.
+- **Each monitor in its own window (new):** on a host with more than one
+  display, the monitor picker has a **New window** button. It opens that
+  monitor in a separate window you can drop onto one of your own screens and
+  go fullscreen, the way TeamViewer does. Each window controls its monitor
+  while your pointer is in it. The browser viewer still switches monitors with
+  the picker.
+- This is new and runs an extra capture per window, so please report anything
+  rough, especially on Windows and Linux.
 
 If you installed an earlier beta, this one arrives as an "Update available"
 banner on the home screen. On macOS you may need to grant Screen Recording and
