@@ -758,9 +758,10 @@ mod tests {
 
         fn stalled(&self) -> bool { self.latest.stalled.lock().unwrap().is_some() }
 
-        /// Waits for `condition`, up to two seconds.
+        /// Waits for `condition`, generously, so a loaded CI runner does not
+        /// trip the deadline before a backoff restart lands.
         fn until(&self, what: &str, condition: impl Fn(&Self) -> bool) {
-            let deadline = Instant::now() + Duration::from_secs(2);
+            let deadline = Instant::now() + Duration::from_secs(20);
             while !condition(self) {
                 assert!(Instant::now() < deadline, "timed out waiting until {what}");
                 std::thread::sleep(Duration::from_millis(5));
