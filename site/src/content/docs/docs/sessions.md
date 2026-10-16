@@ -12,6 +12,7 @@ across the top. From left to right:
 | **Direct** / **Relayed** badge | How the video travels, and the round trip in milliseconds. See [below](#direct-or-relayed). |
 | **Fullscreen** | Fills the screen with the remote desktop. Press it again to leave. |
 | Monitor picker | Lists the host's displays with their resolution and marks the primary. **Add display…** adds a [virtual display](/docs/virtual-displays/) when the host allows it. |
+| **New window** | Opens the chosen monitor in its own window, so you can put each of the host's screens on one of yours. Shows when the host has more than one display. The window controls that monitor while your pointer is in it. |
 | **Clipboard** | Turns clipboard sync on or off. It starts off. |
 | **Sound** / **Muted** | Mutes or unmutes the host's sound on your side. |
 | **Files** | Opens the file transfer panel. |

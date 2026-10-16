@@ -767,6 +767,13 @@ where
                         }
                         video.send(VideoCommand::SelectMonitor(id));
                     }
+                    // Point input at a monitor without switching the main
+                    // capture: a per-monitor window owns input while focused.
+                    Some(Control::SetInputMonitor { id }) => {
+                        if monitors.iter().any(|monitor| monitor.id == id) {
+                            display.store(pack_display(Some(id)), Ordering::Release);
+                        }
+                    }
                     Some(Control::AddVirtualDisplay { width, height, hidpi }) => {
                         let spec = DisplaySpec::fitted(width, height, hidpi);
                         match virtual_displays.add(&spec) {

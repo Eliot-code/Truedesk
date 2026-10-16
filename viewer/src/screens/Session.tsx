@@ -177,6 +177,10 @@ export default function Session({ remoteId, role, status = "in_session", onDisco
   // than one to spread out.
   const canOpenMonitorWindow = multiMonitorMax !== undefined && multiMonitorMax > 0 && monitors.length > 1;
 
+  // A monitor window may have pointed input at its own monitor; take it back
+  // for the main view when the pointer returns here.
+  const reclaimInput = () => { if (selectedMonitor !== undefined) void api.setInputMonitor(selectedMonitor).catch(() => {}); };
+
   const openMonitorWindow = (id: number) => {
     const index = monitors.findIndex((monitor) => monitor.id === id);
     const name = monitorName(monitors[index]?.name ?? "", index < 0 ? 0 : index);
@@ -301,7 +305,7 @@ export default function Session({ remoteId, role, status = "in_session", onDisco
 
   return (
     <main className={`session-screen session-screen--${role}`}>
-      {role === "viewer" && <canvas ref={canvasRef} className="session-canvas" tabIndex={0} aria-label="Remote screen" />}
+      {role === "viewer" && <canvas ref={canvasRef} className="session-canvas" tabIndex={0} aria-label="Remote screen" onPointerEnter={reclaimInput} onPointerDown={reclaimInput} />}
       {role === "host" && <div className="session-host-overlay"><span className="eyebrow">OPENDESK · SECURE SESSION</span><h1>You are being controlled by {remoteId}</h1><p>Your screen is shared for this session.</p></div>}
       {role === "host" && <HostControlPanel remoteId={remoteId} onDisconnect={() => void api.disconnectViewer().catch((error: unknown) => notify(friendlyError(error)))} />}
       <Toolbar remoteId={remoteId} role={role} status={status} link={link} monitors={monitors} selectedMonitor={selectedMonitor} onMonitorChange={chooseMonitor} canAddDisplay={canAddDisplay} onAddDisplay={addDisplay} onRemoveDisplay={removeDisplay} canOpenMonitorWindow={canOpenMonitorWindow} onOpenMonitorWindow={openMonitorWindow} clipboardSync={clipboardSync} onClipboardSyncChange={toggleClipboardSync} audioMuted={audioMuted} onAudioMutedChange={toggleAudioMuted} recordingActive={recordingActive} recordingElapsed={recordingElapsed} onRecordingToggle={() => void toggleRecording()} filesOpen={filesOpen} onFilesToggle={() => setFilesOpen((open) => !open)} chatOpen={chatOpen} onChatToggle={toggleChat} chatUnread={chatUnread} viewOnly={viewOnly} onViewOnlyChange={setViewOnly} canSecureAttention={canSecureAttention} onSecureAttention={sendSecureAttention} onDisconnect={onDisconnect} />

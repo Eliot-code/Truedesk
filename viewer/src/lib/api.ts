@@ -128,6 +128,8 @@ export function startMonitorVideo(monitor: number, handler: (message: ArrayBuffe
 export const openMonitorStream = (id: number) => invoke<void>("open_monitor_stream", { id });
 /** Ask the host to stop the aux stream for monitor `id`. */
 export const closeMonitorStream = (id: number) => invoke<void>("close_monitor_stream", { id });
+/** Point the host's input at monitor `id` without switching the main view. */
+export const setInputMonitor = (id: number) => invoke<void>("set_input_monitor", { id });
 export const sendChat = (text: string) => invoke<void>("send_chat", { text });
 export const setClipboardSync = (enabled: boolean) => invoke<void>("set_clipboard_sync", { enabled });
 export const setAudioMuted = (muted: boolean) => invoke<void>("set_audio_muted", { muted });

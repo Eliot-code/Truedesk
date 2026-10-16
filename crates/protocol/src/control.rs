@@ -102,6 +102,11 @@ pub enum Control {
     /// Host → viewer: an `OpenMonitorStream` failed; `code` is one of the
     /// `MONITOR_STREAM_*` codes, or a newer one.
     MonitorStreamRefused { id: u32, code: String },
+    /// Viewer → host: point input at monitor `id` without changing which
+    /// monitor the main view captures. A per-monitor window sends it so its
+    /// clicks and keys land on its own monitor; the main view sends it to take
+    /// input back. Unlike `SelectMonitor`, it never switches capture.
+    SetInputMonitor { id: u32 },
 }
 
 /// `MonitorStreamRefused` codes.
@@ -172,6 +177,7 @@ mod tests {
             Control::MonitorStreamOpened { id: 7 },
             Control::MonitorStreamClosed { id: 7 },
             Control::MonitorStreamRefused { id: 7, code: MONITOR_STREAM_LIMIT.into() },
+            Control::SetInputMonitor { id: 7 },
         ] {
             assert_eq!(Control::from_bytes(&c.to_bytes()), Some(c));
         }

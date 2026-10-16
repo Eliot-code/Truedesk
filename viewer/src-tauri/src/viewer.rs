@@ -149,6 +149,12 @@ pub(crate) async fn close_monitor_stream(state: tauri::State<'_, AppState>, id: 
     send_control(&state, Control::CloseMonitorStream { id }).await
 }
 
+/// Point the host's input at monitor `id` without switching the main view.
+#[tauri::command]
+pub(crate) async fn set_input_monitor(state: tauri::State<'_, AppState>, id: u32) -> Result<(), String> {
+    send_control(&state, Control::SetInputMonitor { id }).await
+}
+
 #[tauri::command]
 pub(crate) fn connect(
     state: tauri::State<'_, AppState>,
