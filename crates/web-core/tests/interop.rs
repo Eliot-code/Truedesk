@@ -106,7 +106,7 @@ impl Browser {
     }
 }
 
-fn fake_host_parts() -> (FakeCapturer, impl Fn(u16, u16) -> Result<H264Encoder, host_core::encode::EncoderInitError> + Send + 'static) {
+fn fake_host_parts() -> (FakeCapturer, impl Fn(u16, u16) -> Result<H264Encoder, host_core::encode::EncoderInitError> + Clone + Send + 'static) {
     (FakeCapturer::new(64, 64), |width, height| H264Encoder::new(width, height, 15, 1_000_000))
 }
 
