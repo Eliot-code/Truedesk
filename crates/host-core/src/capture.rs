@@ -51,6 +51,11 @@ pub trait ScreenCapturer {
 
     fn select_monitor(&mut self, _id: u32) -> bool { false }
 
+    /// Whether a second, independent instance of this capturer can run at the
+    /// same time, so the host can stream extra monitors as separate aux
+    /// streams. False by default; the secure-desktop capturer keeps it off.
+    fn supports_aux_streams(&self) -> bool { false }
+
     /// Since when capture has been down and is being restarted; `None`
     /// while it runs.
     fn stalled_since(&self) -> Option<Instant> { None }
@@ -64,6 +69,7 @@ impl<T: ScreenCapturer + ?Sized> ScreenCapturer for Box<T> {
     fn wait_frame(&mut self, timeout: Duration) -> Option<RawFrame> { (**self).wait_frame(timeout) }
     fn monitors(&self) -> Vec<MonitorInfo> { (**self).monitors() }
     fn select_monitor(&mut self, id: u32) -> bool { (**self).select_monitor(id) }
+    fn supports_aux_streams(&self) -> bool { (**self).supports_aux_streams() }
     fn stalled_since(&self) -> Option<Instant> { (**self).stalled_since() }
     fn monitors_changed(&mut self) -> Option<Vec<MonitorInfo>> { (**self).monitors_changed() }
 }
@@ -558,6 +564,10 @@ impl ScreenCapturer for ScapCapturer {
     }
 
     fn monitors(&self) -> Vec<MonitorInfo> { list_monitors() }
+
+    /// scap runs one engine per display, so a second instance can capture
+    /// another monitor at the same time for a per-monitor aux stream.
+    fn supports_aux_streams(&self) -> bool { true }
 
     fn stalled_since(&self) -> Option<Instant> {
         *self.latest.stalled.lock().unwrap_or_else(|poison| poison.into_inner())

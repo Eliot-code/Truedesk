@@ -206,7 +206,7 @@ where
                         if enqueue_data(&mut pending_data, &mut pending_data_bytes, body).is_err() { break; }
                     }
                     // Media is lossy under pressure (see `enqueue_media`).
-                    Tag::Video | Tag::Audio | Tag::Input => {
+                    Tag::Video | Tag::VideoAux | Tag::Audio | Tag::Input => {
                         if !reader_application_traffic_enabled.load(Ordering::Acquire) { continue; }
                         enqueue_media(&mut pending_media, &mut pending_media_bytes, tag, body);
                     }
@@ -264,7 +264,7 @@ fn max_body_size(tag: Tag) -> usize {
     match tag {
         Tag::Kex => MAX_KEX_BODY,
         Tag::Control => MAX_CONTROL_BODY,
-        Tag::Video => MAX_VIDEO_BODY,
+        Tag::Video | Tag::VideoAux => MAX_VIDEO_BODY,
         Tag::Audio => MAX_AUDIO_BODY,
         Tag::Input => MAX_INPUT_BODY,
         Tag::Data => MAX_DATA_BODY,

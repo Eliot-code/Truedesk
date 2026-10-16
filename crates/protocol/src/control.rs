@@ -83,7 +83,31 @@ pub enum Control {
     /// secure attention sequence, so the viewer may show a Ctrl+Alt+Del
     /// control. Hosts that can't never send it, so viewers hide the control.
     SecureAttentionSupport,
+    /// Host → viewer, after the first `MonitorList`: this host can stream extra
+    /// monitors as separate aux streams, up to `max` at once, so the viewer
+    /// can open each monitor in its own window. Hosts that can't never send
+    /// it; beta.8 peers can't parse it and ignore it.
+    MultiMonitorSupport { max: u32 },
+    /// Viewer → host: start streaming monitor `id` as a separate aux stream,
+    /// alongside the main view. Only sent to hosts that sent
+    /// `MultiMonitorSupport`.
+    OpenMonitorStream { id: u32 },
+    /// Viewer → host: stop the aux stream for monitor `id`.
+    CloseMonitorStream { id: u32 },
+    /// Host → viewer: the aux stream for monitor `id` is up; its frames arrive
+    /// on the aux video channel tagged for that monitor.
+    MonitorStreamOpened { id: u32 },
+    /// Host → viewer: the aux stream for monitor `id` has stopped.
+    MonitorStreamClosed { id: u32 },
+    /// Host → viewer: an `OpenMonitorStream` failed; `code` is one of the
+    /// `MONITOR_STREAM_*` codes, or a newer one.
+    MonitorStreamRefused { id: u32, code: String },
 }
+
+/// `MonitorStreamRefused` codes.
+pub const MONITOR_STREAM_LIMIT: &str = "limit";
+pub const MONITOR_STREAM_UNKNOWN: &str = "unknown_display";
+pub const MONITOR_STREAM_FAILED: &str = "failed";
 
 /// `VirtualDisplayRefused` codes.
 pub const VIRTUAL_DISPLAY_LIMIT: &str = "limit";
@@ -137,6 +161,20 @@ mod tests {
     fn paired_with_peer_id_roundtrips() {
         let c = Control::Paired { session: "s1".into(), peer_role: "host".into(), peer_id: "987654321".into() };
         assert_eq!(Control::from_bytes(&c.to_bytes()), Some(c));
+    }
+
+    #[test]
+    fn multi_monitor_messages_roundtrip() {
+        for c in [
+            Control::MultiMonitorSupport { max: 3 },
+            Control::OpenMonitorStream { id: 7 },
+            Control::CloseMonitorStream { id: 7 },
+            Control::MonitorStreamOpened { id: 7 },
+            Control::MonitorStreamClosed { id: 7 },
+            Control::MonitorStreamRefused { id: 7, code: MONITOR_STREAM_LIMIT.into() },
+        ] {
+            assert_eq!(Control::from_bytes(&c.to_bytes()), Some(c));
+        }
     }
 
     #[test]

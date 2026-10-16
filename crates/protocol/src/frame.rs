@@ -7,6 +7,11 @@ pub enum Tag {
     Audio = 0x11,
     Input = 0x12,
     Data = 0x13,
+    /// An extra per-monitor video stream (multi-monitor windows). The body is
+    /// a 4-byte big-endian monitor id, then the same payload as `Video`. Peers
+    /// that predate it hit the catch-all and ignore it, so they keep the
+    /// single-stream view.
+    VideoAux = 0x14,
 }
 
 impl Tag {
@@ -18,6 +23,7 @@ impl Tag {
             0x11 => Tag::Audio,
             0x12 => Tag::Input,
             0x13 => Tag::Data,
+            0x14 => Tag::VideoAux,
             _ => return None,
         })
     }
@@ -56,5 +62,12 @@ mod tests {
     #[test]
     fn unwrap_rejects_unknown_tag() {
         assert!(unwrap(&[0xFF, 1, 2]).is_none());
+    }
+
+    #[test]
+    fn video_aux_tag_roundtrips() {
+        let msg = wrap(Tag::VideoAux, b"body");
+        assert_eq!(msg[0], 0x14);
+        assert_eq!(unwrap(&msg), Some((Tag::VideoAux, &b"body"[..])));
     }
 }

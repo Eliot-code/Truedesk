@@ -449,7 +449,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     C: ScreenCapturer + Send + 'static,
     E: Encoder + Send + 'static,
-    F: Fn(u16, u16) -> Result<E, encode::EncoderInitError> + Send + 'static,
+    F: Fn(u16, u16) -> Result<E, encode::EncoderInitError> + Clone + Send + 'static,
     I: InputInjector + Send + 'static,
 {
     run_host_session_with_data(ws, password, ice_session, capturer, encoder_factory, injector, None).await
@@ -463,7 +463,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     C: ScreenCapturer + Send + 'static,
     E: Encoder + Send + 'static,
-    F: Fn(u16, u16) -> Result<E, encode::EncoderInitError> + Send + 'static,
+    F: Fn(u16, u16) -> Result<E, encode::EncoderInitError> + Clone + Send + 'static,
     I: InputInjector + Send + 'static,
 {
     run_host_session_with_data_and_accept(
@@ -485,7 +485,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     C: ScreenCapturer + Send + 'static,
     E: Encoder + Send + 'static,
-    F: Fn(u16, u16) -> Result<E, encode::EncoderInitError> + Send + 'static,
+    F: Fn(u16, u16) -> Result<E, encode::EncoderInitError> + Clone + Send + 'static,
     I: InputInjector + Send + 'static,
     A: FnOnce() -> Fut,
     Fut: Future<Output = bool>,
@@ -507,17 +507,26 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     C: ScreenCapturer + Send + 'static,
     E: Encoder + Send + 'static,
-    F: Fn(u16, u16) -> Result<E, encode::EncoderInitError> + Send + 'static,
+    F: Fn(u16, u16) -> Result<E, encode::EncoderInitError> + Clone + Send + 'static,
     I: InputInjector + Send + 'static,
     A: FnOnce() -> Fut,
     Fut: Future<Output = bool>,
 {
     run_host_session_with_data_and_accept_and_2fa_with_factory(
-        ws, password, ice_session, || Some(capturer), encoder_factory,
+        ws, password, ice_session, once_capturer(capturer), encoder_factory,
         move || Box::new(injector) as Box<dyn InputInjector>,
         unattended_enabled, twofa_enabled, totp_secret, approve, data_ready, SessionTimings::default(), HostDisplays::default(),
         SessionGates::default(),
     ).await
+}
+
+/// Wraps a single pre-built capturer as a factory the session can call more
+/// than once. The first call yields the capturer; later calls (an aux stream)
+/// get `None`, so only capturers made from a real factory can open aux
+/// streams.
+fn once_capturer<C: Send + 'static>(capturer: C) -> impl Fn() -> Option<C> + Clone + Send + 'static {
+    let cell = Arc::new(Mutex::new(Some(capturer)));
+    move || cell.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -532,11 +541,11 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     C: ScreenCapturer + Send + 'static,
     E: Encoder + Send + 'static,
-    F: Fn(u16, u16) -> Result<E, encode::EncoderInitError> + Send + 'static,
+    F: Fn(u16, u16) -> Result<E, encode::EncoderInitError> + Clone + Send + 'static,
     IF: FnOnce() -> Box<dyn InputInjector> + Send + 'static,
     A: FnOnce() -> Fut,
     Fut: Future<Output = bool>,
-    CF: FnOnce() -> Option<C>,
+    CF: Fn() -> Option<C> + Clone + Send + 'static,
 {
     let mut reliable = ReliableChannel::spawn(ws);
     let sender = reliable.sender();
@@ -669,6 +678,10 @@ where
     // would restart the counter at 0 and reuse a nonce with MonitorList.
     let mut monitors = capturer.monitors();
     virtual_displays.annotate(&mut monitors);
+    // Whether this capturer can run a second instance for a per-monitor aux
+    // stream (multi-monitor windows). Read before the capturer moves into the
+    // video pipeline.
+    let aux_supported = capturer.supports_aux_streams();
     let monitor_list = Control::MonitorList { monitors: monitors.clone() };
     reliable.sender().send_frame(Tag::Control, &seal_control(&control_sealer, &monitor_list)).await?;
     // Old viewers ignore this; new ones only offer "Add display" after it.
@@ -678,6 +691,10 @@ where
     // Old viewers ignore this; new ones only offer Ctrl+Alt+Del after it.
     if crate::secure_attention::available() {
         reliable.sender().send_frame(Tag::Control, &seal_control(&control_sealer, &Control::SecureAttentionSupport)).await?;
+    }
+    // Old viewers ignore this; new ones only offer per-monitor windows after it.
+    if aux_supported {
+        reliable.sender().send_frame(Tag::Control, &seal_control(&control_sealer, &Control::MultiMonitorSupport { max: AUX_STREAM_MAX })).await?;
     }
     let path = transport.path();
     let (transport_tx, transport_rx) = transport.into_split();
@@ -699,6 +716,18 @@ where
     // mapping dimensions once the first frame is in.
     let dims = Arc::new(AtomicU32::new(0));
     let rate = transport_tx.rate_control();
+    // Clones kept for per-monitor aux streams, since the originals move into
+    // the main video pipeline below.
+    let aux_rate = Arc::clone(&rate);
+    let aux_capture_factory = capture_factory.clone();
+    let aux_encoder_factory = encoder_factory.clone();
+    let aux_capture_restore = timings.capture_restore;
+    let aux_sender = reliable.sender();
+    let aux_control_sealer = Arc::clone(&control_sealer);
+    // Encoded aux frames flow here, tagged with their monitor id; the media
+    // task seals and sends them on the aux video channel.
+    let (aux_tx, aux_rx) = mpsc::channel::<(u32, Vec<u8>)>(AUX_STREAM_QUEUE);
+    let mut aux_streams: std::collections::HashMap<u32, AbortOnDrop<()>> = std::collections::HashMap::new();
     let (video, mut video_events) = VideoSource::start(capturer, encoder_factory, Arc::clone(&dims), rate, timings.capture_restore).await?;
     // Input injection makes blocking OS calls, so it runs on its own thread
     // and never stalls capture/encode/send or audio. The injector is built on
@@ -708,7 +737,7 @@ where
     // Aborting the forwarder on exit drops the last injection sender, which
     // ends the injection thread together with the session.
     let mut input_forwarder = AbortOnDrop(tokio::spawn(forward_input(transport_rx, opener, inject_tx, gates.control)));
-    let mut media = AbortOnDrop(tokio::spawn(send_media(transport_tx, sealer, audio_rx, Arc::clone(&video.units), gates.audio)));
+    let mut media = AbortOnDrop(tokio::spawn(send_media(transport_tx, sealer, audio_rx, Arc::clone(&video.units), aux_rx, gates.audio)));
     // The viewer keepalives on the relay socket even when media is direct, so
     // silence there means the viewer is gone (a direct transport may never
     // report a dead peer on its own).
@@ -776,6 +805,36 @@ where
                             log::debug!("ignoring secure attention request: {error}");
                         }
                     }
+                    Some(Control::OpenMonitorStream { id }) => {
+                        use protocol::control::{MONITOR_STREAM_FAILED, MONITOR_STREAM_LIMIT, MONITOR_STREAM_UNKNOWN};
+                        let refuse = |code: &str| Control::MonitorStreamRefused { id, code: code.into() };
+                        if !aux_supported {
+                            let _ = sender.send_frame(Tag::Control, &seal_control(&control_sealer, &refuse(MONITOR_STREAM_FAILED))).await;
+                        } else if !monitors.iter().any(|monitor| monitor.id == id) {
+                            let _ = sender.send_frame(Tag::Control, &seal_control(&control_sealer, &refuse(MONITOR_STREAM_UNKNOWN))).await;
+                        } else if aux_streams.contains_key(&id) {
+                            // Already streaming; re-affirm so the viewer shows it.
+                            let _ = sender.send_frame(Tag::Control, &seal_control(&control_sealer, &Control::MonitorStreamOpened { id })).await;
+                        } else if aux_streams.len() >= AUX_STREAM_MAX as usize {
+                            let _ = sender.send_frame(Tag::Control, &seal_control(&control_sealer, &refuse(MONITOR_STREAM_LIMIT))).await;
+                        } else {
+                            // The task reports MonitorStreamOpened once the first
+                            // frame is in, or MonitorStreamRefused if it can't.
+                            let handle = spawn_aux_stream(
+                                id, aux_capture_factory.clone(), aux_encoder_factory.clone(),
+                                Arc::clone(&aux_rate), aux_capture_restore, aux_tx.clone(),
+                                aux_sender.clone(), Arc::clone(&aux_control_sealer),
+                            );
+                            aux_streams.insert(id, handle);
+                        }
+                    }
+                    Some(Control::CloseMonitorStream { id }) => {
+                        // Dropping the handle aborts the task, which drops the
+                        // capturer and encoder and stops that stream.
+                        if aux_streams.remove(&id).is_some() {
+                            let _ = sender.send_frame(Tag::Control, &seal_control(&control_sealer, &Control::MonitorStreamClosed { id })).await;
+                        }
+                    }
                     Some(Control::Ping { sent_us }) => {
                         let _ = sender.send_frame(Tag::Control, &seal_control(&control_sealer, &Control::Pong { sent_us })).await;
                     }
@@ -789,6 +848,12 @@ where
                     // Capture left a vanished monitor for the main one.
                     if unpack_display(display.load(Ordering::Acquire)).is_some_and(|id| !monitors.iter().any(|monitor| monitor.id == id)) {
                         display.store(pack_display(None), Ordering::Release);
+                    }
+                    // Stop aux streams for monitors that are gone.
+                    let gone: Vec<u32> = aux_streams.keys().copied().filter(|id| !monitors.iter().any(|monitor| monitor.id == *id)).collect();
+                    for id in gone {
+                        aux_streams.remove(&id);
+                        let _ = sender.send_frame(Tag::Control, &seal_control(&control_sealer, &Control::MonitorStreamClosed { id })).await;
                     }
                     let _ = sender.send_frame(Tag::Control, &seal_control(&control_sealer, &Control::MonitorList { monitors: monitors.clone() })).await;
                 }
@@ -834,6 +899,7 @@ async fn send_media(
     mut sealer: Sealer,
     mut audio_rx: mpsc::Receiver<protocol::audio::AudioFrame>,
     units: Arc<UnitSlot>,
+    mut aux_rx: mpsc::Receiver<(u32, Vec<u8>)>,
     audio_allowed: Arc<AtomicBool>,
 ) -> SessionResult<()> {
     let mut video_ready = false;
@@ -854,8 +920,92 @@ async fn send_media(
                 let sealed = sealer.seal(&[Tag::Video as u8], &plaintext);
                 transport_tx.send(Tag::Video, &sealed).await?;
             },
+            // Per-monitor aux streams share the main view's congestion
+            // control. The monitor id rides inside the sealed body, so it is
+            // authenticated. One media sealer seals every stream, so the shared
+            // nonce counter never repeats.
+            Some((id, plaintext)) = aux_rx.recv(), if video_ready => {
+                video_ready = false;
+                let mut body = Vec::with_capacity(4 + plaintext.len());
+                body.extend_from_slice(&id.to_be_bytes());
+                body.extend_from_slice(&plaintext);
+                let sealed = sealer.seal(&[Tag::VideoAux as u8], &body);
+                transport_tx.send(Tag::VideoAux, &sealed).await?;
+            },
         }
     }
+}
+
+/// Most per-monitor aux streams one session will run at once, on top of the
+/// main view. Each is a full capture+encode pipeline, so this caps the extra
+/// CPU and bandwidth of multi-monitor windows.
+const AUX_STREAM_MAX: u32 = 3;
+/// Encoded aux frames buffered toward the media task. Small: the aux pipelines
+/// drop to the newest frame rather than queue stale ones on a slow link.
+const AUX_STREAM_QUEUE: usize = 4;
+
+/// Starts a per-monitor aux stream: a second capture+encode pipeline pinned to
+/// monitor `id`, whose frames flow to `aux_tx` tagged with that id. The task
+/// reports `MonitorStreamOpened` once its first frame is in, or
+/// `MonitorStreamRefused` if capture or the encoder can't start, and
+/// `MonitorStreamClosed` if the stream ends on its own. Dropping the returned
+/// handle aborts the task, which drops the capturer and encoder.
+#[allow(clippy::too_many_arguments)]
+fn spawn_aux_stream<C, E, F, CF>(
+    id: u32,
+    capture_factory: CF,
+    encoder_factory: F,
+    rate: Arc<transport::RateControl>,
+    capture_restore: Duration,
+    aux_tx: mpsc::Sender<(u32, Vec<u8>)>,
+    sender: transport::reliable::ReliableSender,
+    control_sealer: SharedSealer,
+) -> AbortOnDrop<()>
+where
+    C: ScreenCapturer + Send + 'static,
+    E: Encoder + Send + 'static,
+    F: Fn(u16, u16) -> Result<E, encode::EncoderInitError> + Send + 'static,
+    CF: Fn() -> Option<C> + Send + 'static,
+{
+    AbortOnDrop(tokio::spawn(async move {
+        let refuse = |code: &str| {
+            let sender = sender.clone();
+            let control_sealer = Arc::clone(&control_sealer);
+            let reply = Control::MonitorStreamRefused { id, code: code.into() };
+            async move { let _ = sender.send_frame(Tag::Control, &seal_control(&control_sealer, &reply)).await; }
+        };
+        let Some(capturer) = capture_factory() else {
+            refuse(protocol::control::MONITOR_STREAM_FAILED).await;
+            return;
+        };
+        let dims = Arc::new(AtomicU32::new(0));
+        let (video, mut events) = match VideoSource::start(capturer, encoder_factory, dims, rate, capture_restore).await {
+            Ok(pair) => pair,
+            Err(_) => { refuse(protocol::control::MONITOR_STREAM_FAILED).await; return; }
+        };
+        // Pin this pipeline to its monitor; its first frames may show the
+        // default display until the switch lands.
+        video.send(VideoCommand::SelectMonitor(id));
+        let _ = sender.send_frame(Tag::Control, &seal_control(&control_sealer, &Control::MonitorStreamOpened { id })).await;
+        let units = Arc::clone(&video.units);
+        loop {
+            tokio::select! {
+                unit = units.take() => match unit {
+                    Ok(plaintext) => if aux_tx.send((id, plaintext)).await.is_err() { break },
+                    Err(_) => break,
+                },
+                event = events.recv() => match event {
+                    Some(VideoEvent::CaptureLost) | None => break,
+                    _ => {}
+                },
+            }
+        }
+        // Reached only when the stream ends on its own (capture lost); a
+        // viewer-initiated close aborts this task before here, and the control
+        // loop sends its own MonitorStreamClosed.
+        let _ = sender.send_frame(Tag::Control, &seal_control(&control_sealer, &Control::MonitorStreamClosed { id })).await;
+        drop(video);
+    }))
 }
 
 /// How long a new session waits for the first captured frame.
@@ -2922,7 +3072,7 @@ mod tests {
         fn spawn_scripted_host_with(ws: WebSocketStream<DuplexStream>, timings: SessionTimings, capturer: Scripted, displays: HostDisplays) -> JoinHandle<SessionResult<()>> {
             tokio::spawn(async move {
                 run_host_session_with_data_and_accept_and_2fa_with_factory(
-                    ws, PASSWORD, SESSION, || Some(capturer),
+                    ws, PASSWORD, SESSION, once_capturer(capturer),
                     |width, height| H264Encoder::new(width, height, 15, 1_000_000),
                     || Box::new(NoopInjector::default()) as Box<dyn InputInjector>,
                     false, false, None, || async { true }, None, timings, displays, SessionGates::default(),
