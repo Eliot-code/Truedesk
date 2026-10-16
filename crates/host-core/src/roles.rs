@@ -1557,7 +1557,28 @@ pub async fn run_viewer_session_with_monitors_and_auth_code<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let result = run_viewer_session_inner(ws, password, ice_session, frame_sink, input_rx, data_ready, monitor_sink, audio_sink, auth_code, SessionTimings::default()).await;
+    let result = run_viewer_session_inner(ws, password, ice_session, frame_sink, input_rx, data_ready, monitor_sink, audio_sink, None, auth_code, SessionTimings::default()).await;
+    result.map_err(viewer_session_error)
+}
+
+/// Like [`run_viewer_session_with_monitors_and_auth_code`], plus a sink for
+/// per-monitor aux video streams (multi-monitor windows). Each item is
+/// `(monitor id, video plaintext)`; the id matches a `MonitorStreamOpened`.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_viewer_session_with_aux<S>(
+    ws: WebSocketStream<S>, password: &str, ice_session: &str,
+    frame_sink: tokio::sync::mpsc::Sender<Vec<u8>>,
+    input_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    data_ready: Option<oneshot::Sender<DataHandle>>,
+    monitor_sink: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    audio_sink: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    aux_frame_sink: Option<tokio::sync::mpsc::Sender<(u32, Vec<u8>)>>,
+    auth_code: Option<String>,
+) -> Result<(), ViewerSessionError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let result = run_viewer_session_inner(ws, password, ice_session, frame_sink, input_rx, data_ready, monitor_sink, audio_sink, aux_frame_sink, auth_code, SessionTimings::default()).await;
     result.map_err(viewer_session_error)
 }
 
@@ -1569,6 +1590,7 @@ async fn run_viewer_session_inner<S>(
     data_ready: Option<oneshot::Sender<DataHandle>>,
     monitor_sink: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
     audio_sink: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    aux_frame_sink: Option<tokio::sync::mpsc::Sender<(u32, Vec<u8>)>>,
     auth_code: Option<String>,
     timings: SessionTimings,
 ) -> Result<(), String>
@@ -1675,7 +1697,7 @@ where
     // itself. A direct path reports RTT through UDP feedback instead.
     let relay_ping = (path == transport::MediaPath::Relay).then_some(RELAY_PING_INTERVAL);
     let host_control = HostControl { sender: reliable.sender(), sealer: Arc::clone(&control_sealer), relay_ping };
-    run_viewer_media_loop_with_control(transport_tx, transport_rx, frame_sink, input_rx, sealer, opener, control_plain_rx, rejected_rx, monitor_sink, audio_sink, Some(host_control), timings.dead_peer).await
+    run_viewer_media_loop_with_control(transport_tx, transport_rx, frame_sink, input_rx, sealer, opener, control_plain_rx, rejected_rx, monitor_sink, audio_sink, aux_frame_sink, Some(host_control), timings.dead_peer).await
 }
 
 /// Ask the host for a keyframe, e.g. after a decoder error. Uses the
@@ -1778,7 +1800,7 @@ async fn run_viewer_media_loop(
 ) -> Result<(), String> {
     let (_tx, rx) = mpsc::channel(1);
     let (_rejected_tx, rejected_rx) = mpsc::channel(1);
-    run_viewer_media_loop_with_control(transport_tx, transport_rx, frame_sink, input_rx, sealer, opener, rx, rejected_rx, None, None, None, DEAD_PEER_TIMEOUT).await
+    run_viewer_media_loop_with_control(transport_tx, transport_rx, frame_sink, input_rx, sealer, opener, rx, rejected_rx, None, None, None, None, DEAD_PEER_TIMEOUT).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1793,6 +1815,7 @@ async fn run_viewer_media_loop_with_control(
     mut rejected_rx: tokio::sync::mpsc::Receiver<String>,
     monitor_sink: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
     audio_sink: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    aux_frame_sink: Option<tokio::sync::mpsc::Sender<(u32, Vec<u8>)>>,
     host_control: Option<HostControl>,
     dead_peer: Duration,
 ) -> Result<(), String> {
@@ -1806,6 +1829,10 @@ async fn run_viewer_media_loop_with_control(
     // a dead peer on its own.
     let mut peer_deadline = tokio::time::Instant::now() + dead_peer;
     let mut gate = VideoGate::new();
+    // One continuity gate per aux (per-monitor) stream. Aux frames are
+    // best-effort: dropped on a full sink and recovered on the host's next
+    // periodic keyframe, so no per-stream keyframe request is needed.
+    let mut aux_gates: std::collections::HashMap<u32, VideoGate> = std::collections::HashMap::new();
     // A decodable frame the frame sink had no room for yet. Video never
     // blocks this loop: input and control keep flowing while it waits.
     let mut pending_video: Option<Vec<u8>> = None;
@@ -1824,7 +1851,8 @@ async fn run_viewer_media_loop_with_control(
                 peer_deadline = tokio::time::Instant::now() + dead_peer;
                 match Control::from_bytes(&plaintext) {
                     Some(Control::Bye { .. }) => return Err(crate::reconnect::HOST_ENDED_MESSAGE.into()),
-                    Some(Control::MonitorList { .. } | Control::VirtualDisplaySupport { .. } | Control::VirtualDisplayAdded { .. } | Control::VirtualDisplayRefused { .. } | Control::SecureAttentionSupport) => {
+                    Some(Control::MonitorList { .. } | Control::VirtualDisplaySupport { .. } | Control::VirtualDisplayAdded { .. } | Control::VirtualDisplayRefused { .. } | Control::SecureAttentionSupport
+                        | Control::MultiMonitorSupport { .. } | Control::MonitorStreamOpened { .. } | Control::MonitorStreamClosed { .. } | Control::MonitorStreamRefused { .. }) => {
                         if let Some(sink) = &monitor_sink { let _ = sink.send(plaintext).await; }
                     }
                     Some(Control::Pong { sent_us }) if relay_ping.is_some() => {
@@ -1888,6 +1916,22 @@ async fn run_viewer_media_loop_with_control(
                             }
                         }
                     }
+                    // A per-monitor aux stream: strip the monitor id, gate on
+                    // its own sequence, and hand off best-effort.
+                    Tag::VideoAux => if let Some(sink) = &aux_frame_sink {
+                        if plaintext.len() < 4 { continue; }
+                        let id = u32::from_be_bytes([plaintext[0], plaintext[1], plaintext[2], plaintext[3]]);
+                        let body = &plaintext[4..];
+                        let Some((seq, keyframe)) = video_seq(body) else { continue };
+                        let aux_gate = aux_gates.entry(id).or_insert_with(VideoGate::new);
+                        if aux_gate.accept(seq, keyframe) {
+                            match sink.try_send((id, body.to_vec())) {
+                                Ok(()) => {}
+                                Err(mpsc::error::TrySendError::Full(_)) => aux_gate.lost(),
+                                Err(mpsc::error::TrySendError::Closed(_)) => {}
+                            }
+                        }
+                    },
                     // Audio is dropped rather than waited for.
                     Tag::Audio => if let Some(sink) = &audio_sink {
                         if let Err(mpsc::error::TrySendError::Closed(_)) = sink.try_send(plaintext) { return Err("viewer audio channel closed".into()) }
@@ -2544,7 +2588,7 @@ mod tests {
         let (_rejected_tx, rejected_rx) = mpsc::channel(1);
         let viewer = tokio::spawn(run_viewer_media_loop_with_control(
             viewer_tx, viewer_rx, frame_sink, input_rx, Sealer::new(viewer_send), Opener::new(viewer_recv),
-            control_rx, rejected_rx, None, None, Some(requests), DEAD_PEER_TIMEOUT,
+            control_rx, rejected_rx, None, None, None, Some(requests), DEAD_PEER_TIMEOUT,
         ));
 
         for (seq, keyframe) in [(0, true), (1, false), (3, false), (4, true)] {
@@ -2604,7 +2648,7 @@ mod tests {
             let (rejected, rejected_rx) = mpsc::channel(1);
             let viewer = tokio::spawn(run_viewer_media_loop_with_control(
                 viewer_tx, viewer_rx, frame_sink, input_rx, Sealer::new(viewer_send), Opener::new(viewer_recv),
-                control_rx, rejected_rx, None, None, Some(control), DEAD_PEER_TIMEOUT,
+                control_rx, rejected_rx, None, None, None, Some(control), DEAD_PEER_TIMEOUT,
             ));
             Self { viewer, rtt, host_control, host_ws, host_opener: Opener::new(host_control_recv), _input: input, _rejected: rejected, _reliable: reliable, _host_conn: Arc::new(host_conn) }
         }
@@ -2815,7 +2859,7 @@ mod tests {
             let (frame_tx, frames) = mpsc::channel(64);
             let (input, input_rx) = mpsc::channel(4);
             let task = tokio::spawn(async move {
-                run_viewer_session_inner(ws, PASSWORD, SESSION, frame_tx, input_rx, None, None, None, None, timings)
+                run_viewer_session_inner(ws, PASSWORD, SESSION, frame_tx, input_rx, None, None, None, None, None, timings)
                     .await
                     .map_err(viewer_session_error)
             });
@@ -2840,7 +2884,7 @@ mod tests {
             let (_input, input_rx) = mpsc::channel(4);
             let (ready_tx, ready_rx) = oneshot::channel();
             let viewer = tokio::spawn(async move {
-                run_viewer_session_inner(viewer_ws, PASSWORD, SESSION, frame_tx, input_rx, Some(ready_tx), None, None, None, timings).await
+                run_viewer_session_inner(viewer_ws, PASSWORD, SESSION, frame_tx, input_rx, Some(ready_tx), None, None, None, None, timings).await
             });
             let handle = timeout(Duration::from_secs(20), ready_rx).await.unwrap().unwrap();
             let first = timeout(Duration::from_secs(20), frames.recv()).await.unwrap().unwrap();
@@ -2872,7 +2916,7 @@ mod tests {
             let (_input, input_rx) = mpsc::channel(4);
             let (ready_tx, ready_rx) = oneshot::channel();
             let viewer = tokio::spawn(async move {
-                run_viewer_session_inner(viewer_ws, PASSWORD, SESSION, frame_tx, input_rx, Some(ready_tx), None, None, None, timings).await
+                run_viewer_session_inner(viewer_ws, PASSWORD, SESSION, frame_tx, input_rx, Some(ready_tx), None, None, None, None, timings).await
             });
             let handle = timeout(Duration::from_secs(20), ready_rx).await.unwrap().unwrap();
             let rtt = timeout(Duration::from_secs(5), async {
@@ -3137,7 +3181,7 @@ mod tests {
             let (monitor_tx, mut monitor_lists) = mpsc::channel(4);
             let (_input, input_rx) = mpsc::channel(4);
             let viewer = tokio::spawn(async move {
-                run_viewer_session_inner(viewer_ws, PASSWORD, SESSION, frame_tx, input_rx, None, Some(monitor_tx), None, None, timings).await
+                run_viewer_session_inner(viewer_ws, PASSWORD, SESSION, frame_tx, input_rx, None, Some(monitor_tx), None, None, None, timings).await
             });
             let list = |body: Vec<u8>| match Control::from_bytes(&body) {
                 Some(Control::MonitorList { monitors }) => monitors,
@@ -3198,7 +3242,7 @@ mod tests {
                 let (ready_tx, ready_rx) = oneshot::channel();
                 let viewer = tokio::spawn(async move {
                     let _input = input;
-                    run_viewer_session_inner(viewer_ws, PASSWORD, SESSION, frame_tx, input_rx, Some(ready_tx), Some(monitor_tx), None, None, timings)
+                    run_viewer_session_inner(viewer_ws, PASSWORD, SESSION, frame_tx, input_rx, Some(ready_tx), Some(monitor_tx), None, None, None, timings)
                         .await
                         .map_err(viewer_session_error)
                 });

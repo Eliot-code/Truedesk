@@ -745,6 +745,7 @@ pub fn run() {
         )
         .manage(Recordings::default())
         .manage(VideoSink::default())
+        .manage(AuxVideoSinks::default())
         .manage(unattended::PendingTotp::default())
         .setup(move |app| {
             let app_data_dir = app
@@ -831,6 +832,10 @@ pub fn run() {
             send_auth_code,
             start_video,
             stop_video,
+            start_monitor_video,
+            stop_monitor_video,
+            open_monitor_stream,
+            close_monitor_stream,
             request_keyframe,
             set_clipboard_sync,
             set_allow_virtual_displays,

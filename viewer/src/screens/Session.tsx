@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import * as api from "../lib/api";
 import { makeDecoder } from "../lib/decode";
 import { attachInput } from "../lib/input";
-import Toolbar, { virtualDisplaySize } from "../components/Toolbar";
+import Toolbar, { monitorName, virtualDisplaySize } from "../components/Toolbar";
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import FileTransfer from "../components/FileTransfer";
 import ChatPanel, { type ChatEntry } from "../components/ChatPanel";
 import HostControlPanel from "../components/HostControlPanel";
@@ -35,6 +36,23 @@ export interface SessionProps {
   onDisconnect: () => void;
 }
 
+/**
+ * Open (or focus) a separate window showing the host's monitor `id`. The
+ * window runs the viewer app in monitor mode (see main.tsx) and owns its own
+ * aux stream.
+ */
+async function openInNewWindow(id: number, name: string): Promise<void> {
+  const label = `monitor-${id}`;
+  const existing = await WebviewWindow.getByLabel(label);
+  if (existing) { await existing.setFocus(); return; }
+  const url = `index.html?monitor=${id}&label=${encodeURIComponent(name)}`;
+  const window = new WebviewWindow(label, { url, title: `${name} · OpenDesk`, width: 1280, height: 800 });
+  await new Promise<void>((resolve, reject) => {
+    void window.once("tauri://created", () => resolve());
+    void window.once("tauri://error", (event) => reject(new Error(String(event.payload))));
+  });
+}
+
 export default function Session({ remoteId, role, status = "in_session", onDisconnect }: SessionProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const notify = useNotify();
@@ -61,6 +79,7 @@ export default function Session({ remoteId, role, status = "in_session", onDisco
   const recordingStartedAtRef = useRef<number | undefined>(undefined);
   const [monitors, setMonitors] = useState<api.MonitorInfo[]>([]);
   const [selectedMonitor, setSelectedMonitor] = useState<number>();
+  const [multiMonitorMax, setMultiMonitorMax] = useState<number>();
   const [link, setLink] = useState<api.LinkStats>();
   // Set once the host says it offers virtual displays (older hosts never do).
   const [virtualMax, setVirtualMax] = useState<number>();
@@ -123,6 +142,7 @@ export default function Session({ remoteId, role, status = "in_session", onDisco
       // The host already switched to it; the list naming it came first.
       api.onVirtualDisplayAdded(({ id }) => setSelectedMonitor(id)),
       api.onVirtualDisplayRefused(({ code }) => notify(virtualDisplayRefusal(code))),
+      api.onMultiMonitorSupport(({ max }) => setMultiMonitorMax(max)),
     ]);
     return () => { void listeners.then((stops) => stops.forEach((stop) => stop())); };
   }, [role, notify]);
@@ -136,7 +156,7 @@ export default function Session({ remoteId, role, status = "in_session", onDisco
   }, [role]);
 
   // A reconnect may land on the other path; show nothing until it reports.
-  useEffect(() => { if (status !== "in_session") { setLink(undefined); setVirtualMax(undefined); } }, [status]);
+  useEffect(() => { if (status !== "in_session") { setLink(undefined); setVirtualMax(undefined); setMultiMonitorMax(undefined); } }, [status]);
 
   const chooseMonitor = (id: number) => {
     setSelectedMonitor(id);
@@ -153,6 +173,15 @@ export default function Session({ remoteId, role, status = "in_session", onDisco
   };
 
   const canAddDisplay = virtualMax !== undefined && monitors.filter((monitor) => monitor.is_virtual).length < virtualMax;
+  // The host can stream extra monitors in their own windows, and there is more
+  // than one to spread out.
+  const canOpenMonitorWindow = multiMonitorMax !== undefined && multiMonitorMax > 0 && monitors.length > 1;
+
+  const openMonitorWindow = (id: number) => {
+    const index = monitors.findIndex((monitor) => monitor.id === id);
+    const name = monitorName(monitors[index]?.name ?? "", index < 0 ? 0 : index);
+    void openInNewWindow(id, name).catch((error: unknown) => notify(friendlyError(error)));
+  };
 
   const toggleAudioMuted = (muted: boolean) => {
     setAudioMuted(muted);
@@ -275,7 +304,7 @@ export default function Session({ remoteId, role, status = "in_session", onDisco
       {role === "viewer" && <canvas ref={canvasRef} className="session-canvas" tabIndex={0} aria-label="Remote screen" />}
       {role === "host" && <div className="session-host-overlay"><span className="eyebrow">OPENDESK · SECURE SESSION</span><h1>You are being controlled by {remoteId}</h1><p>Your screen is shared for this session.</p></div>}
       {role === "host" && <HostControlPanel remoteId={remoteId} onDisconnect={() => void api.disconnectViewer().catch((error: unknown) => notify(friendlyError(error)))} />}
-      <Toolbar remoteId={remoteId} role={role} status={status} link={link} monitors={monitors} selectedMonitor={selectedMonitor} onMonitorChange={chooseMonitor} canAddDisplay={canAddDisplay} onAddDisplay={addDisplay} onRemoveDisplay={removeDisplay} clipboardSync={clipboardSync} onClipboardSyncChange={toggleClipboardSync} audioMuted={audioMuted} onAudioMutedChange={toggleAudioMuted} recordingActive={recordingActive} recordingElapsed={recordingElapsed} onRecordingToggle={() => void toggleRecording()} filesOpen={filesOpen} onFilesToggle={() => setFilesOpen((open) => !open)} chatOpen={chatOpen} onChatToggle={toggleChat} chatUnread={chatUnread} viewOnly={viewOnly} onViewOnlyChange={setViewOnly} canSecureAttention={canSecureAttention} onSecureAttention={sendSecureAttention} onDisconnect={onDisconnect} />
+      <Toolbar remoteId={remoteId} role={role} status={status} link={link} monitors={monitors} selectedMonitor={selectedMonitor} onMonitorChange={chooseMonitor} canAddDisplay={canAddDisplay} onAddDisplay={addDisplay} onRemoveDisplay={removeDisplay} canOpenMonitorWindow={canOpenMonitorWindow} onOpenMonitorWindow={openMonitorWindow} clipboardSync={clipboardSync} onClipboardSyncChange={toggleClipboardSync} audioMuted={audioMuted} onAudioMutedChange={toggleAudioMuted} recordingActive={recordingActive} recordingElapsed={recordingElapsed} onRecordingToggle={() => void toggleRecording()} filesOpen={filesOpen} onFilesToggle={() => setFilesOpen((open) => !open)} chatOpen={chatOpen} onChatToggle={toggleChat} chatUnread={chatUnread} viewOnly={viewOnly} onViewOnlyChange={setViewOnly} canSecureAttention={canSecureAttention} onSecureAttention={sendSecureAttention} onDisconnect={onDisconnect} />
       {role === "viewer" && <FileTransfer open={filesOpen} onOpenChange={onFilesOpenChange} />}
       {role === "viewer" && <ChatPanel open={chatOpen} messages={messages} onSend={sendChat} onClose={() => setChatOpen(false)} />}
     </main>

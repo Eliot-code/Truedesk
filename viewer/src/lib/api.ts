@@ -108,6 +108,26 @@ export function startVideo(handler: (message: ArrayBuffer) => void): () => void 
     void started.then(() => invoke<void>("stop_video", { id: channel.id })).catch(() => {});
   };
 }
+/**
+ * Like {@link startVideo}, for an extra monitor window. Frames for `monitor`
+ * (the host's monitor id) stream to `handler`. Call the returned function to
+ * stop.
+ */
+export function startMonitorVideo(monitor: number, handler: (message: ArrayBuffer) => void): () => void {
+  const channel = new Channel<ArrayBuffer>(handler);
+  const started = invoke<void>("start_monitor_video", { monitor, channel });
+  let stopped = false;
+  return () => {
+    if (stopped) return;
+    stopped = true;
+    channel.onmessage = () => {};
+    void started.then(() => invoke<void>("stop_monitor_video", { monitor, id: channel.id })).catch(() => {});
+  };
+}
+/** Ask the host to start streaming monitor `id` as its own window. */
+export const openMonitorStream = (id: number) => invoke<void>("open_monitor_stream", { id });
+/** Ask the host to stop the aux stream for monitor `id`. */
+export const closeMonitorStream = (id: number) => invoke<void>("close_monitor_stream", { id });
 export const sendChat = (text: string) => invoke<void>("send_chat", { text });
 export const setClipboardSync = (enabled: boolean) => invoke<void>("set_clipboard_sync", { enabled });
 export const setAudioMuted = (muted: boolean) => invoke<void>("set_audio_muted", { muted });
@@ -159,6 +179,10 @@ export const onVirtualDisplayAdded = (handler: (payload: { id: number }) => void
 export const onVirtualDisplayRefused = (handler: (payload: { code: string }) => void) => on("virtual_display_refused", handler);
 /** The host can deliver Ctrl+Alt+Del; hosts that can't never send it, so the control stays hidden. */
 export const onSecureAttentionSupport = (handler: () => void) => on("secure_attention_support", handler);
+export const onMultiMonitorSupport = (handler: (payload: { max: number }) => void) => on("multi_monitor_support", handler);
+export const onMonitorStreamOpened = (handler: (payload: { id: number }) => void) => on("monitor_stream_opened", handler);
+export const onMonitorStreamClosed = (handler: (payload: { id: number }) => void) => on("monitor_stream_closed", handler);
+export const onMonitorStreamRefused = (handler: (payload: { id: number; code: string }) => void) => on("monitor_stream_refused", handler);
 /** Something the host user should know, e.g. that the viewer added a display. */
 export const onHostNotice = (handler: (payload: { message: string }) => void) => on("host_notice", handler);
 export const onLinkStats = (handler: (payload: LinkStats) => void) => on("link_stats", handler);

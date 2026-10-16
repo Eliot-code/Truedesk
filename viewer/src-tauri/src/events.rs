@@ -108,6 +108,15 @@ pub(crate) struct VirtualDisplaySupportEvent { pub(crate) max: u32 }
 pub(crate) struct VirtualDisplayAddedEvent { pub(crate) id: u32 }
 #[derive(Serialize, Clone)]
 pub(crate) struct VirtualDisplayRefusedEvent { pub(crate) code: String }
+/// The host can stream up to `max` extra monitors in their own windows.
+#[derive(Serialize, Clone)]
+pub(crate) struct MultiMonitorSupportEvent { pub(crate) max: u32 }
+/// A per-monitor aux stream started or stopped.
+#[derive(Serialize, Clone)]
+pub(crate) struct MonitorStreamEvent { pub(crate) id: u32 }
+/// The host refused an aux stream for monitor `id`.
+#[derive(Serialize, Clone)]
+pub(crate) struct MonitorStreamRefusedEvent { pub(crate) id: u32, pub(crate) code: String }
 /// Something the host user should know about, shown as an info toast.
 #[derive(Serialize, Clone)]
 pub(crate) struct HostNoticeEvent { pub(crate) message: &'static str }

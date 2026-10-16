@@ -18,6 +18,8 @@ interface ToolbarProps {
   canAddDisplay?: boolean;
   onAddDisplay?: () => void;
   onRemoveDisplay?: (id: number) => void;
+  canOpenMonitorWindow?: boolean;
+  onOpenMonitorWindow?: (id: number) => void;
   audioMuted?: boolean;
   onAudioMutedChange?: (muted: boolean) => void;
   recordingActive?: boolean;
@@ -55,6 +57,7 @@ const speaker = <path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4
 const icons = {
   fullscreen: <Icon><path d="M8 3H5a2 2 0 0 0-2 2v3" /><path d="M21 8V5a2 2 0 0 0-2-2h-3" /><path d="M3 16v3a2 2 0 0 0 2 2h3" /><path d="M16 21h3a2 2 0 0 0 2-2v-3" /></Icon>,
   monitor: <Icon><rect width="20" height="14" x="2" y="3" rx="2" /><line x1="8" x2="16" y1="21" y2="21" /><line x1="12" x2="12" y1="17" y2="21" /></Icon>,
+  newWindow: <Icon><rect width="18" height="14" x="3" y="5" rx="2" /><path d="M3 9h18" /><path d="M14 13h4v4" /><path d="M18 13l-5 5" /></Icon>,
   clipboard: <Icon><rect width="8" height="4" x="8" y="2" rx="1" /><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" /></Icon>,
   sound: <Icon>{speaker}<path d="M16 9a5 5 0 0 1 0 6" /><path d="M19.364 18.364a9 9 0 0 0 0-12.728" /></Icon>,
   muted: <Icon>{speaker}<line x1="22" x2="16" y1="9" y2="15" /><line x1="16" x2="22" y1="9" y2="15" /></Icon>,
@@ -124,7 +127,7 @@ export function LinkBadge({ link }: { link: LinkStats }) {
 
 const connectionLabels: Record<Status, string> = { in_session: "Connected", connecting: "Reconnecting", online: "Connected", offline: "Disconnected" };
 
-export default function Toolbar({ remoteId, role = "viewer", status = "in_session", link, clipboardSync = true, onClipboardSyncChange = () => {}, onDisconnect, monitors = [], selectedMonitor, onMonitorChange = () => {}, canAddDisplay = false, onAddDisplay = () => {}, onRemoveDisplay = () => {}, audioMuted = false, onAudioMutedChange = () => {}, recordingActive = false, recordingElapsed = 0, onRecordingToggle = () => {}, filesOpen = false, onFilesToggle = () => {}, chatOpen = false, onChatToggle = () => {}, chatUnread = 0, viewOnly = false, onViewOnlyChange = () => {}, canSecureAttention = false, onSecureAttention = () => {} }: ToolbarProps) {
+export default function Toolbar({ remoteId, role = "viewer", status = "in_session", link, clipboardSync = true, onClipboardSyncChange = () => {}, onDisconnect, monitors = [], selectedMonitor, onMonitorChange = () => {}, canAddDisplay = false, onAddDisplay = () => {}, onRemoveDisplay = () => {}, canOpenMonitorWindow = false, onOpenMonitorWindow = () => {}, audioMuted = false, onAudioMutedChange = () => {}, recordingActive = false, recordingElapsed = 0, onRecordingToggle = () => {}, filesOpen = false, onFilesToggle = () => {}, chatOpen = false, onChatToggle = () => {}, chatUnread = 0, viewOnly = false, onViewOnlyChange = () => {}, canSecureAttention = false, onSecureAttention = () => {} }: ToolbarProps) {
   const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
@@ -161,6 +164,7 @@ export default function Toolbar({ remoteId, role = "viewer", status = "in_sessio
               {canAddDisplay && <option value={ADD_DISPLAY}>Add display…</option>}
             </select>
           </label>}
+          {viewer && canOpenMonitorWindow && <IconButton label="Open monitor in a window" text="New window" title="Open the selected monitor in its own window" icon={icons.newWindow} onClick={() => onOpenMonitorWindow(selectedMonitor ?? monitors[0]?.id ?? 0)} />}
           {viewer && selectedVirtual && <IconButton label="Remove display" text="Remove" title="Remove this virtual display from the other computer" icon={icons.remove} onClick={() => onRemoveDisplay(selectedVirtual.id)} />}
           {clipboard}
           {viewer && <>

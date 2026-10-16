@@ -62,6 +62,44 @@ impl VideoSink {
     }
 }
 
+/// Per-monitor aux video channels, keyed by monitor id. Each extra monitor
+/// window registers its own channel; frames are routed by the id the host
+/// stamped on the aux stream.
+#[derive(Default)]
+pub(crate) struct AuxVideoSinks(Mutex<std::collections::HashMap<u32, Channel<InvokeResponseBody>>>);
+
+impl AuxVideoSinks {
+    fn map(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<u32, Channel<InvokeResponseBody>>> {
+        lock_unpoisoned(&self.0)
+    }
+
+    /// Route monitor `id`'s frames to `channel`, replacing any earlier one.
+    pub(crate) fn attach(&self, id: u32, channel: Channel<InvokeResponseBody>) {
+        self.map().insert(id, channel);
+    }
+
+    /// Stop sending to monitor `id`'s window, if its channel still matches
+    /// `channel_id` (a stale detach from a replaced window is ignored).
+    pub(crate) fn detach(&self, id: u32, channel_id: u32) {
+        let mut map = self.map();
+        if map.get(&id).is_some_and(|channel| channel.id() == channel_id) {
+            map.remove(&id);
+        }
+    }
+
+    pub(crate) fn clear(&self) {
+        self.map().clear();
+    }
+
+    /// Forward one frame to monitor `id`'s window; dropped when none listens.
+    pub(crate) fn send(&self, id: u32, frame: Vec<u8>) {
+        let channel = self.map().get(&id).cloned();
+        if let Some(channel) = channel {
+            let _ = channel.send(InvokeResponseBody::Raw(frame));
+        }
+    }
+}
+
 /// How often the session toolbar's connection badge is refreshed.
 const LINK_STATS_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -84,6 +122,31 @@ pub(crate) fn start_video(sink: tauri::State<'_, VideoSink>, channel: Channel<In
 #[tauri::command]
 pub(crate) fn stop_video(sink: tauri::State<'_, VideoSink>, id: u32) {
     sink.detach(id);
+}
+
+/// A monitor window registers its video channel for monitor `monitor`.
+#[tauri::command]
+pub(crate) fn start_monitor_video(sinks: tauri::State<'_, AuxVideoSinks>, monitor: u32, channel: Channel<InvokeResponseBody>) {
+    sinks.attach(monitor, channel);
+}
+
+/// A monitor window stops receiving frames (it closed or reloaded).
+#[tauri::command]
+pub(crate) fn stop_monitor_video(sinks: tauri::State<'_, AuxVideoSinks>, monitor: u32, id: u32) {
+    sinks.detach(monitor, id);
+}
+
+/// Ask the host to start a per-monitor aux stream for `id`. The answer arrives
+/// as `monitor_stream_opened` or `monitor_stream_refused`.
+#[tauri::command]
+pub(crate) async fn open_monitor_stream(state: tauri::State<'_, AppState>, id: u32) -> Result<(), String> {
+    send_control(&state, Control::OpenMonitorStream { id }).await
+}
+
+/// Ask the host to stop the aux stream for `id`.
+#[tauri::command]
+pub(crate) async fn close_monitor_stream(state: tauri::State<'_, AppState>, id: u32) -> Result<(), String> {
+    send_control(&state, Control::CloseMonitorStream { id }).await
 }
 
 #[tauri::command]
@@ -175,7 +238,10 @@ pub(crate) fn connect(
             let (input_tx, input_rx) = mpsc::channel::<Vec<u8>>(256);
             let (monitor_tx, mut monitor_rx) = mpsc::channel::<Vec<u8>>(16);
             let (audio_tx, mut audio_rx) = mpsc::channel::<Vec<u8>>(16);
+            let (aux_tx, mut aux_rx) = mpsc::channel::<(u32, Vec<u8>)>(16);
             task_app.state::<AppState>().lock().viewer_input = Some(input_tx);
+            // Fresh session: drop any monitor-window channels from a prior one.
+            task_app.state::<AuxVideoSinks>().clear();
 
             let frame_app = task_app.clone();
             let frame_media_received = media_received.clone();
@@ -213,6 +279,14 @@ pub(crate) fn connect(
                 }
             }));
 
+            let aux_app = task_app.clone();
+            let _aux_task = AbortOnDrop::new(tauri::async_runtime::spawn(async move {
+                while let Some((monitor, plaintext)) = aux_rx.recv().await {
+                    if plaintext.len() < VIDEO_HEADER_LEN { continue; }
+                    aux_app.state::<AuxVideoSinks>().send(monitor, plaintext);
+                }
+            }));
+
             let monitor_app = task_app.clone();
             let _monitor_task = AbortOnDrop::new(tauri::async_runtime::spawn(async move {
                 while let Some(body) = monitor_rx.recv().await {
@@ -222,6 +296,10 @@ pub(crate) fn connect(
                         Some(Control::VirtualDisplayAdded { id }) => emit(&monitor_app, "virtual_display_added", VirtualDisplayAddedEvent { id }),
                         Some(Control::VirtualDisplayRefused { code }) => emit(&monitor_app, "virtual_display_refused", VirtualDisplayRefusedEvent { code }),
                         Some(Control::SecureAttentionSupport) => emit(&monitor_app, "secure_attention_support", ()),
+                        Some(Control::MultiMonitorSupport { max }) => emit(&monitor_app, "multi_monitor_support", MultiMonitorSupportEvent { max }),
+                        Some(Control::MonitorStreamOpened { id }) => emit(&monitor_app, "monitor_stream_opened", MonitorStreamEvent { id }),
+                        Some(Control::MonitorStreamClosed { id }) => emit(&monitor_app, "monitor_stream_closed", MonitorStreamEvent { id }),
+                        Some(Control::MonitorStreamRefused { id, code }) => emit(&monitor_app, "monitor_stream_refused", MonitorStreamRefusedEvent { id, code }),
                         _ => {}
                     }
                 }
@@ -229,7 +307,7 @@ pub(crate) fn connect(
 
             let (data_ready_tx, data_ready_rx) = oneshot::channel();
             let mut session_task = AbortOnDrop::new(tauri::async_runtime::spawn(async move {
-                host_core::roles::run_viewer_session_with_monitors_and_auth_code(
+                host_core::roles::run_viewer_session_with_aux(
                     ws,
                     &password,
                     &session,
@@ -238,6 +316,7 @@ pub(crate) fn connect(
                     Some(data_ready_tx),
                     Some(monitor_tx),
                     Some(audio_tx),
+                    Some(aux_tx),
                     auth_code.clone(),
                 )
                 .await
