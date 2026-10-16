@@ -2,15 +2,13 @@ Beta build for testing. Expect rough edges, and please report what breaks.
 
 ## What's new
 
-- **Host controls:** while someone controls your computer, a panel lets you
-  switch off their input, file transfer, clipboard or audio, see a log of
-  what's happened, and disconnect them without stopping hosting.
-- **Windows sign-in screen (new, experimental):** an optional service lets a
-  viewer reach the Windows sign-in screen, UAC prompts and the lock screen,
-  and send Ctrl+Alt+Del. Turn it on under hosting settings. It needs an
-  administrator prompt and is still rough — please report what breaks.
-- Unattended secrets are now encrypted at rest on Windows.
-- A security update to the TLS library.
+- **Browser viewer, now with sound, files, clipboard and recording:** the
+  viewer at /connect plays the host's audio, transfers files both ways, syncs
+  the clipboard, and can record the session to a local video file.
+- **2FA prompt:** if the host asks for a 2FA code, you now connect with just
+  the ID and password and a popup asks for the code, the way AnyDesk does.
+  The separate "2FA code (optional)" box is gone.
+- Refreshed the app's icon and header mark.
 
 If you installed an earlier beta, this one arrives as an "Update available"
 banner on the home screen. On macOS you may need to grant Screen Recording and
