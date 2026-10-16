@@ -16,13 +16,11 @@ const platforms = [
   <section class="hero">
     <div class="wrap hero__grid">
       <div class="hero__copy" data-reveal>
-        <p class="eyebrow">Open source · Self-hosted · Beta</p>
+        <p class="eyebrow">Open source · Self-hosted · End-to-end encrypted</p>
         <h1>Remote desktop through a relay that can't see your screen.</h1>
         <p class="lede">
-          OpenDesk lets you view and control another computer over the internet.
-          You run the relay. The two computers encrypt the screen, input, sound
-          and files between themselves, so the relay only passes along bytes it
-          can't read.
+          View and control any computer over the internet. End-to-end
+          encrypted, so the relay you run never sees your screen.
         </p>
         <div class="actions">
           <a class="button button--primary" href="#download">Download</a>
@@ -35,9 +33,13 @@ const platforms = [
       </div>
 
       <figure class="mock" aria-labelledby="mock-caption" data-reveal>
-        <div class="mock__window" aria-hidden="true">
+        <div class="mock__window" data-demo data-state="home">
           <div class="mock__bar"><span></span><span></span><span></span></div>
-          <div class="mock__body">
+          <div class="mock__body mock__home">
+            <div class="mock__apptop">
+              <span class="mock__brand"><svg class="mock__glyph" viewBox="0 0 48 48" aria-hidden="true"><g fill="none" stroke-width="6"><circle cx="19" cy="29" r="13" stroke="#22d3ee" /><circle cx="29" cy="19" r="13" stroke="#f5b921" /></g><circle cx="29" cy="19" r="5" fill="#22d3ee" /></svg>OpenDesk</span>
+              <span class="mock__online"><span class="mock__brand-dot"></span>Online</span>
+            </div>
             <div class="mock__card">
               <span class="mock__label">Your ID</span>
               <span class="mock__id">482 913 075</span>
@@ -48,20 +50,35 @@ const platforms = [
               <span class="mock__label">Control a remote device</span>
               <span class="mock__field mock__field--id">731 204 586</span>
               <span class="mock__field">••••••••••</span>
-              <span class="mock__button">Connect</span>
+              <button class="mock__button" type="button" data-connect>Connect</button>
             </div>
           </div>
-          <div class="mock__toolbar">
-            <span class="mock__dot"></span>
-            <span class="mock__mono">731 204 586</span>
-            <span class="mock__badge">Direct · 18 ms</span>
-            <span class="mock__tools">Fullscreen Clipboard Sound Files Record</span>
-            <span class="mock__disconnect">Disconnect</span>
+          <div class="mock__session">
+            <div class="mock__screen" data-screen>
+              <div class="mock__app mock__app--editor">
+                <div class="mock__app-bar"><span></span><span></span><span></span></div>
+                <div class="mock__app-lines"><i style="width:62%"></i><i style="width:88%"></i><i style="width:45%"></i><i style="width:74%"></i></div>
+              </div>
+              <div class="mock__app mock__app--panel">
+                <div class="mock__app-bar"><span></span></div>
+                <div class="mock__app-grid"><em></em><em></em><em></em><em></em></div>
+              </div>
+              <div class="mock__taskbar"><span></span><span></span><span></span></div>
+              <span class="mock__cursor" data-cursor></span>
+            </div>
+            <div class="mock__toolbar">
+              <span class="mock__dot"></span>
+              <span class="mock__mono">731 204 586</span>
+              <span class="mock__badge" data-badge>Direct · 18 ms</span>
+              <span class="mock__tools">Fullscreen Clipboard Sound Files Record</span>
+              <button class="mock__disconnect" type="button" data-disconnect>Disconnect</button>
+            </div>
           </div>
+          <div class="mock__connecting"><span class="mock__spinner"></span>Connecting…</div>
         </div>
         <figcaption id="mock-caption">
-          The home screen shows this computer's ID and a one-time password.
-          During a session, the toolbar shows whether the connection is direct or relayed.
+          A quick demo. Click <strong>Connect</strong> to start a session, then
+          move your pointer over the remote screen. The real app works the same way.
         </figcaption>
       </figure>
     </div>
@@ -196,9 +213,7 @@ const platforms = [
       <div class="notice">
         <p>
           <strong>These builds are not code-signed.</strong> The first time you open the app,
-          macOS Gatekeeper and Windows SmartScreen will warn you. <a href="/docs/getting-started/">Getting started</a>
-          shows how to get past each warning. All builds and their changelogs are on the
-          <a href={RELEASES_URL}>releases page</a>.
+          macOS Gatekeeper and Windows SmartScreen will warn you. <a href="/docs/getting-started/">Getting started</a> shows how to get past each warning. All builds and their changelogs are on the <a href={RELEASES_URL}>releases page</a>.
         </p>
       </div>
     </div>
@@ -209,8 +224,8 @@ const platforms = [
       <div>
         <h2 id="limits-title">Before you rely on it</h2>
         <ul class="plain-list">
-          <li>OpenDesk is in beta. Most testing has happened on macOS; Windows and Linux hosting is less mature.</li>
-          <li>The browser viewer always goes through the relay and has no sound, file transfer, clipboard sync or recording.</li>
+          <li>OpenDesk is in beta.</li>
+          <li>The browser viewer always goes through the relay, not a direct connection, and can't host.</li>
           <li>Linux hosts on Wayland have limited input support.</li>
           <li>The relay can't read your session, but it does see who connects to whom, when, and how much data flows. <a href="/docs/security/">Security model</a></li>
         </ul>
@@ -226,3 +241,45 @@ DOMAIN=relay.example.com docker compose up -d</code></pre>
     </div>
   </section>
 </Site>
+
+<script>
+  // Interactive hero demo: a scripted connect -> session flow. No backend.
+  const demo = document.querySelector<HTMLElement>("[data-demo]");
+  if (demo) {
+    const screen = demo.querySelector<HTMLElement>("[data-screen]");
+    const cursor = demo.querySelector<HTMLElement>("[data-cursor]");
+    const badge = demo.querySelector<HTMLElement>("[data-badge]");
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    let timer: number | undefined;
+
+    const setState = (state: string) => demo.setAttribute("data-state", state);
+
+    demo.querySelector("[data-connect]")?.addEventListener("click", () => {
+      window.clearTimeout(timer);
+      setState("connecting");
+      timer = window.setTimeout(() => setState("session"), reduce ? 150 : 850);
+    });
+
+    demo.querySelector("[data-disconnect]")?.addEventListener("click", () => {
+      window.clearTimeout(timer);
+      setState("home");
+    });
+
+    // The cursor follows the pointer 1:1 over the remote screen.
+    screen?.addEventListener("pointermove", (event) => {
+      if (!cursor) return;
+      const rect = screen.getBoundingClientRect();
+      const x = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
+      const y = Math.max(0, Math.min(rect.height, event.clientY - rect.top));
+      cursor.style.transform = `translate(${x}px, ${y}px)`;
+    });
+
+    // A faint, living latency readout while in session.
+    if (!reduce && badge) {
+      window.setInterval(() => {
+        if (demo.getAttribute("data-state") !== "session") return;
+        badge.textContent = `Direct · ${16 + Math.floor(Math.random() * 6)} ms`;
+      }, 1400);
+    }
+  }
+</script>
