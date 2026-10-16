@@ -38,10 +38,13 @@ jobs:
           components: clippy,rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo build --locked -p host-core
-      - run: cargo test --locked -p host-core
+      # The end-to-end tests stand up real relay sockets and ICE; running them
+      # one at a time keeps a loaded runner from starving pairing and the first
+      # frame, which otherwise flakes a different test each run.
+      - run: cargo test --locked -p host-core -- --test-threads=1
       - run: cargo clippy --locked -p host-core --all-targets -- -D warnings
       # web-core's tests run the browser session against a real host-core host.
-      - run: cargo test --locked -p web-core
+      - run: cargo test --locked -p web-core -- --test-threads=1
       - run: cargo clippy --locked -p web-core --all-targets -- -D warnings
 
   tauri:
