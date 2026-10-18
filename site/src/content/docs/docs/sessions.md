@@ -17,6 +17,7 @@ across the top. From left to right:
 | **Sound** / **Muted** | Mutes or unmutes the host's sound on your side. |
 | **Files** | Opens the file transfer panel. |
 | **Record** / **Stop** | Records the session to a video file. A red timer shows while it runs. |
+| **Restart** | Restarts the other computer and reconnects when it comes back. Shows only when the host has unattended access on and can restart on its own; it returns only if it is also set to start at sign-in. |
 | Timer | How long this session has run. |
 | **Disconnect** | Ends the session. |
 

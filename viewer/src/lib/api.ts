@@ -197,6 +197,12 @@ export const onMultiMonitorSupport = (handler: (payload: { max: number }) => voi
 export const onMonitorStreamOpened = (handler: (payload: { id: number }) => void) => on("monitor_stream_opened", handler);
 export const onMonitorStreamClosed = (handler: (payload: { id: number }) => void) => on("monitor_stream_closed", handler);
 export const onMonitorStreamRefused = (handler: (payload: { id: number; code: string }) => void) => on("monitor_stream_refused", handler);
+/** The host can restart its computer and come back hosting. */
+export const onRestartSupport = (handler: () => void) => on("restart_support", handler);
+/** The host is restarting; the viewer will auto-reconnect when it returns. */
+export const onHostRestarting = (handler: () => void) => on("host_restarting", handler);
+/** Ask the host to restart its computer. */
+export const requestRemoteRestart = () => invoke<void>("request_remote_restart");
 /** Something the host user should know, e.g. that the viewer added a display. */
 export const onHostNotice = (handler: (payload: { message: string }) => void) => on("host_notice", handler);
 export const onLinkStats = (handler: (payload: LinkStats) => void) => on("link_stats", handler);

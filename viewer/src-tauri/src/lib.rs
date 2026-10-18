@@ -838,6 +838,7 @@ pub fn run() {
             close_monitor_stream,
             set_input_monitor,
             get_presence,
+            request_remote_restart,
             request_keyframe,
             set_clipboard_sync,
             set_allow_virtual_displays,

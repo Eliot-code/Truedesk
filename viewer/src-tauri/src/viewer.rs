@@ -155,6 +155,13 @@ pub(crate) async fn set_input_monitor(state: tauri::State<'_, AppState>, id: u32
     send_control(&state, Control::SetInputMonitor { id }).await
 }
 
+/// Ask the host to restart its computer; the viewer then auto-reconnects when
+/// it comes back. Only offered when the host sent `RestartSupport`.
+#[tauri::command]
+pub(crate) async fn request_remote_restart(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    send_control(&state, Control::RequestRestart).await
+}
+
 /// Which of `ids` (saved devices) have a host online on the configured relays
 /// right now. Used by the address book's status dots.
 #[tauri::command]
@@ -216,6 +223,9 @@ pub(crate) fn connect(
             let mut reconnect_attempt = 0;
             let mut outage_started: Option<Instant> = None;
             let mut session_started = false;
+            // Set when the host says it is restarting, so the reconnect loop
+            // waits the long restart window instead of the short transient one.
+            let restart_expected = Arc::new(AtomicBool::new(false));
             loop {
                 if task_viewer_stop.load(Ordering::Relaxed) { break Ok(()); }
                 emit(&task_app, VIEWER_STATUS, StatusEvent { state: "connecting" });
@@ -302,6 +312,7 @@ pub(crate) fn connect(
             }));
 
             let monitor_app = task_app.clone();
+            let monitor_restart = Arc::clone(&restart_expected);
             let _monitor_task = AbortOnDrop::new(tauri::async_runtime::spawn(async move {
                 while let Some(body) = monitor_rx.recv().await {
                     match Control::from_bytes(&body) {
@@ -314,6 +325,11 @@ pub(crate) fn connect(
                         Some(Control::MonitorStreamOpened { id }) => emit(&monitor_app, "monitor_stream_opened", MonitorStreamEvent { id }),
                         Some(Control::MonitorStreamClosed { id }) => emit(&monitor_app, "monitor_stream_closed", MonitorStreamEvent { id }),
                         Some(Control::MonitorStreamRefused { id, code }) => emit(&monitor_app, "monitor_stream_refused", MonitorStreamRefusedEvent { id, code }),
+                        Some(Control::RestartSupport) => emit(&monitor_app, "restart_support", ()),
+                        Some(Control::Restarting) => {
+                            monitor_restart.store(true, Ordering::Relaxed);
+                            emit(&monitor_app, "host_restarting", ());
+                        }
                         _ => {}
                     }
                 }
@@ -390,13 +406,18 @@ pub(crate) fn connect(
                         if media_received {
                             reconnect_attempt = 0;
                             outage_started = None;
+                            // Reconnected and streaming again: the restart (if any) is over.
+                            restart_expected.store(false, Ordering::Relaxed);
                         }
+                        // A restart means a long gap is expected; wait the longer window.
+                        let window = if restart_expected.load(Ordering::Relaxed) {
+                            host_core::reconnect::VIEWER_RESTART_WINDOW
+                        } else {
+                            host_core::reconnect::VIEWER_RECONNECT_WINDOW
+                        };
                         let elapsed = outage_started.get_or_insert_with(Instant::now).elapsed();
-                        let Some(delay) = host_core::reconnect::viewer_retry_delay(reconnect_attempt, elapsed) else {
-                            break Err(format!(
-                                "{message}; gave up reconnecting after {}s",
-                                host_core::reconnect::VIEWER_RECONNECT_WINDOW.as_secs()
-                            ));
+                        let Some(delay) = host_core::reconnect::viewer_retry_delay_within(reconnect_attempt, elapsed, window) else {
+                            break Err(format!("{message}; gave up reconnecting after {}s", window.as_secs()));
                         };
                         reconnect_attempt += 1;
                         emit(&task_app, "error", ErrorEvent { message: format!("viewer session dropped ({message}); reconnecting (attempt {reconnect_attempt})") });

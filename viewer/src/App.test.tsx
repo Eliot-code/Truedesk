@@ -14,6 +14,7 @@ const { listeners, mocks } = vi.hoisted(() => {
     onFileOffer: on("file_offer"), onFileProgress: on("file_progress"), onFileDone: on("file_done"), onFileError: on("file_error"),
     onChatMessage: on("chat_message"), sendChat: vi.fn(), onSecureAttentionSupport: on("secure_attention_support"), sendSecureAttention: vi.fn(),
     onMultiMonitorSupport: on("multi_monitor_support"), onMonitorStreamOpened: on("monitor_stream_opened"), onMonitorStreamClosed: on("monitor_stream_closed"), onMonitorStreamRefused: on("monitor_stream_refused"), setInputMonitor: vi.fn(),
+    onRestartSupport: on("restart_support"), onHostRestarting: on("host_restarting"), requestRemoteRestart: vi.fn(),
     onFileDrop: on("drop"), onPasswordRotated: on("password_rotated"), onIdentityChanged: on("identity_changed"),
     onIdentityConflicts: on("identity_conflicts"), getIdentityConflicts: () => Promise.resolve([]),
     permissionStatus: vi.fn(), connect: vi.fn(), disconnect: vi.fn(),

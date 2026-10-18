@@ -67,6 +67,8 @@ export default function Session({ remoteId, role, status = "in_session", onDisco
   const viewOnlyRef = useRef(false);
   useEffect(() => { viewOnlyRef.current = viewOnly; }, [viewOnly]);
   const [canSecureAttention, setCanSecureAttention] = useState(false);
+  const [canRestart, setCanRestart] = useState(false);
+  const [restarting, setRestarting] = useState(false);
   // Off until the saved preference loads (clipboard sync defaults off).
   const [clipboardSync, setClipboardSync] = useState(false);
   const [audioMuted, setAudioMuted] = useState(false);
@@ -121,6 +123,29 @@ export default function Session({ remoteId, role, status = "in_session", onDisco
   }, []);
 
   const sendSecureAttention = () => void api.sendSecureAttention().catch((error: unknown) => notify(friendlyError(error)));
+
+  // The host advertises it can restart; it signals when a restart begins.
+  useEffect(() => {
+    if (role !== "viewer") return;
+    const listeners = Promise.all([
+      api.onRestartSupport(() => setCanRestart(true)),
+      api.onHostRestarting(() => setRestarting(true)),
+    ]);
+    return () => { void listeners.then((stops) => stops.forEach((stop) => stop())); };
+  }, [role]);
+
+  // Clear the restarting banner once the session is live again, and drop the
+  // capability when the session ends.
+  useEffect(() => {
+    if (status === "in_session") setRestarting(false);
+    else if (status !== "connecting") { setCanRestart(false); setRestarting(false); }
+  }, [status]);
+
+  const restartRemote = () => {
+    if (!window.confirm("Restart the remote computer? It will come back only if it is set to start at sign-in. The session will reconnect automatically.")) return;
+    setRestarting(true);
+    void api.requestRemoteRestart().catch((error: unknown) => { setRestarting(false); notify(friendlyError(error)); });
+  };
 
   useEffect(() => {
     if (role !== "viewer") return;
@@ -305,10 +330,11 @@ export default function Session({ remoteId, role, status = "in_session", onDisco
 
   return (
     <main className={`session-screen session-screen--${role}`}>
+      {role === "viewer" && restarting && <div className="session-restarting" role="status"><span className="session-restarting__spinner" aria-hidden="true" />Remote is restarting. Reconnecting automatically…</div>}
       {role === "viewer" && <canvas ref={canvasRef} className="session-canvas" tabIndex={0} aria-label="Remote screen" onPointerEnter={reclaimInput} onPointerDown={reclaimInput} />}
       {role === "host" && <div className="session-host-overlay"><span className="eyebrow">OPENDESK · SECURE SESSION</span><h1>You are being controlled by {remoteId}</h1><p>Your screen is shared for this session.</p></div>}
       {role === "host" && <HostControlPanel remoteId={remoteId} onDisconnect={() => void api.disconnectViewer().catch((error: unknown) => notify(friendlyError(error)))} />}
-      <Toolbar remoteId={remoteId} role={role} status={status} link={link} monitors={monitors} selectedMonitor={selectedMonitor} onMonitorChange={chooseMonitor} canAddDisplay={canAddDisplay} onAddDisplay={addDisplay} onRemoveDisplay={removeDisplay} canOpenMonitorWindow={canOpenMonitorWindow} onOpenMonitorWindow={openMonitorWindow} clipboardSync={clipboardSync} onClipboardSyncChange={toggleClipboardSync} audioMuted={audioMuted} onAudioMutedChange={toggleAudioMuted} recordingActive={recordingActive} recordingElapsed={recordingElapsed} onRecordingToggle={() => void toggleRecording()} filesOpen={filesOpen} onFilesToggle={() => setFilesOpen((open) => !open)} chatOpen={chatOpen} onChatToggle={toggleChat} chatUnread={chatUnread} viewOnly={viewOnly} onViewOnlyChange={setViewOnly} canSecureAttention={canSecureAttention} onSecureAttention={sendSecureAttention} onDisconnect={onDisconnect} />
+      <Toolbar remoteId={remoteId} role={role} status={status} link={link} monitors={monitors} selectedMonitor={selectedMonitor} onMonitorChange={chooseMonitor} canAddDisplay={canAddDisplay} onAddDisplay={addDisplay} onRemoveDisplay={removeDisplay} canOpenMonitorWindow={canOpenMonitorWindow} onOpenMonitorWindow={openMonitorWindow} clipboardSync={clipboardSync} onClipboardSyncChange={toggleClipboardSync} audioMuted={audioMuted} onAudioMutedChange={toggleAudioMuted} recordingActive={recordingActive} recordingElapsed={recordingElapsed} onRecordingToggle={() => void toggleRecording()} filesOpen={filesOpen} onFilesToggle={() => setFilesOpen((open) => !open)} chatOpen={chatOpen} onChatToggle={toggleChat} chatUnread={chatUnread} viewOnly={viewOnly} onViewOnlyChange={setViewOnly} canSecureAttention={canSecureAttention} onSecureAttention={sendSecureAttention} canRestart={canRestart} onRestart={restartRemote} onDisconnect={onDisconnect} />
       {role === "viewer" && <FileTransfer open={filesOpen} onOpenChange={onFilesOpenChange} />}
       {role === "viewer" && <ChatPanel open={chatOpen} messages={messages} onSend={sendChat} onClose={() => setChatOpen(false)} />}
     </main>
