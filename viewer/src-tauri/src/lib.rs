@@ -298,7 +298,8 @@ fn handle_browse(
                 (state.file_outgoing.clone(), state.file_sealer.clone(), state.file_router.clone())
             };
             if let (Some(outgoing), Some(sealer), Some(router)) = (outgoing, sealer, router) {
-                let _ = files::spawn_outgoing_file(app.clone(), path, outgoing, sealer, router);
+                // The send runs in its own task; we don't need the offer-id future.
+                drop(files::spawn_outgoing_file(app.clone(), path, outgoing, sealer, router));
             }
         }
         BrowseMsg::SetUploadDir { dir } => {
