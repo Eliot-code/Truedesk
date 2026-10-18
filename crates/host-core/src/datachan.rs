@@ -138,16 +138,18 @@ impl FileRouter {
 /// Open, decode and dispatch every inbound Data frame until the channel
 /// closes. Undecryptable, undecodable or unexpected frames are logged and
 /// skipped; they never end the dispatch (and so never end the session).
-pub async fn dispatch_data<O, C, H>(
+pub async fn dispatch_data<O, C, H, B>(
     mut incoming: mpsc::Receiver<Vec<u8>>,
     mut open: O,
     router: Arc<FileRouter>,
     mut on_clipboard: C,
     mut on_chat: H,
+    mut on_browse: B,
 ) where
     O: FnMut(&[u8]) -> Option<Vec<u8>>,
     C: FnMut(ClipboardMsg),
     H: FnMut(ChatMsg),
+    B: FnMut(protocol::browse::BrowseMsg),
 {
     while let Some(sealed) = incoming.recv().await {
         let Some(plaintext) = open(&sealed) else {
@@ -158,6 +160,7 @@ pub async fn dispatch_data<O, C, H>(
             Some(DataMsg::FileTransfer(message)) => router.route(message).await,
             Some(DataMsg::Clipboard(message)) => on_clipboard(message),
             Some(DataMsg::Chat(message)) => on_chat(message),
+            Some(DataMsg::Browse(message)) => on_browse(message),
             None => log::debug!("dropping an unrecognized Data message"),
         }
     }
@@ -214,7 +217,7 @@ mod tests {
             let (clip_tx, clipboard) = mpsc::unbounded_channel();
             tokio::spawn(dispatch_data(incoming, |bytes: &[u8]| Some(bytes.to_vec()), Arc::clone(&router), move |message| {
                 let _ = clip_tx.send(message);
-            }, |_chat| {}));
+            }, |_chat| {}, |_browse| {}));
             Peer { router, offers, out, clipboard }
         };
         let a = make(a_in, a_out.clone());

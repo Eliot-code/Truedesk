@@ -11,5 +11,6 @@ pub mod pake;
 pub mod filexfer;
 pub mod clipboard;
 pub mod chat;
+pub mod browse;
 pub mod datamsg;
 pub mod audio;

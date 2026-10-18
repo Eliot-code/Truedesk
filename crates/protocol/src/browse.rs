@@ -1,0 +1,56 @@
+use serde::{Deserialize, Serialize};
+
+/// One entry in a remote directory listing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirEntry {
+    pub name: String,
+    pub is_dir: bool,
+    /// File size in bytes; 0 for directories.
+    pub size: u64,
+    /// Last-modified time, Unix seconds; 0 when unknown.
+    pub modified: u64,
+}
+
+/// Remote file-manager messages on the Data channel. The viewer asks the host
+/// to list a directory; the host answers with a listing or an error. `req`
+/// correlates each answer with its request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "t", rename_all = "snake_case")]
+pub enum BrowseMsg {
+    /// Viewer → host: list `path`. An empty path means the starting places
+    /// (the user's home directory, and drive roots on Windows).
+    ListDir { req: u64, path: String },
+    /// Host → viewer: the entries of `path` (the absolute path the host read).
+    DirListing { req: u64, path: String, entries: Vec<DirEntry> },
+    /// Host → viewer: `path` could not be listed.
+    BrowseError { req: u64, message: String },
+}
+
+impl BrowseMsg {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("browse message serializes")
+    }
+    pub fn from_bytes(bytes: &[u8]) -> Option<BrowseMsg> {
+        serde_json::from_slice(bytes).ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn browse_messages_roundtrip() {
+        for message in [
+            BrowseMsg::ListDir { req: 1, path: "/home/me".into() },
+            BrowseMsg::DirListing {
+                req: 1,
+                path: "/home/me".into(),
+                entries: vec![DirEntry { name: "docs".into(), is_dir: true, size: 0, modified: 100 }],
+            },
+            BrowseMsg::BrowseError { req: 2, message: "denied".into() },
+        ] {
+            assert_eq!(BrowseMsg::from_bytes(&message.to_bytes()), Some(message));
+        }
+    }
+}

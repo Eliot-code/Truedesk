@@ -1,10 +1,11 @@
-use crate::{chat::ChatMsg, clipboard::ClipboardMsg, filexfer::FileMsg};
+use crate::{browse::BrowseMsg, chat::ChatMsg, clipboard::ClipboardMsg, filexfer::FileMsg};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DataMsg {
     FileTransfer(FileMsg),
     Clipboard(ClipboardMsg),
     Chat(ChatMsg),
+    Browse(BrowseMsg),
 }
 
 impl DataMsg {
@@ -13,6 +14,7 @@ impl DataMsg {
             Self::FileTransfer(message) => (1, message.to_bytes()),
             Self::Clipboard(message) => (2, message.to_bytes()),
             Self::Chat(message) => (3, message.to_bytes()),
+            Self::Browse(message) => (4, message.to_bytes()),
         };
         let mut bytes = Vec::with_capacity(1 + inner.len());
         bytes.push(tag);
@@ -26,6 +28,7 @@ impl DataMsg {
             1 => FileMsg::from_bytes(inner).map(Self::FileTransfer),
             2 => ClipboardMsg::from_bytes(inner).map(Self::Clipboard),
             3 => ChatMsg::from_bytes(inner).map(Self::Chat),
+            4 => BrowseMsg::from_bytes(inner).map(Self::Browse),
             _ => None,
         }
     }

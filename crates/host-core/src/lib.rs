@@ -1,3 +1,4 @@
+pub mod browse;
 pub mod capture;
 pub mod audio;
 pub mod clipboard;
