@@ -120,10 +120,21 @@ async fn receive_offer(
     // it in the activity log.
     let received_name = Arc::new(Mutex::new(String::new()));
     let name_slot = received_name.clone();
+    // A viewer uploading into a browsed folder sets a one-shot destination;
+    // consume it here, else fall back to Downloads. An invalid or non-directory
+    // path also falls back, so a bad value never drops the file.
+    let dest_dir = {
+        let slot = { app.state::<AppState>().lock().upload_dir.clone() };
+        let chosen = lock_unpoisoned(&slot).take();
+        match chosen {
+            Some(dir) if std::path::Path::new(&dir).is_dir() => std::path::PathBuf::from(dir),
+            _ => downloads_dir(),
+        }
+    };
     let result = FileReceiver::receive_with_async_consent(
         &mut source,
         &mut answers,
-        &downloads_dir(),
+        &dest_dir,
         move |offer| async move {
             let FileMsg::Offer { id, name, size, .. } = offer else {
                 return ConsentDecision::Reject;
@@ -308,6 +319,26 @@ pub(crate) async fn browse_remote(state: tauri::State<'_, AppState>, path: Strin
     let message = protocol::datamsg::DataMsg::Browse(protocol::browse::BrowseMsg::ListDir { req, path });
     let sealed = lock_unpoisoned(&sealer).seal(&[Tag::Data as u8], &message.to_bytes());
     outgoing.send_frame(Tag::Data, &sealed).await.map_err(|error| error.to_string())
+}
+
+/// Upload a local file into the remote folder `dir`. Tells the host the
+/// destination, then sends the file; both go over the ordered data channel so
+/// the destination arrives first. Returns the transfer id.
+#[tauri::command]
+pub(crate) async fn upload_to_remote(state: tauri::State<'_, AppState>, app: AppHandle, dir: String, path: String) -> Result<u64, String> {
+    let (outgoing, sealer, router) = {
+        let state = state.lock();
+        (state.file_outgoing.clone(), state.file_sealer.clone(), state.file_router.clone())
+    };
+    let outgoing = outgoing.ok_or_else(|| "no active file channel".to_owned())?;
+    let sealer = sealer.ok_or_else(|| "file session keys are not ready".to_owned())?;
+    let router = router.ok_or_else(|| "no active file channel".to_owned())?;
+    let message = protocol::datamsg::DataMsg::Browse(protocol::browse::BrowseMsg::SetUploadDir { dir });
+    let sealed = lock_unpoisoned(&sealer).seal(&[Tag::Data as u8], &message.to_bytes());
+    outgoing.send_frame(Tag::Data, &sealed).await.map_err(|error| error.to_string())?;
+    spawn_outgoing_file(app, path, outgoing, sealer, router)
+        .await
+        .map_err(|_| "file transfer stopped before sending its offer".to_owned())?
 }
 
 /// Ask the host to send the file at `path`; it arrives as an incoming transfer.

@@ -221,6 +221,8 @@ export const browseRemote = (path: string) => invoke<void>("browse_remote", { pa
 export const onRemoteListing = (handler: (payload: { path: string; entries: DirEntry[]; error: string | null }) => void) => on("remote_listing", handler);
 /** Download a remote file; it arrives as an incoming transfer (saved to Downloads). */
 export const pullRemote = (path: string) => invoke<void>("pull_remote", { path });
+/** Upload a local file into the remote folder `dir`. Returns the transfer id. */
+export const uploadToRemote = (dir: string, path: string) => invoke<number>("upload_to_remote", { dir, path });
 /** Something the host user should know, e.g. that the viewer added a display. */
 export const onHostNotice = (handler: (payload: { message: string }) => void) => on("host_notice", handler);
 export const onLinkStats = (handler: (payload: LinkStats) => void) => on("link_stats", handler);

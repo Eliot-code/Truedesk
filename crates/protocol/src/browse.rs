@@ -28,6 +28,10 @@ pub enum BrowseMsg {
     /// normal file transfer (an Offer) for it, which the viewer receives like
     /// any other incoming file.
     Pull { req: u64, path: String },
+    /// Viewer → host: save the next uploaded file into `dir` instead of the
+    /// host's Downloads. Consumed by the next incoming transfer, so it is sent
+    /// right before the file. An empty `dir` means Downloads.
+    SetUploadDir { dir: String },
 }
 
 impl BrowseMsg {
@@ -54,6 +58,7 @@ mod tests {
             },
             BrowseMsg::BrowseError { req: 2, message: "denied".into() },
             BrowseMsg::Pull { req: 3, path: "/home/me/a.txt".into() },
+            BrowseMsg::SetUploadDir { dir: "/home/me/docs".into() },
         ] {
             assert_eq!(BrowseMsg::from_bytes(&message.to_bytes()), Some(message));
         }

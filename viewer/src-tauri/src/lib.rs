@@ -49,6 +49,9 @@ struct RuntimeState {
     control_sealer: Option<Arc<Mutex<Sealer>>>,
     /// Routes the session's inbound file messages to their transfers.
     file_router: Option<Arc<FileRouter>>,
+    /// Destination for the next uploaded file (the folder the viewer is
+    /// browsing), consumed once; `None` means save to Downloads.
+    upload_dir: Arc<Mutex<Option<String>>>,
     clipboard_enabled: Arc<AtomicBool>,
     audio_muted: Arc<AtomicBool>,
     clipboard_thread: Option<ClipboardThread>,
@@ -297,6 +300,11 @@ fn handle_browse(
             if let (Some(outgoing), Some(sealer), Some(router)) = (outgoing, sealer, router) {
                 let _ = files::spawn_outgoing_file(app.clone(), path, outgoing, sealer, router);
             }
+        }
+        BrowseMsg::SetUploadDir { dir } => {
+            // Host side: the next incoming file goes here instead of Downloads.
+            let slot = { app.state::<AppState>().lock().upload_dir.clone() };
+            *lock_unpoisoned(&slot) = if dir.is_empty() { None } else { Some(dir) };
         }
     }
 }
@@ -832,6 +840,7 @@ pub fn run() {
                 control_sender: None,
                 control_sealer: None,
                 file_router: None,
+                upload_dir: Arc::new(Mutex::new(None)),
                 clipboard_enabled: Arc::new(AtomicBool::new(clipboard_sync)),
                 audio_muted: Arc::new(AtomicBool::new(false)),
                 clipboard_thread: None,
@@ -900,6 +909,7 @@ pub fn run() {
             browse_remote,
             browse_local,
             pull_remote,
+            upload_to_remote,
             request_keyframe,
             set_clipboard_sync,
             set_allow_virtual_displays,
@@ -1210,6 +1220,7 @@ mod tests {
             control_sender: None,
             control_sealer: None,
             file_router: None,
+                upload_dir: Arc::new(Mutex::new(None)),
             clipboard_enabled: Arc::new(AtomicBool::new(true)),
             audio_muted: Arc::new(AtomicBool::new(false)),
             clipboard_thread: None,

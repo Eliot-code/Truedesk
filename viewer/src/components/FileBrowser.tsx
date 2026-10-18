@@ -26,19 +26,21 @@ function parentPath(path: string): string | null {
   return trimmed.slice(0, trimmed[cut - 1] === ":" ? cut + 1 : cut);
 }
 
-function Pane({ title, state, onOpen, onUp, onRefresh, onDownload }: {
+function Pane({ title, state, onOpen, onUp, onRefresh, onDownload, onUpload }: {
   title: string;
   state: PaneState;
   onOpen: (entry: api.DirEntry) => void;
   onUp: () => void;
   onRefresh: () => void;
   onDownload?: (entry: api.DirEntry) => void;
+  onUpload?: () => void;
 }) {
   return (
     <div className="fb-pane">
       <div className="fb-pane__head">
         <strong>{title}</strong>
         <div className="fb-pane__actions">
+          {onUpload && <button className="quiet-button" type="button" onClick={onUpload} disabled={!state.path}>Upload…</button>}
           <button className="quiet-button" type="button" onClick={onUp} disabled={parentPath(state.path) === null}>Up</button>
           <button className="quiet-button" type="button" onClick={onRefresh}>Refresh</button>
         </div>
@@ -112,6 +114,7 @@ export default function FileBrowser() {
         onUp={() => { const up = parentPath(remote.path); if (up !== null) void api.browseRemote(up); }}
         onRefresh={() => void api.browseRemote(remote.path)}
         onDownload={(entry) => void api.pullRemote(joinPath(remote.path, entry.name))}
+        onUpload={() => void (async () => { const file = await api.pickFile(); if (file) await api.uploadToRemote(remote.path, file); })().catch(() => {})}
       />
     </div>
   );

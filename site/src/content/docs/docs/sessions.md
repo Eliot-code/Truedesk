@@ -15,7 +15,7 @@ across the top. From left to right:
 | **New window** | Opens the chosen monitor in its own window, so you can put each of the host's screens on one of yours. Shows when the host has more than one display. The window controls that monitor while your pointer is in it. |
 | **Clipboard** | Turns clipboard sync on or off. It starts off. |
 | **Sound** / **Muted** | Mutes or unmutes the host's sound on your side. |
-| **Files** | Opens the file transfer panel. |
+| **Files** | Opens the file panel: send a file, or use the two-pane browser to open folders on both computers, download a remote file (the arrow next to it), and upload into the remote folder you're viewing. |
 | **Record** / **Stop** | Records the session to a video file. A red timer shows while it runs. |
 | **Restart** | Restarts the other computer and reconnects when it comes back. Shows only when the host has unattended access on and can restart on its own; it returns only if it is also set to start at sign-in. |
 | **Privacy** | Blanks the other computer's screen and blocks its local keyboard and mouse, so nobody at it can watch or interfere while you work. You still see and control it normally. The host always restores both when the session ends, and someone at the host can regain control with Ctrl+Alt+Del. Windows only for now. |
