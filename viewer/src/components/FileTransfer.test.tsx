@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 const { onFileOffer, onFileProgress, onFileDone, onFileError, onFileDrop, respondFile, sendFile, pickFile, browseLocal, browseRemote, onRemoteListing } = vi.hoisted(() => ({
   onFileOffer: vi.fn(), onFileProgress: vi.fn(), onFileDone: vi.fn(), onFileError: vi.fn(), onFileDrop: vi.fn(),
   respondFile: vi.fn(() => Promise.resolve()), sendFile: vi.fn(() => Promise.resolve(1)), pickFile: vi.fn(),
-  browseLocal: vi.fn(() => Promise.resolve({ path: "/home", entries: [] })), browseRemote: vi.fn(() => Promise.resolve()), onRemoteListing: vi.fn(() => Promise.resolve(() => {})),
+  browseLocal: vi.fn(() => Promise.resolve({ path: "/home", entries: [] })), browseRemote: vi.fn(() => Promise.resolve()), onRemoteListing: vi.fn(() => Promise.resolve(() => {})), pullRemote: vi.fn(() => Promise.resolve()),
 }));
 
 vi.mock("../lib/api", () => ({ onFileOffer, onFileProgress, onFileDone, onFileError, onFileDrop, respondFile, sendFile, pickFile, browseLocal, browseRemote, onRemoteListing }));

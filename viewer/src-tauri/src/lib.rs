@@ -285,6 +285,19 @@ fn handle_browse(
         }
         BrowseMsg::DirListing { path, entries, .. } => emit(app, "remote_listing", RemoteListingEvent { path, entries, error: None }),
         BrowseMsg::BrowseError { message, .. } => emit(app, "remote_listing", RemoteListingEvent { path: String::new(), entries: Vec::new(), error: Some(message) }),
+        BrowseMsg::Pull { path, .. } => {
+            // Host side: the viewer asked for this file; send it if file access
+            // is on. It reaches the viewer as a normal incoming transfer.
+            if !files_allowed.load(std::sync::atomic::Ordering::Relaxed) { return; }
+            let (outgoing, sealer, router) = {
+                let state = app.state::<AppState>();
+                let state = state.lock();
+                (state.file_outgoing.clone(), state.file_sealer.clone(), state.file_router.clone())
+            };
+            if let (Some(outgoing), Some(sealer), Some(router)) = (outgoing, sealer, router) {
+                let _ = files::spawn_outgoing_file(app.clone(), path, outgoing, sealer, router);
+            }
+        }
     }
 }
 
@@ -886,6 +899,7 @@ pub fn run() {
             set_privacy_mode,
             browse_remote,
             browse_local,
+            pull_remote,
             request_keyframe,
             set_clipboard_sync,
             set_allow_virtual_displays,

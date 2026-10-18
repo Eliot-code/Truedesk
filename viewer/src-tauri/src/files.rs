@@ -207,6 +207,25 @@ pub(crate) async fn send_file(
     let outgoing = outgoing.ok_or_else(|| "no active reliable file channel".to_owned())?;
     let sealer = sealer.ok_or_else(|| "file session keys are not ready".to_owned())?;
     let router = router.ok_or_else(|| "no active reliable file channel".to_owned())?;
+    let offer_rx = spawn_outgoing_file(app, path, outgoing, sealer, router);
+    // FileSender allocates the id when it emits Offer. Returning after that
+    // first sealed frame lets the UI track a transfer while it waits for the
+    // receiver's answer and streams.
+    offer_rx
+        .await
+        .map_err(|_| "file transfer stopped before sending its offer".to_owned())?
+}
+
+/// Spawn a task that sends `path` over the data channel as a file transfer.
+/// Shared by the viewer's "Send file" and by answering a remote pull. Resolves
+/// to the transfer id once the offer is on the wire.
+pub(crate) fn spawn_outgoing_file(
+    app: AppHandle,
+    path: String,
+    outgoing: ReliableSender,
+    sealer: Arc<Mutex<Sealer>>,
+    router: Arc<FileRouter>,
+) -> oneshot::Receiver<Result<u64, String>> {
     let (offer_tx, offer_rx) = oneshot::channel();
     let task_app = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -255,13 +274,7 @@ pub(crate) async fn send_file(
             emit(&task_app, "file_done", FileDone { id, path: None });
         }
     });
-    // FileSender allocates the id when it emits Offer. Returning after that
-    // first sealed frame lets the UI track a transfer while it waits for the
-    // receiver's answer and streams.
-    let id = offer_rx
-        .await
-        .map_err(|_| "file transfer stopped before sending its offer".to_owned())??;
-    Ok(id)
+    offer_rx
 }
 
 /// A directory listing returned to the UI (the local pane of the file manager).
@@ -293,6 +306,21 @@ pub(crate) async fn browse_remote(state: tauri::State<'_, AppState>, path: Strin
     let sealer = sealer.ok_or_else(|| "file session keys are not ready".to_owned())?;
     let req = host_core::filexfer::next_transfer_id();
     let message = protocol::datamsg::DataMsg::Browse(protocol::browse::BrowseMsg::ListDir { req, path });
+    let sealed = lock_unpoisoned(&sealer).seal(&[Tag::Data as u8], &message.to_bytes());
+    outgoing.send_frame(Tag::Data, &sealed).await.map_err(|error| error.to_string())
+}
+
+/// Ask the host to send the file at `path`; it arrives as an incoming transfer.
+#[tauri::command]
+pub(crate) async fn pull_remote(state: tauri::State<'_, AppState>, path: String) -> Result<(), String> {
+    let (outgoing, sealer) = {
+        let state = state.lock();
+        (state.file_outgoing.clone(), state.file_sealer.clone())
+    };
+    let outgoing = outgoing.ok_or_else(|| "no active file channel".to_owned())?;
+    let sealer = sealer.ok_or_else(|| "file session keys are not ready".to_owned())?;
+    let req = host_core::filexfer::next_transfer_id();
+    let message = protocol::datamsg::DataMsg::Browse(protocol::browse::BrowseMsg::Pull { req, path });
     let sealed = lock_unpoisoned(&sealer).seal(&[Tag::Data as u8], &message.to_bytes());
     outgoing.send_frame(Tag::Data, &sealed).await.map_err(|error| error.to_string())
 }

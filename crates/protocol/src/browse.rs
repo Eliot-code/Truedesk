@@ -24,6 +24,10 @@ pub enum BrowseMsg {
     DirListing { req: u64, path: String, entries: Vec<DirEntry> },
     /// Host → viewer: `path` could not be listed.
     BrowseError { req: u64, message: String },
+    /// Viewer → host: send me the file at `path`. The host answers by starting a
+    /// normal file transfer (an Offer) for it, which the viewer receives like
+    /// any other incoming file.
+    Pull { req: u64, path: String },
 }
 
 impl BrowseMsg {
@@ -49,6 +53,7 @@ mod tests {
                 entries: vec![DirEntry { name: "docs".into(), is_dir: true, size: 0, modified: 100 }],
             },
             BrowseMsg::BrowseError { req: 2, message: "denied".into() },
+            BrowseMsg::Pull { req: 3, path: "/home/me/a.txt".into() },
         ] {
             assert_eq!(BrowseMsg::from_bytes(&message.to_bytes()), Some(message));
         }

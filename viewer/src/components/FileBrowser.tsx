@@ -26,12 +26,13 @@ function parentPath(path: string): string | null {
   return trimmed.slice(0, trimmed[cut - 1] === ":" ? cut + 1 : cut);
 }
 
-function Pane({ title, state, onOpen, onUp, onRefresh }: {
+function Pane({ title, state, onOpen, onUp, onRefresh, onDownload }: {
   title: string;
   state: PaneState;
   onOpen: (entry: api.DirEntry) => void;
   onUp: () => void;
   onRefresh: () => void;
+  onDownload?: (entry: api.DirEntry) => void;
 }) {
   return (
     <div className="fb-pane">
@@ -56,6 +57,7 @@ function Pane({ title, state, onOpen, onUp, onRefresh }: {
           >
             <span className="fb-entry__name">{entry.is_dir ? "📁" : "📄"} {entry.name}</span>
             {!entry.is_dir && <span className="fb-entry__size">{formatFileSize(entry.size)}</span>}
+            {!entry.is_dir && onDownload && <span className="fb-entry__dl" role="button" tabIndex={0} title={`Download ${entry.name}`} onClick={(event) => { event.stopPropagation(); onDownload(entry); }} onKeyDown={(event) => { if (event.key === "Enter") { event.stopPropagation(); onDownload(entry); } }}>↓</span>}
           </button>
         ))}
       </div>
@@ -109,6 +111,7 @@ export default function FileBrowser() {
         onOpen={(entry) => void api.browseRemote(joinPath(remote.path, entry.name))}
         onUp={() => { const up = parentPath(remote.path); if (up !== null) void api.browseRemote(up); }}
         onRefresh={() => void api.browseRemote(remote.path)}
+        onDownload={(entry) => void api.pullRemote(joinPath(remote.path, entry.name))}
       />
     </div>
   );
