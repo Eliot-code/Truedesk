@@ -1,6 +1,6 @@
 ---
 title: Troubleshooting and FAQ
-description: Fixes for wrong passwords, offline devices, macOS permissions, Linux keyrings, relay errors and other common OpenDesk problems.
+description: Fixes for wrong passwords, offline devices, macOS permissions, Linux keyrings, relay errors and other common Truedesk problems.
 ---
 
 ## "Wrong password"
@@ -23,7 +23,7 @@ means the same thing.
 The relay doesn't have a host with that ID right now. Check that:
 
 - the ID is right (9 digits);
-- OpenDesk is open on the other computer and its top bar says **Online**
+- Truedesk is open on the other computer and its top bar says **Online**
   (if it says **Offline**, click **Start hosting**);
 - both computers use the same relay (**RELAY REGIONS** on the home screen);
 - nobody else is connected to it. A host takes one session at a time.
@@ -51,8 +51,8 @@ The host accepted, but it couldn't capture its screen. On the host:
 - **No display.** A computer with no monitor connected (or with the display
   off) may have nothing to capture. Connect a monitor or an HDMI dummy plug,
   or turn on [virtual displays](/docs/virtual-displays/).
-- **macOS**: check that **Screen Recording** is allowed for OpenDesk, then
-  restart OpenDesk. See the next section if it already looks allowed.
+- **macOS**: check that **Screen Recording** is allowed for Truedesk, then
+  restart Truedesk. See the next section if it already looks allowed.
 - **Linux**: approve the screen-sharing request from the desktop portal when
   it appears.
 
@@ -66,21 +66,21 @@ reinstall, the switches in System Settings can still look on but no longer
 apply. The **Permissions** screen opens at launch when that happens.
 
 1. In **System Settings → Privacy & Security → Screen Recording**, select
-   OpenDesk and remove it with **−**.
+   Truedesk and remove it with **−**.
 2. Add it again with **+** (it's in Applications) and turn it on.
 3. Do the same under **Accessibility**.
-4. Quit and reopen OpenDesk.
+4. Quit and reopen Truedesk.
 
 If that doesn't stick, reset both in Terminal and grant them again:
 
 ```sh
-tccutil reset ScreenCapture com.opendesk.app
-tccutil reset Accessibility com.opendesk.app
+tccutil reset ScreenCapture com.truedesk.app
+tccutil reset Accessibility com.truedesk.app
 ```
 
 ## Unattended access stopped working
 
-The **UNATTENDED ACCESS** card shows a message when OpenDesk can't read its
+The **UNATTENDED ACCESS** card shows a message when Truedesk can't read its
 password or 2FA secret from the system keyring. Until it's fixed, every
 connection needs approval.
 
@@ -91,7 +91,7 @@ connection needs approval.
 - **macOS**: unlock your login keychain in Keychain Access.
 - **Windows**: make sure Credential Manager is available.
 - **Linux**: install and unlock a keyring such as GNOME Keyring or KWallet.
-  Minimal desktops and some window managers don't start one, and OpenDesk
+  Minimal desktops and some window managers don't start one, and Truedesk
   won't save the password in plain text instead.
 
 ## The relay refuses this computer
@@ -99,13 +99,13 @@ connection needs approval.
 These show on the host's home screen.
 
 - *This relay is limiting new devices from your network*: a relay lets one
-  network claim 20 new IDs an hour. OpenDesk keeps trying; it can take up to
+  network claim 20 new IDs an hour. Truedesk keeps trying; it can take up to
   an hour. Your own relay avoids it.
 - *This relay is full and can't take new devices*: add another relay or
   [run your own](/docs/self-hosting/).
-- *This relay is busy or limiting connections from your network*: OpenDesk
+- *This relay is busy or limiting connections from your network*: Truedesk
   keeps trying by itself.
-- *This relay didn't accept this device's registration*: update OpenDesk and
+- *This relay didn't accept this device's registration*: update Truedesk and
   check the relay address.
 - *Another computer is online with ID … on …*: two computers share one ID,
   usually because one is a copy of the other (a cloned disk or virtual
@@ -116,7 +116,7 @@ These show on the host's home screen.
 
 When connecting, the viewer may show *The relay is limiting connections from
 your network* (wait a minute and try again) or *The relay didn't accept the
-connection request* (check the ID, and update OpenDesk if it keeps
+connection request* (check the ID, and update Truedesk if it keeps
 happening).
 
 ## The badge says Relayed
@@ -134,12 +134,12 @@ the toolbar isn't set to **Muted**, on the desktop app or the browser viewer.
 
 ## Where are the logs?
 
-Include the log when you [report a problem](https://github.com/treeot/opendesk/issues/new?template=bug_report.yml),
+Include the log when you [report a problem](https://github.com/Eliot-code/truedesk/issues/new?template=bug_report.yml),
 along with both OS versions and what you did:
 
-- macOS: `~/Library/Logs/com.opendesk.app/`
-- Windows: `%LOCALAPPDATA%\com.opendesk.app\logs\`
-- Linux: `~/.local/share/com.opendesk.app/logs/`
+- macOS: `~/Library/Logs/com.truedesk.app/`
+- Windows: `%LOCALAPPDATA%\com.truedesk.app\logs\`
+- Linux: `~/.local/share/com.truedesk.app/logs/`
 
 ## FAQ
 

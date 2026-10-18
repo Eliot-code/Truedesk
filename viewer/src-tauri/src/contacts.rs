@@ -102,7 +102,7 @@ mod tests {
 
     fn test_store() -> (ContactStore, PathBuf) {
         let suffix = NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("opendesk-contacts-{}-{suffix}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("truedesk-contacts-{}-{suffix}", std::process::id()));
         let _ = fs::remove_dir_all(&path);
         (ContactStore::load(&path).unwrap(), path)
     }
@@ -147,7 +147,7 @@ mod tests {
     #[test]
     fn corrupt_contacts_are_backed_up_and_replaced_with_empty_list() {
         let suffix = NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("opendesk-contacts-corrupt-{}-{suffix}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("truedesk-contacts-corrupt-{}-{suffix}", std::process::id()));
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         let original = b"[{\"id\": ";

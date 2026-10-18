@@ -1,6 +1,6 @@
 ---
 title: Self-hosting a relay
-description: Run your own OpenDesk relay with Docker Compose and Caddy, or the prebuilt image behind your own proxy, and point the apps at it.
+description: Run your own Truedesk relay with Docker Compose and Caddy, or the prebuilt image behind your own proxy, and point the apps at it.
 ---
 
 The relay is one small service. It pairs a host and a viewer by ID and
@@ -17,7 +17,7 @@ limits with everyone else.
 - Ports **80** and **443** open. Port 80 only answers the certificate
   challenge.
 
-The computers using OpenDesk need no open ports. They connect out to the
+The computers using Truedesk need no open ports. They connect out to the
 relay on 443.
 
 ## Docker Compose (recommended)
@@ -27,8 +27,8 @@ The repository's `compose.yaml` runs the relay behind
 certificate by itself.
 
 ```sh
-git clone https://github.com/treeot/opendesk.git
-cd opendesk
+git clone https://github.com/Eliot-code/truedesk.git
+cd truedesk
 DOMAIN=relay.example.com docker compose up -d
 ```
 
@@ -48,19 +48,19 @@ WebSocket upgrades included, to the relay on port 8080.
 
 ## Prebuilt image
 
-CI publishes `ghcr.io/treeot/opendesk-relay`: `latest` and version tags from
+CI publishes `ghcr.io/eliot-code/truedesk-relay`: `latest` and version tags from
 releases, `edge` from `main`. Run it behind your own TLS proxy:
 
 ```sh
 docker run -d --restart unless-stopped -p 8080:8080 \
   -v relay_data:/data -e RELAY_STATE_FILE=/data/state.json \
-  ghcr.io/treeot/opendesk-relay:latest
+  ghcr.io/eliot-code/truedesk-relay:latest
 ```
 
 Forward `wss://` on port 443 to the container's port 8080. The relay doesn't
 do TLS itself.
 
-[`docs/DEPLOYMENT.md`](https://github.com/treeot/opendesk/blob/main/docs/DEPLOYMENT.md)
+[`docs/DEPLOYMENT.md`](https://github.com/Eliot-code/truedesk/blob/main/docs/DEPLOYMENT.md)
 also covers deploying on Coolify.
 
 ## Point the apps at it
@@ -72,7 +72,7 @@ URL per line, ending in `/ws`, and click **Save relay list**:
 wss://relay.example.com/ws
 ```
 
-OpenDesk tries them in order and uses the first one it can reach. Give the
+Truedesk tries them in order and uses the first one it can reach. Give the
 host and the viewer the same list. In the [browser viewer](/docs/browser-viewer/),
 set the same URL under **Relay**.
 

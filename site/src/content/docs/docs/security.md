@@ -1,13 +1,13 @@
 ---
 title: Security model
-description: What OpenDesk encrypts, what the relay can and can't see, and the limits you should know about.
+description: What Truedesk encrypts, what the relay can and can't see, and the limits you should know about.
 ---
 
-OpenDesk encrypts sessions end to end between the host and the viewer. The
+Truedesk encrypts sessions end to end between the host and the viewer. The
 relay forwards the traffic but never gets the keys. This page summarises how
 that works and where it stops. It describes the code, not an audit; the full
 version is
-[`docs/SECURITY.md`](https://github.com/treeot/opendesk/blob/main/docs/SECURITY.md).
+[`docs/SECURITY.md`](https://github.com/Eliot-code/truedesk/blob/main/docs/SECURITY.md).
 
 ## How a session is keyed
 
@@ -64,7 +64,7 @@ the OS keychain; anyone who can unlock your user account can read them.
   password is a risk. The host
   slows down and rotates its session password after repeated failures.
 - **Compromised computers.** Malware on the host or viewer, or a modified
-  build, sees everything before it's encrypted. That's outside what OpenDesk
+  build, sees everything before it's encrypted. That's outside what Truedesk
   can protect.
 - **The browser viewer is fetched on every visit.** See
   [what you're trusting](/docs/browser-viewer/#what-youre-trusting).
@@ -76,5 +76,5 @@ the OS keychain; anyone who can unlock your user account can read them.
 ## Report a vulnerability
 
 Please don't open a public issue. Use GitHub's
-[private vulnerability reporting](https://github.com/treeot/opendesk/security/advisories/new)
+[private vulnerability reporting](https://github.com/Eliot-code/truedesk/security/advisories/new)
 and include the component, the version, steps to reproduce, and the impact.

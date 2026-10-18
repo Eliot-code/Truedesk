@@ -46,7 +46,7 @@ async function openInNewWindow(id: number, name: string): Promise<void> {
   const existing = await WebviewWindow.getByLabel(label);
   if (existing) { await existing.setFocus(); return; }
   const url = `index.html?monitor=${id}&label=${encodeURIComponent(name)}`;
-  const window = new WebviewWindow(label, { url, title: `${name} · OpenDesk`, width: 1280, height: 800 });
+  const window = new WebviewWindow(label, { url, title: `${name} · Truedesk`, width: 1280, height: 800 });
   await new Promise<void>((resolve, reject) => {
     void window.once("tauri://created", () => resolve());
     void window.once("tauri://error", (event) => reject(new Error(String(event.payload))));
@@ -259,7 +259,7 @@ export default function Session({ remoteId, role, status = "in_session", onDisco
     if (recordingStartingRef.current) return;
     recordingStartingRef.current = true;
     let id: number;
-    try { id = await api.startRecording(`opendesk-session-${new Date().toISOString()}.webm`); }
+    try { id = await api.startRecording(`truedesk-session-${new Date().toISOString()}.webm`); }
     catch (error) { notify(`Could not start recording: ${friendlyError(error)}`); return; }
     finally { recordingStartingRef.current = false; }
     try {
@@ -352,7 +352,7 @@ export default function Session({ remoteId, role, status = "in_session", onDisco
     <main className={`session-screen session-screen--${role}`}>
       {role === "viewer" && restarting && <div className="session-restarting" role="status"><span className="session-restarting__spinner" aria-hidden="true" />Remote is restarting. Reconnecting automatically…</div>}
       {role === "viewer" && <canvas ref={canvasRef} className="session-canvas" tabIndex={0} aria-label="Remote screen" onPointerEnter={reclaimInput} onPointerDown={reclaimInput} />}
-      {role === "host" && <div className="session-host-overlay"><span className="eyebrow">OPENDESK · SECURE SESSION</span><h1>You are being controlled by {remoteId}</h1><p>Your screen is shared for this session.</p></div>}
+      {role === "host" && <div className="session-host-overlay"><span className="eyebrow">TRUEDESK · SECURE SESSION</span><h1>You are being controlled by {remoteId}</h1><p>Your screen is shared for this session.</p></div>}
       {role === "host" && <HostControlPanel remoteId={remoteId} onDisconnect={() => void api.disconnectViewer().catch((error: unknown) => notify(friendlyError(error)))} />}
       <Toolbar remoteId={remoteId} role={role} status={status} link={link} monitors={monitors} selectedMonitor={selectedMonitor} onMonitorChange={chooseMonitor} canAddDisplay={canAddDisplay} onAddDisplay={addDisplay} onRemoveDisplay={removeDisplay} canOpenMonitorWindow={canOpenMonitorWindow} onOpenMonitorWindow={openMonitorWindow} clipboardSync={clipboardSync} onClipboardSyncChange={toggleClipboardSync} audioMuted={audioMuted} onAudioMutedChange={toggleAudioMuted} recordingActive={recordingActive} recordingElapsed={recordingElapsed} onRecordingToggle={() => void toggleRecording()} filesOpen={filesOpen} onFilesToggle={() => setFilesOpen((open) => !open)} chatOpen={chatOpen} onChatToggle={toggleChat} chatUnread={chatUnread} viewOnly={viewOnly} onViewOnlyChange={setViewOnly} canSecureAttention={canSecureAttention} onSecureAttention={sendSecureAttention} canRestart={canRestart} onRestart={restartRemote} canPrivacy={canPrivacy} privacyOn={privacyOn} onPrivacyChange={togglePrivacy} onDisconnect={onDisconnect} />
       {role === "viewer" && <FileTransfer open={filesOpen} onOpenChange={onFilesOpenChange} />}

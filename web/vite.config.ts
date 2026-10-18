@@ -5,7 +5,7 @@ import process from "node:process";
 
 // Baked in at build time, like the desktop app. Source builds talk to a
 // local development relay.
-const defaultRelay = process.env.OPENDESK_DEFAULT_RELAY || "ws://127.0.0.1:8080/ws";
+const defaultRelay = process.env.TRUEDESK_DEFAULT_RELAY || "ws://127.0.0.1:8080/ws";
 
 // Only in production builds, so `vite dev` can use its own inline scripts
 // and a local ws:// relay. Scripts and wasm come from this origin only; the
@@ -22,7 +22,7 @@ const csp = [
 
 function contentSecurityPolicy(): Plugin {
   return {
-    name: "opendesk-csp",
+    name: "truedesk-csp",
     apply: "build",
     transformIndexHtml: () => [{ tag: "meta", attrs: { "http-equiv": "Content-Security-Policy", content: csp }, injectTo: "head-prepend" }],
   };

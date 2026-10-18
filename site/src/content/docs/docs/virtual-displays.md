@@ -14,7 +14,7 @@ things use it:
   screen often has nothing to capture. With virtual displays allowed, the host
   adds a 1920x1080 screen for the session when you connect.
 
-Every virtual display OpenDesk adds is removed when the session ends or the
+Every virtual display Truedesk adds is removed when the session ends or the
 app quits. A viewer can add up to two per session.
 
 ## Allow it on the host
@@ -25,7 +25,7 @@ time one is added.
 
 ## macOS
 
-Nothing to install. OpenDesk uses the virtual display support built into
+Nothing to install. Truedesk uses the virtual display support built into
 macOS.
 
 With HiDPI the size you ask for is in points, so a display added from a Retina
@@ -33,7 +33,7 @@ window may show at half its pixel size. Text stays readable either way.
 
 ## Windows
 
-Windows can't add a screen without a display driver. OpenDesk uses the free
+Windows can't add a screen without a display driver. Truedesk uses the free
 **USB Mobile Monitor** driver by Amyuni, which is signed by Microsoft and is the
 same driver RustDesk uses.
 
@@ -42,7 +42,7 @@ same driver RustDesk uses.
 2. Read Amyuni's licence and click **Accept and install**.
 3. Approve the administrator prompt.
 
-OpenDesk downloads the driver from Amyuni, checks the file against a fixed
+Truedesk downloads the driver from Amyuni, checks the file against a fixed
 fingerprint before using it, and installs it with Windows' own driver tools.
 The button changes to **Uninstall** once the driver is in.
 
@@ -53,7 +53,7 @@ Limits of the driver:
   monitor menu shows the size you actually got.
 - At most four virtual screens on the computer, counting ones added by other
   apps.
-- Displays come off newest first. If you try to remove an older one, OpenDesk
+- Displays come off newest first. If you try to remove an older one, Truedesk
   asks you to remove the newer one first.
 - Any program on that computer can add or remove the driver's screens. See
   [Security model](/docs/security/).

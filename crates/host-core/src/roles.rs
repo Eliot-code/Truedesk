@@ -1203,7 +1203,7 @@ impl VideoSource {
         let (events, event_rx) = mpsc::unbounded_channel();
         let thread_units = Arc::clone(&units);
         std::thread::Builder::new()
-            .name("opendesk-video-encode".into())
+            .name("truedesk-video-encode".into())
             .spawn(move || {
                 let _close = CloseOnExit(&thread_units);
                 let link = VideoLink { commands: &command_rx, units: &thread_units, events, capture_restore };
@@ -1468,7 +1468,7 @@ where
 {
     let (tx, mut rx) = mpsc::channel::<InputEvent>(INJECT_QUEUE);
     std::thread::Builder::new()
-        .name("opendesk-input-inject".into())
+        .name("truedesk-input-inject".into())
         .spawn(move || {
             let mut injector = injector_factory();
             let mut current = None;

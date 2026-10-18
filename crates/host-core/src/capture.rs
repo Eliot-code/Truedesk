@@ -150,7 +150,7 @@ impl ScapCapturer {
         let (ready_tx, ready_rx) = std_mpsc::sync_channel(1);
         let shared = Arc::clone(&latest);
         let worker = std::thread::Builder::new()
-            .name("opendesk-capture".into())
+            .name("truedesk-capture".into())
             .spawn(move || {
                 let mut platform = Scap;
                 let Some(stream) = platform.start(None) else {

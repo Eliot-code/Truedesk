@@ -357,7 +357,7 @@ pub mod driver {
     /// `deviceinstaller64 install usbmmidd.inf usbmmidd` does: a root
     /// device with the driver's hardware id, then Windows' own driver
     /// install, which checks the package's Microsoft signature. Then
-    /// writes OpenDesk's mode list and restarts the device to load it.
+    /// writes Truedesk's mode list and restarts the device to load it.
     /// Returns whether Windows wants a restart. Needs administrator rights.
     pub fn install(inf: &Path) -> Result<bool, String> {
         let inf = wide(&inf.to_string_lossy());

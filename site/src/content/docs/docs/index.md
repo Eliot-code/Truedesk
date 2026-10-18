@@ -1,15 +1,15 @@
 ---
-title: OpenDesk documentation
-description: How to install OpenDesk, connect to another computer, run your own relay, and what the encryption does and doesn't protect.
+title: Truedesk documentation
+description: How to install Truedesk, connect to another computer, run your own relay, and what the encryption does and doesn't protect.
 ---
 
-OpenDesk is a remote desktop app. One computer **hosts** (shares its screen and
+Truedesk is a remote desktop app. One computer **hosts** (shares its screen and
 accepts input), the other **views** (sees that screen and controls it). The
 same app does both. The two computers find each other through a **relay**, a
 small server that you can run yourself, and encrypt everything between
 themselves so the relay can't read it.
 
-OpenDesk is in beta. The builds aren't code-signed, and Windows and Linux
+Truedesk is in beta. The builds aren't code-signed, and Windows and Linux
 hosting has had less testing than macOS.
 
 ## Start here
@@ -43,5 +43,5 @@ hosting has had less testing than macOS.
 | Session password | A one-time password shown on the host. It changes after every session. |
 | Relay | The server both sides connect to. It forwards encrypted data and can't decrypt it. |
 
-Something missing or wrong? [Open an issue](https://github.com/treeot/opendesk/issues)
+Something missing or wrong? [Open an issue](https://github.com/Eliot-code/truedesk/issues)
 or use the edit link at the bottom of any page.

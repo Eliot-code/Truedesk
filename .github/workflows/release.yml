@@ -62,11 +62,11 @@ jobs:
       - name: Require a default relay
         shell: bash
         env:
-          OPENDESK_DEFAULT_RELAY: ${{ vars.OPENDESK_DEFAULT_RELAY }}
+          TRUEDESK_DEFAULT_RELAY: ${{ vars.TRUEDESK_DEFAULT_RELAY }}
         run: |
-          case "$OPENDESK_DEFAULT_RELAY" in
+          case "$TRUEDESK_DEFAULT_RELAY" in
             wss://*/ws) ;;
-            *) echo "Set the repo variable OPENDESK_DEFAULT_RELAY (e.g. wss://relay.example.com/ws)"; exit 1 ;;
+            *) echo "Set the repo variable TRUEDESK_DEFAULT_RELAY (e.g. wss://relay.example.com/ws)"; exit 1 ;;
           esac
 
       # The app version comes from the tag, so the updater can tell builds
@@ -103,7 +103,7 @@ jobs:
         working-directory: viewer
         shell: bash
         env:
-          OPENDESK_DEFAULT_RELAY: ${{ vars.OPENDESK_DEFAULT_RELAY }}
+          TRUEDESK_DEFAULT_RELAY: ${{ vars.TRUEDESK_DEFAULT_RELAY }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npx tauri build --config "$TAURI_RELEASE_CONFIG"
@@ -111,7 +111,7 @@ jobs:
       - name: Upload unsigned bundles
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: opendesk-${{ runner.os }}-unsigned
+          name: truedesk-${{ runner.os }}-unsigned
           # Installers and updater files only; the bundle dir also holds
           # staging trees (AppDir, .app, unpacked .deb) that aren't release
           # assets. The .sig files and the macOS .app.tar.gz exist only
@@ -147,14 +147,14 @@ jobs:
         with:
           path: release-artifacts
 
-      # Tauri names it OpenDesk.app.tar.gz; give it a versioned asset name.
+      # Tauri names it Truedesk.app.tar.gz; give it a versioned asset name.
       - name: Name the macOS update archive
         env:
           TAG: ${{ github.ref_name }}
         run: |
           for archive in release-artifacts/*/macos/*.app.tar.gz; do
             [ -e "$archive" ] || continue
-            target="$(dirname "$archive")/OpenDesk_${TAG#v}_aarch64.app.tar.gz"
+            target="$(dirname "$archive")/Truedesk_${TAG#v}_aarch64.app.tar.gz"
             mv "$archive" "$target"
             if [ -e "$archive.sig" ]; then mv "$archive.sig" "$target.sig"; fi
           done
@@ -190,7 +190,7 @@ jobs:
           else
             gh release create updater --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
               --prerelease --latest=false --title "Updater manifest" \
-              --notes "Used by the OpenDesk in-app updater. Download installers from the versioned releases."
+              --notes "Used by the Truedesk in-app updater. Download installers from the versioned releases."
           fi
           node .github/scripts/updater-manifest.mjs release-artifacts "$TAG" "$GITHUB_REPOSITORY" \
             "$dir/latest.json" "$dir/previous.json"

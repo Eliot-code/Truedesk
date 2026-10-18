@@ -6,7 +6,7 @@ use super::secure_attention::SecureAttentionError;
 /// inherited by the child and avoid treating an ordinary signed-in host as a
 /// secure-desktop host.
 pub fn helper_active() -> bool {
-    std::env::var_os("OPENDESK_SERVICE_HOST").is_some_and(|value| value == "1")
+    std::env::var_os("TRUEDESK_SERVICE_HOST").is_some_and(|value| value == "1")
 }
 
 /// Ask Windows' secure-attention broker to show the security screen.

@@ -43,7 +43,7 @@ pub fn should_retry_viewer(reason: DisconnectReason, session_started: bool) -> b
 
 pub const PEER_UNAVAILABLE_MESSAGE: &str = "That device is offline or already in a session.";
 pub const RELAY_LIMITED_MESSAGE: &str = "The relay is limiting connections from your network. Wait a minute and connect again.";
-pub const RELAY_REFUSED_MESSAGE: &str = "The relay didn't accept the connection request. Check the ID, and update OpenDesk if it keeps happening.";
+pub const RELAY_REFUSED_MESSAGE: &str = "The relay didn't accept the connection request. Check the ID, and update Truedesk if it keeps happening.";
 
 pub fn connect_refusal_message(code: &str) -> Option<&'static str> {
     use protocol::control::*;
@@ -70,7 +70,7 @@ pub mod reject_code {
 }
 
 /// What the viewer shows when the host has no screen to share.
-pub const NO_DISPLAY_MESSAGE: &str = "That computer has no screen connected. Plug in a monitor or an HDMI dummy plug, or turn on \"Let viewers add virtual displays\" in OpenDesk there (on Windows, also click \"Install virtual display driver\").";
+pub const NO_DISPLAY_MESSAGE: &str = "That computer has no screen connected. Plug in a monitor or an HDMI dummy plug, or turn on \"Let viewers add virtual displays\" in Truedesk there (on Windows, also click \"Install virtual display driver\").";
 
 const REJECTION_PREFIX: &str = "session rejected by host: ";
 
@@ -123,7 +123,7 @@ pub fn auth_failure_message(error: &str, after_session: bool) -> String {
         }
         Some(reject_code::NO_ANSWER) => "Nobody answered the connection request on the other device. Try again when someone is there.".to_owned(),
         Some(reject_code::CAPTURE_UNAVAILABLE) => {
-            "The other device can't share its screen. On that device, check that a display is on and Screen Recording is allowed for OpenDesk, restart it, and connect again.".to_owned()
+            "The other device can't share its screen. On that device, check that a display is on and Screen Recording is allowed for Truedesk, restart it, and connect again.".to_owned()
         }
         Some(reject_code::NO_DISPLAY) => NO_DISPLAY_MESSAGE.to_owned(),
         Some(other) => format!("The host rejected the session ({other})."),

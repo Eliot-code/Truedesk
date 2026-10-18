@@ -11,7 +11,7 @@
 /// Why the secure attention sequence could not be delivered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SecureAttentionError {
-    /// This platform has no secure attention sequence, or OpenDesk cannot
+    /// This platform has no secure attention sequence, or Truedesk cannot
     /// reach it yet from where it runs.
     Unsupported,
 }
@@ -41,7 +41,7 @@ pub fn available() -> bool {
     { false }
 }
 
-/// Deliver Ctrl+Alt+Del on this host. Succeeds only where OpenDesk can reach
+/// Deliver Ctrl+Alt+Del on this host. Succeeds only where Truedesk can reach
 /// the secure attention sequence; everywhere else it returns [`Unsupported`]
 /// and the caller simply ignores the request.
 pub fn deliver() -> Result<(), SecureAttentionError> {

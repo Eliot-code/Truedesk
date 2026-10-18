@@ -1,19 +1,19 @@
 ---
 title: Getting started
-description: Install OpenDesk on Windows, macOS or Linux, open an unsigned build, and connect to another computer for the first time.
+description: Install Truedesk on Windows, macOS or Linux, open an unsigned build, and connect to another computer for the first time.
 ---
 
-You need OpenDesk on the computer you want to reach (the host). On the
+You need Truedesk on the computer you want to reach (the host). On the
 computer you're sitting at, use the app too, or the
 [browser viewer](/docs/browser-viewer/) if you can't install anything there.
 
 Download the newest build from the
-[releases page](https://github.com/treeot/opendesk/releases). Every build so
+[releases page](https://github.com/Eliot-code/truedesk/releases). Every build so
 far is a beta, so GitHub lists them as pre-releases.
 
 ## Install
 
-OpenDesk builds are not code-signed, so each OS warns you the first time you
+Truedesk builds are not code-signed, so each OS warns you the first time you
 open the app. The steps below get past that warning. Only do this for a file
 you downloaded from the project's own releases page.
 
@@ -22,28 +22,28 @@ you downloaded from the project's own releases page.
 The `.dmg` is for Apple silicon Macs running macOS 12.3 or later. There's no
 Intel build yet.
 
-1. Open the `.dmg` and drag **OpenDesk** to **Applications**.
-2. Open OpenDesk. macOS says it can't verify the developer. Click **Done**
+1. Open the `.dmg` and drag **Truedesk** to **Applications**.
+2. Open Truedesk. macOS says it can't verify the developer. Click **Done**
    (or **Cancel**).
 3. Open **System Settings → Privacy & Security**, scroll down to the message
-   about OpenDesk, and click **Open Anyway**. Confirm with your password.
+   about Truedesk, and click **Open Anyway**. Confirm with your password.
    On older macOS versions you can instead Control-click the app in Finder and
    choose **Open**.
 4. If macOS says the app **is damaged and can't be opened**, run this in
    Terminal, then open it again:
 
    ```sh
-   xattr -dr com.apple.quarantine /Applications/OpenDesk.app
+   xattr -dr com.apple.quarantine /Applications/Truedesk.app
    ```
 
 To share its screen and accept remote control, the Mac needs two permissions.
-OpenDesk shows a **Permissions** screen at launch while either is missing:
+Truedesk shows a **Permissions** screen at launch while either is missing:
 
 - **Screen Recording**, so the other side can see the screen.
 - **Accessibility**, so the other side can use the mouse and keyboard.
 
-Click **Open Settings** next to each one, turn OpenDesk on in the list, and
-restart OpenDesk. You can choose **Skip for now** if this Mac only controls
+Click **Open Settings** next to each one, turn Truedesk on in the list, and
+restart Truedesk. You can choose **Skip for now** if this Mac only controls
 other computers; it doesn't need either permission for that. The
 **Permissions** button on the home screen brings the screen back.
 
@@ -65,12 +65,12 @@ Builds are for x86_64. Pick one:
 - **AppImage**: runs anywhere and updates itself.
 
   ```sh
-  chmod +x OpenDesk_*.AppImage
-  ./OpenDesk_*.AppImage
+  chmod +x Truedesk_*.AppImage
+  ./Truedesk_*.AppImage
   ```
 
-- **.deb** (Debian, Ubuntu): `sudo apt install ./OpenDesk_*_amd64.deb`
-- **.rpm** (Fedora, openSUSE): `sudo dnf install ./OpenDesk-*.x86_64.rpm`
+- **.deb** (Debian, Ubuntu): `sudo apt install ./Truedesk_*_amd64.deb`
+- **.rpm** (Fedora, openSUSE): `sudo dnf install ./Truedesk-*.x86_64.rpm`
 
 To host, Linux needs PipeWire and `xdg-desktop-portal`. When someone connects,
 your desktop asks which screen to share; approve it. Remote input works best
@@ -81,7 +81,7 @@ keyring, so it needs GNOME Keyring, KWallet or another Secret Service keyring.
 
 ## Connect for the first time
 
-Open OpenDesk on both computers. Each one starts hosting as soon as it opens,
+Open Truedesk on both computers. Each one starts hosting as soon as it opens,
 and the top bar shows **Online** once it has reached the relay.
 
 **On the computer you want to reach (the host):**

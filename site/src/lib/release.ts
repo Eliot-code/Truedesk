@@ -4,7 +4,7 @@
 // fails, the page links to the releases page instead.
 import process from "node:process";
 
-export const REPO = "treeot/opendesk";
+export const REPO = "Eliot-code/truedesk";
 export const RELEASES_URL = `https://github.com/${REPO}/releases`;
 
 export interface Download {

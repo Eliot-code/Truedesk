@@ -7,12 +7,14 @@ import inlineScriptHashes from "./src/integrations/inline-script-hashes.mjs";
 
 // Baked into the browser viewer at build time, like the desktop app. Local
 // builds talk to a local development relay.
-const defaultRelay = process.env.OPENDESK_DEFAULT_RELAY || "ws://127.0.0.1:8080/ws";
+const defaultRelay = process.env.TRUEDESK_DEFAULT_RELAY || "ws://127.0.0.1:8080/ws";
 
-const repo = "https://github.com/treeot/opendesk";
+const repo = "https://github.com/Eliot-code/truedesk";
 
 export default defineConfig({
-  site: "https://opendesk.treeot.dev",
+  // Set `site` to the URL this is served from to get canonical links and a
+  // sitemap. Pages are served from the domain root, so it needs a custom
+  // domain rather than a /truedesk/ project-page path.
   trailingSlash: "always",
   // Starlight highlights code with Expressive Code; Astro's own Shiki pass
   // isn't used.
@@ -20,7 +22,7 @@ export default defineConfig({
   integrations: [
     react(),
     starlight({
-      title: "OpenDesk",
+      title: "Truedesk",
       description: "Self-hosted, end-to-end encrypted remote desktop.",
       logo: { src: "./src/assets/logo.svg", alt: "" },
       favicon: "/favicon.svg",
@@ -64,13 +66,11 @@ export default defineConfig({
         "default-src 'none'",
         "img-src 'self'",
         "font-src 'self'",
-        // analytics.treeot.dev is the self-hosted Umami collector the landing
-        // page reports page views to.
-        "connect-src 'self' https://analytics.treeot.dev",
+        "connect-src 'self'",
         "base-uri 'none'",
         "form-action 'none'",
       ],
-      scriptDirective: { resources: ["'self'", "https://analytics.treeot.dev"] },
+      scriptDirective: { resources: ["'self'"] },
       styleDirective: { resources: ["'self'"] },
     },
   },

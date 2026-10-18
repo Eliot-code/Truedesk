@@ -1,4 +1,4 @@
-# Contributing to OpenDesk
+# Contributing to Truedesk
 
 Issues and pull requests are welcome.
 
@@ -45,7 +45,7 @@ Linux, and Windows.
 
 ## License
 
-OpenDesk is licensed under [AGPL-3.0-only](LICENSE). By submitting a pull
+Truedesk is licensed under [AGPL-3.0-only](LICENSE). By submitting a pull
 request, you agree that your contribution is licensed under the same terms.
 
 ## Security issues

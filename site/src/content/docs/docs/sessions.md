@@ -1,6 +1,6 @@
 ---
 title: Connecting and the session toolbar
-description: What each button in the OpenDesk session toolbar does, how file transfer and recording work, and what Direct and Relayed mean.
+description: What each button in the Truedesk session toolbar does, how file transfer and recording work, and what Direct and Relayed mean.
 ---
 
 Once the host accepts, the viewer shows the remote screen with a toolbar
@@ -30,7 +30,7 @@ and a button to disconnect them.
 
 ## Direct or Relayed
 
-OpenDesk first tries a direct UDP connection between the two computers, the
+Truedesk first tries a direct UDP connection between the two computers, the
 same way video calls do. If that works, the badge says **Direct** and video
 and input go straight between the two machines.
 
@@ -61,7 +61,7 @@ Either side can send.
 
 The other side is asked first: the host sees an **Accept this file?** dialog
 with the name and size, and the viewer sees the offer in its file panel.
-Accepted files are saved to the **Downloads** folder. OpenDesk checks each
+Accepted files are saved to the **Downloads** folder. Truedesk checks each
 file's SHA-256 hash before it finishes saving it, and gives a file a new name
 rather than overwrite one that's already there.
 

@@ -39,7 +39,7 @@ built into password managers.
 1. Turn on and save unattended access first.
 2. Tick **Require 2FA code**. A QR code appears.
 3. Scan it with your authenticator app, or type the setup key shown next to
-   it. The account is labelled *OpenDesk* and the host's ID.
+   it. The account is labelled *Truedesk* and the host's ID.
 4. Enter the current **6-digit code** from the app and click **Confirm**.
    Two-factor is only on after this step; **Cancel** leaves it off.
 
@@ -52,18 +52,18 @@ set it up again.
 
 ## Start at sign-in
 
-So that a restarted computer is reachable again, tick **Start OpenDesk when I
+So that a restarted computer is reachable again, tick **Start Truedesk when I
 sign in** on the same card. It can only be turned on once unattended access
 is saved and working.
 
-With it on, OpenDesk starts hidden after you sign in, keeps hosting, and
+With it on, Truedesk starts hidden after you sign in, keeps hosting, and
 shows an icon in the system tray (the menu bar on macOS). Its menu has
-**Show OpenDesk**, **Start hosting** or **Stop hosting**, and **Quit
-OpenDesk**. Closing the window leaves OpenDesk running in the tray; use
-**Quit OpenDesk** to stop it.
+**Show Truedesk**, **Start hosting** or **Stop hosting**, and **Quit
+Truedesk**. Closing the window leaves Truedesk running in the tray; use
+**Quit Truedesk** to stop it.
 
 This only runs after someone signs in to the computer. Nothing runs at the
-login screen, and OpenDesk isn't installed as a system service. Under the
+login screen, and Truedesk isn't installed as a system service. Under the
 hood it's a per-user sign-in item: a LaunchAgent on macOS, the `Run` registry
 key on Windows, an XDG autostart entry on Linux.
 
@@ -75,7 +75,7 @@ Service keyring (GNOME Keyring, KWallet) on Linux. Anyone who can unlock your
 user account can read them there. They're never written to disk in plain
 text.
 
-If OpenDesk can't read them (the keychain is locked, was reset, or the
+If Truedesk can't read them (the keychain is locked, was reset, or the
 settings were copied to a new machine), the card says so, each connection
 falls back to manual approval, and a launch at sign-in opens the window
 instead of hiding in the tray. See [Troubleshooting](/docs/troubleshooting/#unattended-access-stopped-working).

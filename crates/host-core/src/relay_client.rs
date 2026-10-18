@@ -206,10 +206,10 @@ fn registration_refusal(code: &str) -> Option<&'static str> {
     Some(match code {
         ERROR_ID_TAKEN => "this ID is registered to another device",
         ERROR_ID_IN_USE => "another computer is online with this ID",
-        ERROR_NEW_ID_RATE => "This relay is limiting new devices from your network. OpenDesk keeps trying, but it can take up to an hour. To skip the wait, use your own relay.",
+        ERROR_NEW_ID_RATE => "This relay is limiting new devices from your network. Truedesk keeps trying, but it can take up to an hour. To skip the wait, use your own relay.",
         ERROR_REGISTRY_FULL => "This relay is full and can't take new devices. Add another relay or use your own.",
-        ERROR_RELAY_BUSY => "This relay is busy or limiting connections from your network. OpenDesk keeps trying.",
-        ERROR_INVALID_REGISTER => "This relay didn't accept this device's registration. Update OpenDesk and check the relay address.",
+        ERROR_RELAY_BUSY => "This relay is busy or limiting connections from your network. Truedesk keeps trying.",
+        ERROR_INVALID_REGISTER => "This relay didn't accept this device's registration. Update Truedesk and check the relay address.",
         _ => return None,
     })
 }

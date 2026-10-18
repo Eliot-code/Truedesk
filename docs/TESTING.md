@@ -6,7 +6,7 @@ real desktop session, so test them by hand before a release.
 
 ## One machine (two instances)
 
-Debug builds read `OPENDESK_DATA_DIR`, so a second instance gets its own
+Debug builds read `TRUEDESK_DATA_DIR`, so a second instance gets its own
 identity and config.
 
 1. Relay: `cargo run -p relay` (listens on `ws://127.0.0.1:8080/ws`, the
@@ -14,7 +14,7 @@ identity and config.
 2. Instance A (host): `cd viewer && npm run tauri dev`. It starts hosting on
    launch; note the 9-digit ID and session password on the home screen.
 3. Instance B (viewer), in another terminal, while A's dev server is running:
-   `OPENDESK_DATA_DIR=/tmp/opendesk-b viewer/src-tauri/target/debug/viewer`
+   `TRUEDESK_DATA_DIR=/tmp/truedesk-b viewer/src-tauri/target/debug/viewer`
 4. In B, enter A's ID and password, then accept on A.
 
 On one machine you are viewing your own screen, so the stream shows itself
@@ -40,7 +40,7 @@ Run the relay where both machines can reach it, then point both apps at it
 | 10 | Kill host network for 10 s, restore | Viewer reconnects; host re-registers. With the network gone for good, both sides notice within ~45 s |
 | 11 | Unattended on, then 2FA (scan the QR, confirm a code) | Connects without accept; wrong code rejected. A device on the Known devices list still gets the accept prompt |
 | 12 | Record session, stop | "Recording saved to …" appears; the `.webm` plays |
-| 13 | With unattended on, tick **Start OpenDesk when I sign in**, then sign out and back in | No window opens; a tray icon appears and the viewer can connect without accept. Closing the window keeps hosting; tray **Quit** stops it |
+| 13 | With unattended on, tick **Start Truedesk when I sign in**, then sign out and back in | No window opens; a tray icon appears and the viewer can connect without accept. Closing the window keeps hosting; tray **Quit** stops it |
 | 14 | Linux only: in a session with no keyring running (no GNOME Keyring or KWallet), save unattended access | Saving fails with "couldn't … system keyring" and a hint; if it was already on, the card says it isn't working and connections need accept |
 | 15 | Copy the host's `config.json` to the other machine, restart the app there | It shows a different ID from the host; both stay online |
 | 16 | On the host, **Get a new ID**, confirm | The ID changes and the host is online under it; the old ID no longer connects |
@@ -52,8 +52,8 @@ Run the relay where both machines can reach it, then point both apps at it
 | 22 | Windows host: on Home click **Install virtual display driver**, read the licence, **Accept and install**, say No at the Windows prompt; then again and say Yes | No: "Nothing was changed…". Yes: "The virtual display driver is installed." and Device Manager → Display adapters lists "USB Mobile Monitor Virtual Display"; Home now offers **Uninstall driver** |
 | 23 | Windows host with the driver: rows 17 to 20 | As on a Mac, except sizes snap to the nearest of the driver's modes (1280x720 … 3840x2160) and the monitor menu shows the real size; Settings → Display shows the new displays while added and none after Disconnect |
 | 24 | Windows host: add two displays, then **Remove** the first | "Remove the newest virtual display first…"; the stream stays on it. Removing the second, then the first, works |
-| 25 | Windows host: add one display yourself first (`deviceinstaller64 enableidd 1` from Amyuni's zip), then connect and add and remove one, and Disconnect | Yours stays throughout; OpenDesk's comes and goes |
-| 26 | Windows host: add a display, then quit OpenDesk from the tray | The display goes away with the app |
+| 25 | Windows host: add one display yourself first (`deviceinstaller64 enableidd 1` from Amyuni's zip), then connect and add and remove one, and Disconnect | Yours stays throughout; Truedesk's comes and goes |
+| 26 | Windows host: add a display, then quit Truedesk from the tray | The display goes away with the app |
 | 27 | Headless Windows host (no monitor or dummy plug) with the driver and the setting on | The viewer sees a 1920x1080 virtual display; after Disconnect it is gone |
 | 28 | Windows host: **Uninstall driver** | It disappears from Device Manager; Home offers **Install virtual display driver** again |
 
@@ -66,9 +66,9 @@ macOS asks for **Screen Recording** and **Accessibility** permission the first
 time; restart the app after granting them. When you report an issue, include
 the OS versions, the number of any failing step, and the app log:
 
-- macOS: `~/Library/Logs/com.opendesk.app/`
-- Windows: `%LOCALAPPDATA%\com.opendesk.app\logs\`
-- Linux: `~/.local/share/com.opendesk.app/logs/`
+- macOS: `~/Library/Logs/com.truedesk.app/`
+- Windows: `%LOCALAPPDATA%\com.truedesk.app\logs\`
+- Linux: `~/.local/share/com.truedesk.app/logs/`
 
 The relay logs to stderr; set `RUST_LOG=debug` for more detail.
 # Windows sign-in-screen service
@@ -77,8 +77,8 @@ The privileged path needs a real Windows VM and an administrator account.
 
 1. Start with the setting off; confirm the normal host starts after sign-in.
 2. Save unattended access (including 2FA if it is part of the test), enable
-   “Run OpenDesk at the Windows sign-in screen”, and approve the UAC prompt.
-3. Confirm Home reports “Hosted by the OpenDesk service” and that a second
+   “Run Truedesk at the Windows sign-in screen”, and approve the UAC prompt.
+3. Confirm Home reports “Hosted by the Truedesk service” and that a second
    normal host is not registered.
 4. Lock Windows, sign out, show a UAC prompt, and reboot. From another viewer,
    verify capture and keyboard/mouse input on each protected desktop.

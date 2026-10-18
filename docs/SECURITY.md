@@ -1,6 +1,6 @@
-# OpenDesk security model
+# Truedesk security model
 
-OpenDesk encrypts session payloads end to end between the host and viewer.
+Truedesk encrypts session payloads end to end between the host and viewer.
 The relay forwards traffic and is not trusted with decryption keys. This
 document describes the implementation. It is not a certification, and it
 offers no protection against compromised endpoints.
@@ -10,7 +10,7 @@ offers no protection against compromised endpoints.
 Do not open a public issue, discussion, or pull request for a security
 problem. Report it privately through GitHub's private vulnerability reporting:
 open the repository's **Security** tab and choose **Report a vulnerability**
-([direct link](https://github.com/treeot/opendesk/security/advisories/new)).
+([direct link](https://github.com/Eliot-code/truedesk/security/advisories/new)).
 
 Include the affected component (relay, host, viewer, or protocol), the version
 or commit, steps to reproduce, and the impact you expect. We will acknowledge
@@ -80,7 +80,7 @@ on Linux), the app says so, each connection falls back to manual approval,
 and a launch at sign-in opens the window instead of hiding in the tray. Use a
 long, unique secret and disable unattended access when you don't need it.
 
-"Start OpenDesk when I sign in" adds a per-user sign-in entry (a LaunchAgent
+"Start Truedesk when I sign in" adds a per-user sign-in entry (a LaunchAgent
 on macOS, the `Run` registry key on Windows, an XDG autostart file on Linux).
 It starts the app hidden in the tray and hosting, but only after someone signs
 in: nothing runs at the login screen or as a system service. It can only be
@@ -98,10 +98,10 @@ identity.
 
 ## Virtual displays on Windows
 
-Windows has no built-in way to add a display, so OpenDesk uses Amyuni's
+Windows has no built-in way to add a display, so Truedesk uses Amyuni's
 free `usbmmidd_v2` indirect display driver, the one RustDesk uses. It is
 third-party code running in Windows' user-mode driver host, signed by
-Microsoft through the Windows Hardware Compatibility Program. OpenDesk
+Microsoft through the Windows Hardware Compatibility Program. Truedesk
 doesn't ship it. **Install virtual display driver** on Home (shown only
 when "Let viewers add virtual displays" is on) downloads it from
 `amyuni.com` over HTTPS and refuses any file whose SHA-256 differs from the
@@ -113,12 +113,12 @@ also checks the Microsoft signature. Amyuni's bundled installer is never
 run. **Uninstall driver** removes the device.
 
 The driver lets anyone signed in to the computer, not just administrators,
-add and remove its displays. OpenDesk only removes the ones it added, newest
+add and remove its displays. Truedesk only removes the ones it added, newest
 first, and leaves a display in place rather than take away one that another
 program added after it. The package's licence mentions an "advertisement
-page". Neither the driver nor anything OpenDesk installs from the package
+page". Neither the driver nor anything Truedesk installs from the package
 can show one: the driver has no networking or UI code, and Amyuni's
-installer, which OpenDesk skips, only shows a standard error box.
+installer, which Truedesk skips, only shows a standard error box.
 
 ## Known limitations and threat model
 
@@ -138,5 +138,5 @@ installer, which OpenDesk skips, only shows a standard error box.
 - Windows and Linux host support is less mature and has not been
   runtime-tested across all capture, permission, and input-injection
   environments.
-- OpenDesk is under active development. Review the source, test the exact
+- Truedesk is under active development. Review the source, test the exact
   binaries you deploy, and don't treat this document as a security audit.

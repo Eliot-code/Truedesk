@@ -1,6 +1,6 @@
-# OpenDesk architecture
+# Truedesk architecture
 
-OpenDesk is a Rust remote desktop with a Tauri desktop client and a small
+Truedesk is a Rust remote desktop with a Tauri desktop client and a small
 self-hosted WebSocket relay. A session has two endpoints:
 
 - **Host:** captures the desktop, encodes video, captures system audio

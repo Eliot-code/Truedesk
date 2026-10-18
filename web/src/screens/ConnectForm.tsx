@@ -44,9 +44,9 @@ export default function ConnectForm({ viewerId, relay: savedRelay, defaultRelay,
   return (
     <main className="app-shell web-shell">
       <header className="topbar">
-        <a className="brand" href="https://opendesk.treeot.dev">
+        <a className="brand" href="https://github.com/Eliot-code/truedesk">
           <svg className="brand-mark" viewBox="0 0 48 48" aria-hidden="true"><g fill="none" strokeWidth="6"><circle cx="19" cy="29" r="13" stroke="#22d3ee" /><circle cx="29" cy="19" r="13" stroke="#f5b921" /></g><circle cx="29" cy="19" r="5" fill="#22d3ee" /></svg>
-          OpenDesk
+          Truedesk
         </a>
         <div className="status mono" title="The host sees this ID when you connect">
           YOUR ID <span className="web-own-id">{formatId(viewerId)}</span>
@@ -55,7 +55,7 @@ export default function ConnectForm({ viewerId, relay: savedRelay, defaultRelay,
       <section className="hero web-hero">
         <span className="eyebrow">BROWSER VIEWER</span>
         <h1>Control a computer from here.</h1>
-        <p>Enter the ID and password shown in OpenDesk on the other computer. Nothing to install. If that computer has unattended access turned on, use its unattended password, not the one on screen.</p>
+        <p>Enter the ID and password shown in Truedesk on the other computer. Nothing to install. If that computer has unattended access turned on, use its unattended password, not the one on screen.</p>
       </section>
       <section className="card connect-card web-connect-card">
         {unsupported && <p className="message" role="alert">{unsupported}</p>}

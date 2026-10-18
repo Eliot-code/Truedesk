@@ -17,7 +17,7 @@ pub fn restart() -> Result<(), String> {
     #[cfg(windows)]
     {
         std::process::Command::new("shutdown")
-            .args(["/r", "/t", "3", "/c", "OpenDesk remote restart"])
+            .args(["/r", "/t", "3", "/c", "Truedesk remote restart"])
             .spawn()
             .map(|_child| ())
             .map_err(|error| error.to_string())

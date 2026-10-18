@@ -1,11 +1,11 @@
 name: Bug report
-description: Something didn't work while testing OpenDesk
+description: Something didn't work while testing Truedesk
 labels: [bug]
 body:
   - type: input
     id: version
     attributes:
-      label: OpenDesk version
+      label: Truedesk version
       placeholder: v0.1.0-beta.1
     validations:
       required: true
@@ -36,5 +36,5 @@ body:
       label: App logs
       description: |
         From both computers if you can. Remove anything you consider private.
-        macOS ~/Library/Logs/com.opendesk.app/ · Windows %LOCALAPPDATA%\com.opendesk.app\logs\ · Linux ~/.local/share/com.opendesk.app/logs/
+        macOS ~/Library/Logs/com.truedesk.app/ · Windows %LOCALAPPDATA%\com.truedesk.app\logs\ · Linux ~/.local/share/com.truedesk.app/logs/
       render: text

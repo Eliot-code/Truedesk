@@ -1,4 +1,4 @@
-# OpenDesk relay: one HTTP port (WebSocket at /ws, health at /health).
+# Truedesk relay: one HTTP port (WebSocket at /ws, health at /health).
 # Put a TLS proxy in front (see compose.yaml + deploy/Caddyfile, or Coolify).
 
 # Build and runtime share a Debian release so the binary's glibc matches.

@@ -36,7 +36,7 @@ export function addInlineScriptHashes(html) {
 
 export default function inlineScriptHashes() {
   return {
-    name: "opendesk-inline-script-hashes",
+    name: "truedesk-inline-script-hashes",
     hooks: {
       "astro:build:done": async ({ dir, logger }) => {
         let pages = 0;

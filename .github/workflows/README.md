@@ -1,4 +1,4 @@
-# OpenDesk CI
+# Truedesk CI
 
 `ci.yml` runs on every push and pull request to `main`:
 

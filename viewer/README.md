@@ -1,7 +1,7 @@
-# OpenDesk
+# Truedesk
 
-The OpenDesk desktop app, built with Tauri. One app both hosts incoming
-remote-control sessions and connects to another OpenDesk instance as a viewer.
+The Truedesk desktop app, built with Tauri. One app both hosts incoming
+remote-control sessions and connects to another Truedesk instance as a viewer.
 Cryptography, session keys, and the transport stay in the Rust backend. Both
 the host and the viewer gather and exchange ICE candidates and try direct UDP,
 falling back to the encrypted relay. Direct P2P carries traffic in both
@@ -25,7 +25,7 @@ passwords are hardcoded.
 
 ## Permissions
 
-To host a controllable session on macOS, grant OpenDesk both permissions in
+To host a controllable session on macOS, grant Truedesk both permissions in
 System Settings → Privacy & Security:
 
 - Screen Recording, to capture the display.

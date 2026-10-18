@@ -391,7 +391,7 @@ enum Backend {
 /// encoder cannot be created, or if it fails later (the fallback then starts
 /// with a keyframe). Other platforms use openh264; new hardware backends
 /// (VAAPI) slot in as more `Backend` variants. Setting
-/// `OPENDESK_ENCODER=software` forces openh264.
+/// `TRUEDESK_ENCODER=software` forces openh264.
 // The settings are only read when rebuilding after a hardware failure.
 #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 pub struct VideoEncoder {
@@ -409,10 +409,10 @@ impl VideoEncoder {
         fps: u32,
         bitrate: u32,
     ) -> Result<Self, EncoderInitError> {
-        let force_software = std::env::var("OPENDESK_ENCODER")
+        let force_software = std::env::var("TRUEDESK_ENCODER")
             .is_ok_and(|value| value.eq_ignore_ascii_case("software"));
         let backend = if force_software {
-            log::info!("OPENDESK_ENCODER=software: hardware encoding disabled");
+            log::info!("TRUEDESK_ENCODER=software: hardware encoding disabled");
             None
         } else {
             Self::hardware(width, height, fps, bitrate)

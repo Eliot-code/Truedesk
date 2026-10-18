@@ -1,7 +1,7 @@
 /** Small per-browser settings. Storage can be missing (private windows), so every access is guarded. */
 
-const VIEWER_ID_KEY = "opendesk.viewerId";
-const RELAY_KEY = "opendesk.relay";
+const VIEWER_ID_KEY = "truedesk.viewerId";
+const RELAY_KEY = "truedesk.relay";
 
 export const DEFAULT_RELAY: string = __DEFAULT_RELAY__;
 

@@ -201,7 +201,7 @@ fn apply_quarantine(path: &Path) -> io::Result<()> {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs());
     // 0081 = downloaded, not yet user-approved; then time, agent, no UUID.
-    let value = format!("0081;{now:x};OpenDesk;");
+    let value = format!("0081;{now:x};Truedesk;");
     let c_path = CString::new(path.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))?;
     let c_name = c"com.apple.quarantine";
@@ -668,7 +668,7 @@ mod tests {
 
     fn temp_dir(label: &str) -> PathBuf {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let path = std::env::temp_dir().join(format!("opendesk-filexfer-{label}-{nanos}"));
+        let path = std::env::temp_dir().join(format!("truedesk-filexfer-{label}-{nanos}"));
         fs::create_dir_all(&path).unwrap();
         path
     }
@@ -746,7 +746,7 @@ mod tests {
                 .output()
                 .unwrap();
             let value = String::from_utf8_lossy(&output.stdout);
-            assert!(value.starts_with("0081;") && value.trim_end().ends_with(";OpenDesk;"), "{value}");
+            assert!(value.starts_with("0081;") && value.trim_end().ends_with(";Truedesk;"), "{value}");
         }
         fs::remove_dir_all(dir).unwrap();
     }

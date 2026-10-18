@@ -584,8 +584,8 @@ const COMMON_PASSWORDS: &[&str] = &[
     "rootroot1234", "superman1234", "batman123456", "dragon123456", "football1234",
     "baseball1234", "basketball12", "basketball123", "monkey123456", "sunshine1234",
     "princess1234", "starwars1234", "pokemon12345", "master123456", "shadow123456",
-    "michael12345", "jennifer1234", "computer1234", "internet1234", "opendesk1234",
-    "opendesk12345", "remotedesktop", "remoteaccess1", "remoteaccess123", "unattended123",
+    "michael12345", "jennifer1234", "computer1234", "internet1234", "truedesk1234",
+    "truedesk12345", "remotedesktop", "remoteaccess1", "remoteaccess123", "unattended123",
     "qwerty123456", "qwerty1234567", "qwertyqwerty", "qwertyqwerty1", "1234qwerasdf",
     "1234qwerasdfzxcv", "asdfasdfasdf", "asdf1234asdf", "11223344556677", "112233445566",
     "123123123123", "123321123321", "121212121212", "147258369147", "159753159753",
@@ -772,9 +772,9 @@ fn disconnect(state: tauri::State<'_, AppState>, app: AppHandle) {
 pub fn run() {
     #[cfg(windows)]
     if windows_service::is_service_host_process() {
-        std::env::set_var("OPENDESK_SERVICE_HOST", "1");
+        std::env::set_var("TRUEDESK_SERVICE_HOST", "1");
         if let Some(data_dir) = windows_service::data_dir() {
-            std::env::set_var("OPENDESK_DATA_DIR", data_dir);
+            std::env::set_var("TRUEDESK_DATA_DIR", data_dir);
         }
     }
     // The elevated copy that installs the virtual display driver (Windows)
@@ -798,7 +798,7 @@ pub fn run() {
         // an XDG autostart file on Linux) launches with BACKGROUND_ARG.
         .plugin(tauri_plugin_autostart::Builder::new().arg(startup::BACKGROUND_ARG).build())
         // Stdout plus a rotating file in the OS log dir (macOS:
-        // ~/Library/Logs/com.opendesk.app/) for bug reports.
+        // ~/Library/Logs/com.truedesk.app/) for bug reports.
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(log::LevelFilter::Info)
@@ -821,7 +821,7 @@ pub fn run() {
             // Debug builds only: a second instance with its own identity, for
             // host+viewer testing on one machine (see docs/TESTING.md).
             #[cfg(debug_assertions)]
-            let app_data_dir = std::env::var_os("OPENDESK_DATA_DIR").map(PathBuf::from).unwrap_or(app_data_dir);
+            let app_data_dir = std::env::var_os("TRUEDESK_DATA_DIR").map(PathBuf::from).unwrap_or(app_data_dir);
             let config = ConfigStore::load(&app_data_dir)?;
             let contacts = ContactStore::load(&app_data_dir)?;
             let clipboard_sync = config.config.clipboard_sync;
@@ -1088,7 +1088,7 @@ mod tests {
     #[test]
     fn recording_filename_avoids_existing_file() {
         let directory = std::env::temp_dir().join(format!(
-            "opendesk-viewer-recording-test-{}",
+            "truedesk-viewer-recording-test-{}",
             std::process::id()
         ));
         fs::create_dir_all(&directory).unwrap();
@@ -1109,7 +1109,7 @@ mod tests {
 
     #[test]
     fn recording_sink_streams_chunks_to_disk() {
-        let directory = std::env::temp_dir().join(format!("opendesk-recording-sink-{}", std::process::id()));
+        let directory = std::env::temp_dir().join(format!("truedesk-recording-sink-{}", std::process::id()));
         fs::create_dir_all(&directory).unwrap();
 
         let mut sink = RecordingSink::create(&directory, "session").unwrap();
@@ -1124,7 +1124,7 @@ mod tests {
 
     #[test]
     fn recording_sink_enforces_size_cap_across_chunks() {
-        let directory = std::env::temp_dir().join(format!("opendesk-recording-cap-{}", std::process::id()));
+        let directory = std::env::temp_dir().join(format!("truedesk-recording-cap-{}", std::process::id()));
         fs::create_dir_all(&directory).unwrap();
 
         let mut sink = RecordingSink::create(&directory, "capped").unwrap();
@@ -1202,7 +1202,7 @@ mod tests {
     #[test]
     fn poisoned_app_state_lock_remains_usable() {
         let directory = std::env::temp_dir().join(format!(
-            "opendesk-viewer-lock-test-{}",
+            "truedesk-viewer-lock-test-{}",
             std::process::id()
         ));
         let app_state = AppState(Mutex::new(RuntimeState {

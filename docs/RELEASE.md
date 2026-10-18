@@ -1,10 +1,10 @@
-# OpenDesk releases
+# Truedesk releases
 
 Releases are unsigned Tauri bundles for macOS, Linux, and Windows.
 
 ## Cut a release
 
-1. Once: set the repo variable `OPENDESK_DEFAULT_RELAY` (Settings → Secrets
+1. Once: set the repo variable `TRUEDESK_DEFAULT_RELAY` (Settings → Secrets
    and variables → Actions → Variables) to the public relay, e.g.
    `wss://relay.example.com/ws`. It becomes the app's default relay; the
    release fails without it.
@@ -42,7 +42,7 @@ banner offers a retry.
 
 The app reads one URL:
 
-    https://github.com/treeot/opendesk/releases/download/updater/latest.json
+    https://github.com/Eliot-code/truedesk/releases/download/updater/latest.json
 
 GitHub's `/releases/latest/download/` link skips pre-releases, and every beta
 is one, so it can't be used. Instead, the workflow keeps `latest.json` on a
@@ -57,37 +57,37 @@ immutable releases for the repo, or the manifest can't be replaced.
 ### Signing key
 
 Updates are signed with a minisign key (this is not OS code signing). The
-private key lives outside the repo at `~/.tauri/opendesk-updater.key` and
+private key lives outside the repo at `~/.tauri/truedesk-updater.key` and
 has an empty password. Add it as a repo secret once:
 
-    gh secret set TAURI_SIGNING_PRIVATE_KEY --repo treeot/opendesk < ~/.tauri/opendesk-updater.key
+    gh secret set TAURI_SIGNING_PRIVATE_KEY --repo Eliot-code/truedesk < ~/.tauri/truedesk-updater.key
 
 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` is only needed if you regenerate the key
 with a password. If the key secret is missing, the build logs a warning,
 skips the updater files, and leaves the manifest alone.
 
 Keep a backup of the key. If it's lost, generate a new pair
-(`npx tauri signer generate -w ~/.tauri/opendesk-updater.key`), put the new
+(`npx tauri signer generate -w ~/.tauri/truedesk-updater.key`), put the new
 public key in `tauri.conf.json`, and have everyone install the next release
 by hand: installed apps only trust the old key.
 
 Local `npm run tauri build` fails once the updater is configured unless the
 key is set. Either export it
-(`TAURI_SIGNING_PRIVATE_KEY=~/.tauri/opendesk-updater.key TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""`)
+(`TAURI_SIGNING_PRIVATE_KEY=~/.tauri/truedesk-updater.key TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""`)
 or skip updater files with
 `npm run tauri -- build --config '{"bundle":{"createUpdaterArtifacts":false}}'`.
 
 ### Platform notes
 
-- macOS: the updater replaces `/Applications/OpenDesk.app` in place. The updater
+- macOS: the updater replaces `/Applications/Truedesk.app` in place. The updater
   doesn't set the quarantine flag, so there should be no Gatekeeper prompt
   after an update. Because the app is only ad-hoc signed, every build has a different
   signature, and macOS ties Screen Recording and Accessibility grants to it.
   After an update the switches may still look on in System Settings but no
   longer apply. The permissions screen opens at launch when that happens;
-  if granting doesn't stick, remove OpenDesk from both lists (or run
-  `tccutil reset ScreenCapture com.opendesk.app` and
-  `tccutil reset Accessibility com.opendesk.app`) and grant again. The same
+  if granting doesn't stick, remove Truedesk from both lists (or run
+  `tccutil reset ScreenCapture com.truedesk.app` and
+  `tccutil reset Accessibility com.truedesk.app`) and grant again. The same
   happens with a manual reinstall; only a Developer ID signature avoids it.
 - Windows: the update runs the NSIS or MSI installer (whichever was used to
   install) in passive mode, which shows a progress bar and restarts the app.
@@ -106,4 +106,4 @@ accept the OS trust warnings. They carry no verified publisher identity.
 
 - macOS may show Gatekeeper warnings. In Finder, use Control-click → Open, or approve the app in System Settings → Privacy & Security.
 - Windows may show a SmartScreen warning. Use More info → Run anyway only if you trust the release source.
-- Linux desktop environments may warn about an untrusted downloaded file. Mark the AppImage executable (`chmod +x OpenDesk*.AppImage`) and launch it, or install the `.deb` with the system package installer.
+- Linux desktop environments may warn about an untrusted downloaded file. Mark the AppImage executable (`chmod +x Truedesk*.AppImage`) and launch it, or install the `.deb` with the system package installer.

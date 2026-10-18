@@ -8,7 +8,7 @@ services:
     build:
       context: .
       dockerfile: crates/relay/Dockerfile
-    image: opendesk-relay
+    image: truedesk-relay
     restart: unless-stopped
     environment:
       RUST_LOG: ${RUST_LOG:-info}

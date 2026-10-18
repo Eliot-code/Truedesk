@@ -3,6 +3,6 @@
 <plist version="1.0">
 <dict>
 	<key>NSAudioCaptureUsageDescription</key>
-	<string>OpenDesk sends this computer's sound to the person viewing it during a remote session.</string>
+	<string>Truedesk sends this computer's sound to the person viewing it during a remote session.</string>
 </dict>
 </plist>

@@ -52,7 +52,7 @@ mod tests {
 
     #[test]
     fn lists_entries_with_directories_first() {
-        let dir = std::env::temp_dir().join(format!("opendesk-browse-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("truedesk-browse-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         std::fs::write(dir.join("a.txt"), b"hello").unwrap();
@@ -69,7 +69,7 @@ mod tests {
 
     #[test]
     fn a_missing_path_is_an_error_not_a_panic() {
-        assert!(list_dir("/no/such/opendesk/path/ever").is_err());
+        assert!(list_dir("/no/such/truedesk/path/ever").is_err());
     }
 
     #[test]

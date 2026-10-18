@@ -202,13 +202,13 @@ pub(crate) fn ensure_tray(app: &AppHandle) -> tauri::Result<()> {
     if app.tray_by_id(TRAY_ID).is_some() {
         return Ok(());
     }
-    let show = MenuItem::with_id(app, "show", "Show OpenDesk", true, None::<&str>)?;
+    let show = MenuItem::with_id(app, "show", "Show Truedesk", true, None::<&str>)?;
     let hosting = MenuItem::with_id(app, "hosting", hosting_item_label(host_status()), true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "Quit OpenDesk", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit Truedesk", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &hosting, &quit])?;
     let mut tray = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
-        .tooltip("OpenDesk")
+        .tooltip("Truedesk")
         .on_menu_event(|app, event| match event.id().as_ref() {
             "show" => show_main_window(app),
             "hosting" => toggle_hosting(app),

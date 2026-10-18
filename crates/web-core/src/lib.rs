@@ -1,4 +1,4 @@
-//! The viewer side of an OpenDesk session, for the browser.
+//! The viewer side of a Truedesk session, for the browser.
 //!
 //! A sans-IO state machine: the page owns the WebSocket and the clock, this
 //! crate owns pairing, SPAKE2, key confirmation and sealing. It follows

@@ -1,35 +1,40 @@
 <div align="center">
 
-<img src="viewer/src-tauri/icons/128x128@2x.png" width="96" alt="OpenDesk icon">
+<img src="viewer/src-tauri/icons/128x128@2x.png" width="96" alt="Truedesk icon">
 
-# OpenDesk
+# Truedesk
 
 **Open-source, self-hosted remote desktop with end-to-end encryption.**<br>
 An alternative to TeamViewer, AnyDesk and Parsec for Windows, macOS, Linux and the browser.
 
-[![CI](https://github.com/treeot/opendesk/actions/workflows/ci.yml/badge.svg)](https://github.com/treeot/opendesk/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/treeot/opendesk?include_prereleases&label=release)](https://github.com/treeot/opendesk/releases)
+[![CI](https://github.com/Eliot-code/truedesk/actions/workflows/ci.yml/badge.svg)](https://github.com/Eliot-code/truedesk/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Eliot-code/truedesk?include_prereleases&label=release)](https://github.com/Eliot-code/truedesk/releases)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
 [![Written in Rust](https://img.shields.io/badge/written%20in-Rust-orange)](https://www.rust-lang.org)
 
-[Website](https://opendesk.treeot.dev) ·
-[Docs](https://opendesk.treeot.dev/docs/) ·
-[Download](https://github.com/treeot/opendesk/releases) ·
-[Browser viewer](https://opendesk.treeot.dev/connect/) ·
+[Docs](site/src/content/docs/docs/index.md) ·
+[Download](https://github.com/Eliot-code/truedesk/releases) ·
 [Self-hosting](docs/DEPLOYMENT.md)
 
 </div>
 
 ---
 
-OpenDesk lets you see and control another computer through a relay you run
+Truedesk lets you see and control another computer through a relay you run
 yourself. Screen, input and sound are encrypted with a key only the two
 computers hold, so the relay passes along bytes it can't read. Both sides
 connect out over `wss://` on port 443: no port forwarding, and a direct UDP
 path is used whenever the network allows it.
 
+> [!NOTE]
+> Truedesk is a modified version of [OpenDesk](https://github.com/treeot/opendesk)
+> by treeot, forked on 2026-10-18 from commit
+> [`8f3b019`](https://github.com/treeot/opendesk/commit/8f3b0191ff23e553fc4eb5bef0cffaf5b3b93fc7).
+> It keeps OpenDesk's AGPL-3.0 licence. For now the wire protocol is unchanged,
+> so Truedesk and OpenDesk apps can still connect to each other.
+
 > [!CAUTION]
-> OpenDesk is for computers you own or have permission to control. Using it
+> Truedesk is for computers you own or have permission to control. Using it
 > to access someone else's computer without their consent is not supported
 > and may be illegal.
 
@@ -45,7 +50,7 @@ path is used whenever the network allows it.
 | 📁 **Files and clipboard** | Encrypted file transfer with consent and hash check; text clipboard sync |
 | 🪟 **Multi-monitor** | Pick a monitor, or add a virtual display on macOS and Windows |
 | 🌙 **Unattended access** | Stored password, optional 2FA code, start at sign-in with a tray icon |
-| 🌐 **Browser viewer** | Connect from any modern browser at [/connect](https://opendesk.treeot.dev/connect/) |
+| 🌐 **Browser viewer** | Connect from any modern browser, nothing to install ([how it works](site/src/content/docs/docs/browser-viewer.md)) |
 | 🔄 **Auto-update** | Signed updates checked from GitHub Releases |
 
 ## Quickstart
@@ -56,13 +61,13 @@ path is used whenever the network allows it.
    ```
    HTTPS is automatic. See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
 2. **Install the app** on both computers from
-   [Releases](https://github.com/treeot/opendesk/releases) and set the relay to
+   [Releases](https://github.com/Eliot-code/truedesk/releases) and set the relay to
    `wss://relay.example.com/ws`.
 3. **Host:** click **Start hosting** and note the nine-digit ID.
 4. **Viewer:** enter that ID and the session password, then accept on the host
    (or set up unattended access to skip that).
 
-The [getting started guide](https://opendesk.treeot.dev/docs/getting-started/)
+The [getting started guide](site/src/content/docs/docs/getting-started.md)
 covers each step in more detail.
 
 ## Platform support
@@ -75,7 +80,7 @@ covers each step in more detail.
 | **Browser** | — | ✅ | Relay only (no direct connection); can't host |
 
 Release builds are not code-signed. The
-[install guide](https://opendesk.treeot.dev/docs/getting-started/) shows how to
+[install guide](site/src/content/docs/docs/getting-started.md) shows how to
 open them.
 
 ## How it works
@@ -98,7 +103,7 @@ open them.
 
 More detail: [architecture](docs/ARCHITECTURE.md) ·
 [security model](docs/SECURITY.md) ·
-[browser viewer trade-offs](https://opendesk.treeot.dev/docs/browser-viewer/).
+[browser viewer trade-offs](site/src/content/docs/docs/browser-viewer.md).
 
 ## Build from source
 
@@ -117,7 +122,7 @@ cd web && npm ci && npm run wasm && npm run build   # needs wasm32-unknown-unkno
 cd site && npm ci && npm run build                  # run `npm run wasm` in web/ first
 ```
 
-Set `OPENDESK_DEFAULT_RELAY` at build time to change the browser viewer's
+Set `TRUEDESK_DEFAULT_RELAY` at build time to change the browser viewer's
 default relay. Docs pages are Markdown files in `site/src/content/docs/docs/`.
 
 </details>
@@ -139,7 +144,7 @@ To run two instances on one machine, see [`docs/TESTING.md`](docs/TESTING.md).
 
 ### Longer term
 
-Bigger pieces that would bring OpenDesk closer to a full TeamViewer or AnyDesk
+Bigger pieces that would bring Truedesk closer to a full TeamViewer or AnyDesk
 replacement, in rough priority order:
 
 - **Accounts and a web console**: sign-in, synced address book, and device
@@ -155,7 +160,8 @@ Issues and pull requests are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## License
 
-[AGPL-3.0-only](LICENSE). You can use, change and self-host OpenDesk freely.
+[AGPL-3.0-only](LICENSE), inherited from OpenDesk. You can use, change and
+self-host Truedesk freely.
 If you distribute a modified version, or run one others use over a network
 (a modified relay, for example), you must publish its source under the same
 licence.
@@ -163,10 +169,10 @@ licence.
 <details>
 <summary>Third-party software: Amyuni virtual display driver (Windows)</summary>
 
-On Windows, OpenDesk can download and install Amyuni Technologies'
+On Windows, Truedesk can download and install Amyuni Technologies'
 `usbmmidd_v2` virtual display driver for you (see
 [docs/SECURITY.md](docs/SECURITY.md#virtual-displays-on-windows)). It is
-not part of OpenDesk and comes under its own licence:
+not part of Truedesk and comes under its own licence:
 
 ```text
 Copyright 2014-2021 Amyuni Technologies Inc.

@@ -21,8 +21,8 @@ The repo's `compose.yaml` runs the relay behind Caddy, which obtains and renews 
 Let's Encrypt certificate.
 
 ```sh
-git clone https://github.com/treeot/opendesk.git
-cd opendesk
+git clone https://github.com/Eliot-code/truedesk.git
+cd truedesk
 DOMAIN=relay.example.com docker compose up -d
 ```
 
@@ -39,13 +39,13 @@ Update with `git pull && docker compose up -d --build`. Logs:
 
 ## Prebuilt image
 
-CI publishes `ghcr.io/treeot/opendesk-relay` (`latest` and version tags from
+CI publishes `ghcr.io/eliot-code/truedesk-relay` (`latest` and version tags from
 releases, `edge` from `main`). Run it behind your own TLS proxy:
 
 ```sh
 docker run -d --restart unless-stopped -p 8080:8080 \
   -v relay_data:/data -e RELAY_STATE_FILE=/data/state.json \
-  ghcr.io/treeot/opendesk-relay:latest
+  ghcr.io/eliot-code/truedesk-relay:latest
 ```
 
 Forward `wss://` on 443 to the container's port 8080; WebSocket upgrades pass
@@ -106,7 +106,7 @@ ICE uses Google Public STUN at `stun:stun.l.google.com:19302` by default to
 discover server-reflexive addresses. It's the default because it needs no
 extra service and only takes part in candidate discovery. STUN never relays
 desktop contents: the encrypted payload still goes over the nominated direct
-UDP path or the OpenDesk relay fallback.
+UDP path or the Truedesk relay fallback.
 
 To control candidate discovery yourself, substitute a self-hosted STUN URL in
 the host-core `AgentConfig.urls` configuration. That setting lives in the

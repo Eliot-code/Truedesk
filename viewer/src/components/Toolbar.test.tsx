@@ -30,7 +30,7 @@ describe("monitor picker", () => {
   afterEach(cleanup);
   const monitors = [
     { id: 1, name: "Built-in", width: 0, height: 0, is_primary: true },
-    { id: 5, name: "OpenDesk Virtual Display", width: 0, height: 0, is_primary: false, is_virtual: true },
+    { id: 5, name: "Truedesk Virtual Display", width: 0, height: 0, is_primary: false, is_virtual: true },
   ];
 
   it("offers Add display only when the host supports it", () => {

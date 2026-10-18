@@ -285,7 +285,7 @@ mod tests {
 
     #[test]
     fn virtual_monitors_are_flagged_and_old_lists_read_as_real() {
-        let virt = MonitorInfo { id: 5, name: "OpenDesk".into(), width: 0, height: 0, is_primary: false, is_virtual: true };
+        let virt = MonitorInfo { id: 5, name: "Truedesk".into(), width: 0, height: 0, is_primary: false, is_virtual: true };
         let c = Control::MonitorList { monitors: vec![virt] };
         assert_eq!(Control::from_bytes(&c.to_bytes()), Some(c));
         // A beta.5 host's list has no flag.
@@ -383,7 +383,7 @@ mod tests {
             assert!(beta5::from_bytes(&newer.to_bytes()).is_none(), "{newer:?}");
         }
         let list = Control::MonitorList {
-            monitors: vec![MonitorInfo { id: 3, name: "OpenDesk".into(), width: 0, height: 0, is_primary: false, is_virtual: true }],
+            monitors: vec![MonitorInfo { id: 3, name: "Truedesk".into(), width: 0, height: 0, is_primary: false, is_virtual: true }],
         };
         assert!(matches!(beta5::from_bytes(&list.to_bytes()), Some(beta5::Control::MonitorList { .. })));
     }

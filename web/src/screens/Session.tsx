@@ -250,7 +250,7 @@ export default function Session({ remoteId, status, monitors, controls, onDiscon
     recorder.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data); };
     recorder.onstop = () => {
       const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-      downloadBlob(`opendesk-${stamp}.webm`, new Blob(chunks, { type: recorder.mimeType || "video/webm" }));
+      downloadBlob(`truedesk-${stamp}.webm`, new Blob(chunks, { type: recorder.mimeType || "video/webm" }));
     };
     recorder.start(1000);
     const start = performance.now();

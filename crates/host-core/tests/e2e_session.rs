@@ -181,7 +181,7 @@ fn test_temp_dir(label: &str) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock is after the epoch")
         .as_nanos();
-    std::env::temp_dir().join(format!("opendesk-e2e-{label}-{}-{nonce}", std::process::id()))
+    std::env::temp_dir().join(format!("truedesk-e2e-{label}-{}-{nonce}", std::process::id()))
 }
 
 #[tokio::test(flavor = "multi_thread")]

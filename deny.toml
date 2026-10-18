@@ -1,4 +1,4 @@
-# cargo-deny configuration — supply-chain policy for OpenDesk.
+# cargo-deny configuration — supply-chain policy for Truedesk.
 # Run locally with: cargo deny check
 
 [advisories]
@@ -12,7 +12,7 @@ ignore = []
 
 [licenses]
 version = 2
-# Dependency licenses compatible with distributing OpenDesk under AGPL-3.0.
+# Dependency licenses compatible with distributing Truedesk under AGPL-3.0.
 allow = [
     "MIT",
     "Apache-2.0",

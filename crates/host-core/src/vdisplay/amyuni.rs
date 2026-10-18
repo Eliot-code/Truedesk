@@ -29,7 +29,7 @@ pub const MODE_KEYS: [&str; 2] = [
     r"SYSTEM\CurrentControlSet\Services\WUDF\Services\usbmmIdd\Parameters\Monitors",
 ];
 
-/// The modes OpenDesk installs, common laptop and monitor sizes. The
+/// The modes Truedesk installs, common laptop and monitor sizes. The
 /// driver's own list stops at 2560x1440 for 16:10 and has no ultra-wide.
 pub const PRESET_MODES: [(u32, u32); MODE_SLOTS] = [
     (1280, 720),
@@ -265,7 +265,7 @@ mod tests {
     #[test]
     fn displays_other_programs_added_are_never_taken() {
         let mut ledger = Ledger::default();
-        // The user had one of their own before OpenDesk added one.
+        // The user had one of their own before Truedesk added one.
         ledger.push(added(21, r"\\.\DISPLAY4", &[r"\\.\DISPLAY3"]));
         assert_eq!(ledger.check_remove(21, &present(&[r"\\.\DISPLAY3", r"\\.\DISPLAY4"])), Ok(Removal::Unplug));
         // Then they added another on top: removing now would take theirs.

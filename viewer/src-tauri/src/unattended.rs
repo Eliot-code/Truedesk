@@ -10,7 +10,7 @@ use keyring::{Entry, Error};
 #[allow(unused_imports)]
 use std::{collections::HashMap, path::{Path, PathBuf}};
 
-pub const SERVICE: &str = "opendesk";
+pub const SERVICE: &str = "truedesk";
 pub const USER: &str = "unattended";
 pub const TOTP_USER: &str = "unattended-totp";
 
@@ -59,7 +59,7 @@ pub struct MachineStore;
 
 #[cfg(windows)]
 fn machine_store_path() -> PathBuf {
-    std::env::var_os("ProgramData").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\ProgramData")).join("OpenDesk").join("secrets.json")
+    std::env::var_os("ProgramData").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\ProgramData")).join("Truedesk").join("secrets.json")
 }
 
 #[cfg(windows)]
@@ -223,9 +223,9 @@ fn keyring_failure(action: Action, what: &str, error: &Error) -> String {
     };
     log::warn!("could not {verb} {what} {preposition} the keyring: {error}");
     let reason = if matches!(error, Error::NoDefaultStore) {
-        format!("OpenDesk couldn't find a system keyring to {verb} {what}.")
+        format!("Truedesk couldn't find a system keyring to {verb} {what}.")
     } else {
-        format!("OpenDesk couldn't {verb} {what} {preposition} the system keyring.")
+        format!("Truedesk couldn't {verb} {what} {preposition} the system keyring.")
     };
     match action {
         Action::Read => format!("{reason} Until it can, connections need your approval. {}", keyring_hint()),
@@ -237,7 +237,7 @@ fn keyring_failure(action: Action, what: &str, error: &Error) -> String {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Lookup {
     Found(String),
-    /// Never saved, or removed from the keyring outside OpenDesk.
+    /// Never saved, or removed from the keyring outside Truedesk.
     Missing,
     /// The keyring itself failed; holds the message for the user.
     Unavailable(String),
@@ -394,9 +394,9 @@ impl PendingTotp {
     }
 }
 
-/// `otpauth://` URI with the account labelled `OpenDesk:<device id>`.
+/// `otpauth://` URI with the account labelled `Truedesk:<device id>`.
 pub fn otpauth_uri(device_id: &str, secret: &str) -> String {
-    format!("otpauth://totp/OpenDesk:{device_id}?secret={secret}&issuer=OpenDesk&algorithm=SHA1&digits=6&period=30")
+    format!("otpauth://totp/Truedesk:{device_id}?secret={secret}&issuer=Truedesk&algorithm=SHA1&digits=6&period=30")
 }
 
 /// QR code modules for `data` as (width, row-major dark flags).
@@ -480,7 +480,7 @@ mod tests {
     #[test]
     fn otpauth_uri_labels_account_with_device_id() {
         let uri = otpauth_uri("123456789", "ABCDEF");
-        assert!(uri.starts_with("otpauth://totp/OpenDesk:123456789?secret=ABCDEF&issuer=OpenDesk"));
+        assert!(uri.starts_with("otpauth://totp/Truedesk:123456789?secret=ABCDEF&issuer=Truedesk"));
     }
 
     #[test]
@@ -552,9 +552,9 @@ mod tests {
     fn save_failures_explain_what_to_do() {
         let store = FakeStore::broken(&[USER, TOTP_USER], no_service);
         let error = save_password(&store, "long-password-1").unwrap_err();
-        assert!(error.starts_with("OpenDesk couldn't find a system keyring to save the unattended access password."), "{error}");
+        assert!(error.starts_with("Truedesk couldn't find a system keyring to save the unattended access password."), "{error}");
         let error = save_totp_secret(&FakeStore::broken(&[TOTP_USER], locked), "SECRET").unwrap_err();
-        assert!(error.starts_with("OpenDesk couldn't save the 2FA secret to the system keyring."), "{error}");
+        assert!(error.starts_with("Truedesk couldn't save the 2FA secret to the system keyring."), "{error}");
     }
 
     #[test]
@@ -631,6 +631,6 @@ mod tests {
         assert_eq!(delete_totp_secret(&store), Ok(()));
         assert_eq!(read_totp_secret(&store), Lookup::Missing);
         let error = delete_totp_secret(&FakeStore::broken(&[TOTP_USER], locked)).unwrap_err();
-        assert!(error.starts_with("OpenDesk couldn't remove the 2FA secret from the system keyring."), "{error}");
+        assert!(error.starts_with("Truedesk couldn't remove the 2FA secret from the system keyring."), "{error}");
     }
 }

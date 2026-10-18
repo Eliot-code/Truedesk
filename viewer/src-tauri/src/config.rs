@@ -8,9 +8,9 @@ use std::{
 use crate::unattended;
 
 /// Release builds bake in the project's public relay via
-/// `OPENDESK_DEFAULT_RELAY` (set from a repo variable in release.yml); source
+/// `TRUEDESK_DEFAULT_RELAY` (set from a repo variable in release.yml); source
 /// builds default to a local development relay.
-const DEFAULT_RELAY_URL: &str = match option_env!("OPENDESK_DEFAULT_RELAY") {
+const DEFAULT_RELAY_URL: &str = match option_env!("TRUEDESK_DEFAULT_RELAY") {
     Some(url) => url,
     None => "ws://127.0.0.1:8080/ws",
 };
@@ -418,7 +418,7 @@ mod tests {
 
     fn test_dir() -> PathBuf {
         let suffix = NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("opendesk-config-{}-{suffix}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("truedesk-config-{}-{suffix}", std::process::id()));
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         path

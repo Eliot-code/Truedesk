@@ -61,7 +61,7 @@ pub struct AddedDisplay {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VirtualDisplayError {
-    /// This OS (or OS version) has no virtual displays OpenDesk can drive,
+    /// This OS (or OS version) has no virtual displays Truedesk can drive,
     /// or their driver isn't installed.
     Unsupported,
     /// The computer has as many virtual displays as it can take.

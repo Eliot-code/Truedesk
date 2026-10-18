@@ -90,14 +90,14 @@ describe("Home", () => {
     rerender(<Home status="online" onConnect={vi.fn()} />);
     expect(screen.queryByRole("button", { name: "Start hosting" })).toBeNull();
   });
-  it("offers Quit only when closing the window keeps OpenDesk running", async () => {
+  it("offers Quit only when closing the window keeps Truedesk running", async () => {
     render(<Home status="online" onConnect={vi.fn()} />);
     await screen.findByText("123456789");
-    expect(screen.queryByRole("button", { name: "Quit OpenDesk" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Quit Truedesk" })).toBeNull();
     cleanup();
     vi.mocked(api.closeKeepsRunning).mockResolvedValue(true);
     render(<Home status="online" onConnect={vi.fn()} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Quit OpenDesk" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Quit Truedesk" }));
     expect(api.quitApp).toHaveBeenCalledOnce();
   });
   it("explains relays that refuse the ID", async () => {
@@ -195,7 +195,7 @@ describe("Home", () => {
 
   it("enables 2FA only after a code from the authenticator is confirmed", async () => {
     vi.mocked(api.getUnattendedStatus).mockResolvedValue({ enabled: true, has_password: true, twofa_enabled: false, ready: true, problem: null });
-    vi.mocked(api.setUnattended2fa).mockResolvedValue({ uri: "otpauth://totp/OpenDesk:123456789?secret=JBSWY3DPEHPK3PXP&issuer=OpenDesk", secret: "JBSWY3DPEHPK3PXP", qr_width: 2, qr_modules: [true, false, false, true] });
+    vi.mocked(api.setUnattended2fa).mockResolvedValue({ uri: "otpauth://totp/Truedesk:123456789?secret=JBSWY3DPEHPK3PXP&issuer=Truedesk", secret: "JBSWY3DPEHPK3PXP", qr_width: 2, qr_modules: [true, false, false, true] });
     vi.mocked(api.confirmUnattended2fa).mockRejectedValueOnce("invalid 2FA code").mockResolvedValueOnce({ enabled: true, has_password: true, twofa_enabled: true, ready: true, problem: null });
     const notify = vi.fn();
     render(<NotifyContext.Provider value={notify}><Home status="online" onConnect={vi.fn()} /></NotifyContext.Provider>);
@@ -239,7 +239,7 @@ describe("Home", () => {
   });
 
   describe("start at sign-in", () => {
-    const toggle = () => screen.getByRole("checkbox", { name: "Start OpenDesk when I sign in" }) as HTMLInputElement;
+    const toggle = () => screen.getByRole("checkbox", { name: "Start Truedesk when I sign in" }) as HTMLInputElement;
 
     it("stays disabled with a hint until unattended access is saved", async () => {
       render(<Home status="online" onConnect={vi.fn()} />);
@@ -255,7 +255,7 @@ describe("Home", () => {
       fireEvent.click(toggle());
       await waitFor(() => expect(toggle().checked).toBe(true));
       expect(api.setStartAtSignIn).toHaveBeenCalledWith(true);
-      expect(screen.getByText(/use Quit OpenDesk to stop it/)).toBeTruthy();
+      expect(screen.getByText(/use Quit Truedesk to stop it/)).toBeTruthy();
     });
 
     it("shows the state the OS reports and can always be turned off", async () => {
@@ -290,9 +290,9 @@ describe("Home", () => {
   });
 
   describe("when the system keyring fails", () => {
-    const keyringLocked = "OpenDesk couldn't read the unattended access password from the system keyring. Until it can, connections need your approval. Unlock your login keychain in Keychain Access, then try again.";
+    const keyringLocked = "Truedesk couldn't read the unattended access password from the system keyring. Until it can, connections need your approval. Unlock your login keychain in Keychain Access, then try again.";
     const broken: api.UnattendedStatus = { enabled: true, has_password: true, twofa_enabled: false, ready: false, problem: keyringLocked };
-    const startToggle = () => screen.getByRole("checkbox", { name: "Start OpenDesk when I sign in" }) as HTMLInputElement;
+    const startToggle = () => screen.getByRole("checkbox", { name: "Start Truedesk when I sign in" }) as HTMLInputElement;
 
     it("says what's wrong and keeps start at sign-in off", async () => {
       vi.mocked(api.getUnattendedStatus).mockResolvedValue(broken);
@@ -308,12 +308,12 @@ describe("Home", () => {
       vi.mocked(api.getUnattendedStatus).mockResolvedValue(broken);
       vi.mocked(api.getStartAtSignIn).mockResolvedValue(true);
       render(<Home status="online" onConnect={vi.fn()} />);
-      expect(await screen.findByText(/isn't working, so OpenDesk will just open its window at sign-in/)).toBeTruthy();
+      expect(await screen.findByText(/isn't working, so Truedesk will just open its window at sign-in/)).toBeTruthy();
       expect(startToggle().disabled).toBe(false);
     });
 
     it("shows the keyring error when saving and reverts the toggle", async () => {
-      const saveFailed = "OpenDesk couldn't find a system keyring to save the unattended access password. Install and unlock a keyring such as GNOME Keyring or KWallet, then try again.";
+      const saveFailed = "Truedesk couldn't find a system keyring to save the unattended access password. Install and unlock a keyring such as GNOME Keyring or KWallet, then try again.";
       vi.mocked(api.setUnattendedAccess).mockRejectedValue(saveFailed);
       const notify = vi.fn();
       render(<NotifyContext.Provider value={notify}><Home status="online" onConnect={vi.fn()} /></NotifyContext.Provider>);

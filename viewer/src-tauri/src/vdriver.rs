@@ -51,7 +51,7 @@ Permission is granted to anyone to use this software for any purpose subject to 
 
 /// Starts the elevated helper: `<exe> HELPER_ARG install <zip>` or
 /// `<exe> HELPER_ARG uninstall`.
-pub(crate) const HELPER_ARG: &str = "--opendesk-virtual-display-driver";
+pub(crate) const HELPER_ARG: &str = "--truedesk-virtual-display-driver";
 
 /// Helper exit codes.
 mod exit {
@@ -243,7 +243,7 @@ mod platform {
 
     pub(super) fn install(bytes: &[u8]) -> Result<InstallResult, String> {
         // Handed to the elevated copy by path; it checks the hash itself.
-        let zip = std::env::temp_dir().join(format!("{}.zip", unique("opendesk-usbmmidd")));
+        let zip = std::env::temp_dir().join(format!("{}.zip", unique("truedesk-usbmmidd")));
         std::fs::write(&zip, bytes).map_err(|error| format!("Couldn't save the download: {error}"))?;
         let result = elevate(&format!("{HELPER_ARG} install \"{}\"", zip.display()));
         let _ = std::fs::remove_file(&zip);
@@ -274,7 +274,7 @@ mod platform {
         // Under %SystemRoot%\Temp, created fresh with an administrators-only
         // ACL: CreateDirectoryW fails if anything got there first.
         let root = std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
-        let dir = root.join("Temp").join(unique("opendesk-usbmmidd"));
+        let dir = root.join("Temp").join(unique("truedesk-usbmmidd"));
         if driver::create_private_dir(&dir).is_err() {
             return exit::NO_FOLDER;
         }
@@ -326,7 +326,7 @@ mod tests {
             ("usbmmidd_v2/x64/usbmmIdd.dll", b"dll"),
             ("usbmmidd_v2/Win32/usbmmIdd.dll", b"dll32"),
         ]);
-        let dir = std::env::temp_dir().join(format!("opendesk-vdriver-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("truedesk-vdriver-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let inf = unpack(&zip, &dir).unwrap();
@@ -340,15 +340,15 @@ mod tests {
         assert!(unpack(&missing, &std::env::temp_dir()).unwrap_err().contains("usbmmidd.cat"));
     }
 
-    /// Against the real download: `OPENDESK_USBMMIDD_ZIP=path/to/usbmmidd_v2.zip
+    /// Against the real download: `TRUEDESK_USBMMIDD_ZIP=path/to/usbmmidd_v2.zip
     /// cargo test real_package -- --ignored`
     #[test]
     #[ignore = "needs the downloaded package"]
     fn real_package_verifies_and_unpacks() {
-        let path = std::env::var_os("OPENDESK_USBMMIDD_ZIP").expect("set OPENDESK_USBMMIDD_ZIP");
+        let path = std::env::var_os("TRUEDESK_USBMMIDD_ZIP").expect("set TRUEDESK_USBMMIDD_ZIP");
         let bytes = std::fs::read(path).unwrap();
         verify(&bytes).unwrap();
-        let dir = std::env::temp_dir().join(format!("opendesk-vdriver-real-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("truedesk-vdriver-real-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let inf = unpack(&bytes, &dir).unwrap();
         // The INF is UTF-16 and names the catalog and hardware id.

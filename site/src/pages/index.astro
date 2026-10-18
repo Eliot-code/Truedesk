@@ -10,7 +10,7 @@ const platforms = [
 ] as const;
 ---
 <Site
-  title="OpenDesk: self-hosted, end-to-end encrypted remote desktop"
+  title="Truedesk: self-hosted, end-to-end encrypted remote desktop"
   description="Open-source remote desktop for Windows, macOS, Linux and the browser. You run the relay; the screen and input are encrypted end to end so the relay can't read them."
 >
   <section class="hero">
@@ -37,7 +37,7 @@ const platforms = [
           <div class="mock__bar"><span></span><span></span><span></span></div>
           <div class="mock__body mock__home">
             <div class="mock__apptop">
-              <span class="mock__brand"><svg class="mock__glyph" viewBox="0 0 48 48" aria-hidden="true"><g fill="none" stroke-width="6"><circle cx="19" cy="29" r="13" stroke="#22d3ee" /><circle cx="29" cy="19" r="13" stroke="#f5b921" /></g><circle cx="29" cy="19" r="5" fill="#22d3ee" /></svg>OpenDesk</span>
+              <span class="mock__brand"><svg class="mock__glyph" viewBox="0 0 48 48" aria-hidden="true"><g fill="none" stroke-width="6"><circle cx="19" cy="29" r="13" stroke="#22d3ee" /><circle cx="29" cy="19" r="13" stroke="#f5b921" /></g><circle cx="29" cy="19" r="5" fill="#22d3ee" /></svg>Truedesk</span>
               <span class="mock__online"><span class="mock__brand-dot"></span>Online</span>
             </div>
             <div class="mock__card">
@@ -224,7 +224,7 @@ const platforms = [
       <div>
         <h2 id="limits-title">Before you rely on it</h2>
         <ul class="plain-list">
-          <li>OpenDesk is in beta.</li>
+          <li>Truedesk is in beta.</li>
           <li>The browser viewer always goes through the relay, not a direct connection, and can't host.</li>
           <li>Linux hosts on Wayland have limited input support.</li>
           <li>The relay can't read your session, but it does see who connects to whom, when, and how much data flows. <a href="/docs/security/">Security model</a></li>
@@ -233,8 +233,8 @@ const platforms = [
       <div>
         <h2>Run a relay in a few minutes</h2>
         <p>On any server with Docker and a DNS name:</p>
-        <pre class="code"><code>git clone https://github.com/treeot/opendesk.git
-cd opendesk
+        <pre class="code"><code>git clone https://github.com/Eliot-code/truedesk.git
+cd truedesk
 DOMAIN=relay.example.com docker compose up -d</code></pre>
         <p>Then set each app's relay to <code>wss://relay.example.com/ws</code>. <a href="/docs/self-hosting/">Self-hosting guide</a></p>
       </div>

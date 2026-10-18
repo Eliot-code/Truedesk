@@ -13,10 +13,10 @@ mod platform {
     use std::{ffi::OsString, path::Path, sync::mpsc, time::Duration};
     use windows_service::{service::{ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus as WinServiceStatus, ServiceType}, service_control_handler::{self, ServiceControlHandlerResult}};
 
-    pub const SERVICE_NAME: &str = "OpenDeskSignIn";
-    pub const SERVICE_ARG: &str = "--opendesk-service";
-    pub const SERVICE_HOST_ARG: &str = "--opendesk-service-host";
-    const DATA_DIR_ARG: &str = "--opendesk-data-dir";
+    pub const SERVICE_NAME: &str = "TruedeskSignIn";
+    pub const SERVICE_ARG: &str = "--truedesk-service";
+    pub const SERVICE_HOST_ARG: &str = "--truedesk-service-host";
+    const DATA_DIR_ARG: &str = "--truedesk-data-dir";
 
     pub fn args() -> Vec<OsString> { std::env::args_os().skip(1).collect() }
     pub fn is_service_host_process() -> bool { args().iter().any(|arg| arg == SERVICE_HOST_ARG) }
@@ -26,7 +26,7 @@ mod platform {
 
     pub fn run_service_process() -> bool {
         if !args().iter().any(|arg| arg == SERVICE_ARG) { return false; }
-        if let Err(error) = windows_service::service_dispatcher::start(SERVICE_NAME, ffi_service_main) { log::error!("could not start OpenDesk service dispatcher: {error}"); }
+        if let Err(error) = windows_service::service_dispatcher::start(SERVICE_NAME, ffi_service_main) { log::error!("could not start Truedesk service dispatcher: {error}"); }
         true
     }
 
@@ -45,12 +45,12 @@ mod platform {
         let joined = args.iter().map(|arg| format!("'{}'", arg.replace('\'', "''"))).collect::<Vec<_>>().join(",");
         let script = format!("Start-Process -FilePath 'sc.exe' -Verb RunAs -Wait -ArgumentList @({joined})");
         let status = Command::new("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command", &script]).status().map_err(|e| e.to_string())?;
-        status.success().then_some(()).ok_or_else(|| "Windows did not approve the OpenDesk service change".into())
+        status.success().then_some(()).ok_or_else(|| "Windows did not approve the Truedesk service change".into())
     }
 
     pub fn install(data_dir: &Path) -> Result<ServiceStatus, String> {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        let bin_path = format!(r#""{}" {} --opendesk-data-dir "{}""#, exe.display(), SERVICE_ARG, data_dir.display());
+        let bin_path = format!(r#""{}" {} --truedesk-data-dir "{}""#, exe.display(), SERVICE_ARG, data_dir.display());
         elevated_sc(&["create".into(), SERVICE_NAME.into(), "binPath=".into(), bin_path, "start=".into(), "auto".into(), "obj=".into(), "LocalSystem".into()])?;
         Ok(status())
     }
@@ -68,7 +68,7 @@ mod platform {
 
     windows_service::define_windows_service!(ffi_service_main, service_main);
 
-    fn service_main(_arguments: Vec<OsString>) { if let Err(error) = service_loop() { log::error!("OpenDesk service stopped: {error}"); } }
+    fn service_main(_arguments: Vec<OsString>) { if let Err(error) = service_loop() { log::error!("Truedesk service stopped: {error}"); } }
 
     fn service_loop() -> Result<(), windows_service::Error> {
         let (stop_tx, stop_rx) = mpsc::channel();
@@ -104,7 +104,7 @@ mod platform {
         if !duplicated { return Err("could not duplicate the SYSTEM token".into()); }
         if unsafe { SetTokenInformation(token, TokenSessionId, (&session as *const u32).cast(), std::mem::size_of::<u32>() as u32) } == 0 { unsafe { CloseHandle(token); } return Err("could not assign the console session".into()); }
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        let mut command: Vec<u16> = format!("\"{}\" --opendesk-service-host --opendesk-data-dir \"{}\"", exe.display(), data_dir.display()).encode_utf16().chain(std::iter::once(0)).collect();
+        let mut command: Vec<u16> = format!("\"{}\" --truedesk-service-host --truedesk-data-dir \"{}\"", exe.display(), data_dir.display()).encode_utf16().chain(std::iter::once(0)).collect();
         let mut desktop: Vec<u16> = "winsta0\\default".encode_utf16().chain(std::iter::once(0)).collect();
         let startup = STARTUPINFOW { cb: std::mem::size_of::<STARTUPINFOW>() as u32, lpDesktop: desktop.as_mut_ptr(), ..Default::default() };
         let mut process = PROCESS_INFORMATION::default();

@@ -481,7 +481,7 @@ pub(crate) fn should_stop_hosting(ended_by_signal: bool, disconnected: bool) -> 
 fn display_notice(notice: host_core::roles::DisplayNotice) -> &'static str {
     use host_core::roles::DisplayNotice;
     match notice {
-        DisplayNotice::HeadlessAdded => "No screen is connected, so OpenDesk added a virtual display for this session.",
+        DisplayNotice::HeadlessAdded => "No screen is connected, so Truedesk added a virtual display for this session.",
         DisplayNotice::ViewerAdded => "The viewer added a virtual display. It goes away when the session ends.",
         DisplayNotice::ViewerRemoved => "The viewer removed a virtual display.",
     }
@@ -661,7 +661,7 @@ pub(crate) fn spawn_host_thread(
 #[tauri::command]
 pub(crate) fn start_hosting(state: tauri::State<'_, AppState>, app: AppHandle) -> Result<(), String> {
     if !crate::windows_service::should_run_user_host(crate::windows_service::status().running) {
-        log::info!("hosted by the OpenDesk service; user host is standing down");
+        log::info!("hosted by the Truedesk service; user host is standing down");
         emit_host_status(&app, "offline");
         return Ok(());
     }

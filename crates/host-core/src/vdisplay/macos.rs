@@ -99,7 +99,7 @@ impl CgVirtualDisplays {
         if requests.is_none() {
             let (tx, rx) = mpsc::channel();
             let spawned = std::thread::Builder::new()
-                .name("opendesk-virtual-display".into())
+                .name("truedesk-virtual-display".into())
                 .spawn(move || serve(api, &rx));
             if let Err(error) = spawned {
                 log::warn!("could not start the virtual display thread: {error}");
@@ -199,7 +199,7 @@ fn create(api: Api, spec: &DisplaySpec) -> Result<(u32, Retained<AnyObject>), Vi
     // The mode is in points; maxPixels bounds the backing store.
     let (points_w, points_h) = (spec.width / scale, spec.height / scale);
     let millimeters = |points: u32| f64::from(points) / POINTS_PER_INCH * 25.4;
-    let name = NSString::from_str("OpenDesk Virtual Display");
+    let name = NSString::from_str("Truedesk Virtual Display");
     let product = PRODUCT_BASE + NEXT_PRODUCT.fetch_add(1, Ordering::Relaxed) % PRODUCT_POOL;
     // SAFETY: Api::load checked that every class exists and implements
     // each selector below; argument types match the private header.

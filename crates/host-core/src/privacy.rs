@@ -103,7 +103,7 @@ mod windows_impl {
         fn show() -> Result<Self, String> {
             let (ready_tx, ready_rx) = mpsc::channel::<Result<isize, String>>();
             let thread = std::thread::Builder::new()
-                .name("opendesk-privacy-cover".into())
+                .name("truedesk-privacy-cover".into())
                 .spawn(move || cover_thread(&ready_tx))
                 .map_err(|error| error.to_string())?;
             match ready_rx.recv() {
@@ -137,7 +137,7 @@ mod windows_impl {
                 Ok(instance) => instance,
                 Err(error) => { let _ = ready.send(Err(error.to_string())); return; }
             };
-            let class_name = w!("OpenDeskPrivacyCover");
+            let class_name = w!("TruedeskPrivacyCover");
             let brush: HBRUSH = {
                 let solid = CreateSolidBrush(COLORREF(0));
                 if solid.is_invalid() { HBRUSH(GetStockObject(BLACK_BRUSH).0) } else { solid }
@@ -158,7 +158,7 @@ mod windows_impl {
             let hwnd = match CreateWindowExW(
                 WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TOOLWINDOW,
                 class_name,
-                w!("OpenDesk privacy"),
+                w!("Truedesk privacy"),
                 WS_POPUP,
                 x, y, width.max(1), height.max(1),
                 None, None, Some(instance.into()), None,

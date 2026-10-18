@@ -1,9 +1,9 @@
 ---
 title: Updates
-description: How OpenDesk checks for, downloads and installs new versions.
+description: How Truedesk checks for, downloads and installs new versions.
 ---
 
-OpenDesk checks for a new version when it starts and every six hours after
+Truedesk checks for a new version when it starts and every six hours after
 that. When there is one, a banner appears in the corner of the home screen:
 
 > Update available: v0.1.0-beta.6 · **Install and restart**
@@ -22,7 +22,7 @@ Update both computers. Most changes affect both sides of a session.
 
 ## Per platform
 
-- **macOS** replaces `/Applications/OpenDesk.app` in place. Because the
+- **macOS** replaces `/Applications/Truedesk.app` in place. Because the
   builds aren't signed with an Apple Developer ID, macOS may forget the
   Screen Recording and Accessibility permissions after an update. The
   **Permissions** screen opens at launch when that happens; see
@@ -36,4 +36,4 @@ Update both computers. Most changes affect both sides of a session.
 
 Versions up to v0.1.0-beta.4 don't have the updater. Install a newer release
 by hand once; it updates itself from then on. The releases, with their
-changelogs, are on the [releases page](https://github.com/treeot/opendesk/releases).
+changelogs, are on the [releases page](https://github.com/Eliot-code/truedesk/releases).

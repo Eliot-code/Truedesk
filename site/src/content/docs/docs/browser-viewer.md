@@ -1,16 +1,16 @@
 ---
 title: Browser viewer
-description: Control a computer running OpenDesk from a web browser, without installing anything. What it can do, what it can't, and what you're trusting.
+description: Control a computer running Truedesk from a web browser, without installing anything. What it can do, what it can't, and what you're trusting.
 ---
 
 The [browser viewer](/connect/) lets you control a computer from a browser,
 for example on a borrowed laptop where you can't install anything. The
-computer you connect to still needs the OpenDesk app to host.
+computer you connect to still needs the Truedesk app to host.
 
 ## Connect
 
-1. Open [opendesk.treeot.dev/connect/](/connect/).
-2. Enter the **Device ID** and **Password** shown in OpenDesk on the other
+1. Open `/connect/` on your Truedesk website.
+2. Enter the **Device ID** and **Password** shown in Truedesk on the other
    computer. If it asks for one, add the **2FA code**.
 3. Click **Connect**, and wait for the other side to click **Allow** (unless
    it has [unattended access](/docs/unattended/) on).
@@ -53,5 +53,5 @@ The difference is where that code comes from. GitHub Pages serves the page
 fresh on every visit, so each time you load it you're trusting GitHub and
 this repository, not a binary you built or checked once. If that matters for
 your setup, use the desktop app, or build the browser viewer yourself and
-host it; the [README](https://github.com/treeot/opendesk#browser-viewer)
+host it; the [README](https://github.com/Eliot-code/truedesk#browser-viewer)
 explains how.

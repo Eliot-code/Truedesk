@@ -19,7 +19,7 @@ describe("Permissions", () => {
     expect(await screen.findByText("Granted")).toBeTruthy();
     expect(screen.getByText("Required")).toBeTruthy();
     expect(screen.getByText("1 of 2 granted")).toBeTruthy();
-    expect(screen.getByText(/remove it with −, add it again with \+, then restart OpenDesk/)).toBeTruthy();
+    expect(screen.getByText(/remove it with −, add it again with \+, then restart Truedesk/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Continue" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Skip for now" }));
     fireEvent.click(screen.getByRole("button", { name: "Back" }));

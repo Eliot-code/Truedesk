@@ -82,7 +82,7 @@ export default function IncomingRequest({ peerId, known = false, onResolved }: I
           <button ref={rejectRef} className="ghost-button" type="button" disabled={busy} onClick={() => void resolve(false)}>Reject</button>
           <button className="primary-button incoming-allow" type="button" disabled={busy} onClick={() => void resolve(true)}>Allow</button>
         </div>
-        <p className="incoming-footer">End-to-end encrypted — OpenDesk never sees your screen.</p>
+        <p className="incoming-footer">End-to-end encrypted — Truedesk never sees your screen.</p>
       </section>
     </div>
   );
