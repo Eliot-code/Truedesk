@@ -8,6 +8,10 @@ pub const VIEWER_RECONNECT_WINDOW: Duration = Duration::from_secs(30);
 /// Upper bound for the viewer's per-attempt backoff.
 pub const VIEWER_BACKOFF_CAP: Duration = Duration::from_secs(4);
 
+/// How long the viewer keeps retrying when it knows the host is restarting
+/// (it told us so). A reboot takes far longer than a transient drop.
+pub const VIEWER_RESTART_WINDOW: Duration = Duration::from_secs(180);
+
 /// First delay after a failed host registration; doubles per consecutive
 /// failure up to [`HOST_REREGISTER_MAX_DELAY`].
 pub const HOST_REREGISTER_BASE_DELAY: Duration = Duration::from_millis(500);
@@ -41,7 +45,13 @@ pub fn backoff_delay(attempt: u32) -> Duration {
 /// first failure of the current outage) has used up the reconnect window. The
 /// delay is clamped so the final attempt still starts inside the window.
 pub fn viewer_retry_delay(attempt: u32, elapsed: Duration) -> Option<Duration> {
-    let remaining = VIEWER_RECONNECT_WINDOW.checked_sub(elapsed).filter(|remaining| !remaining.is_zero())?;
+    viewer_retry_delay_within(attempt, elapsed, VIEWER_RECONNECT_WINDOW)
+}
+
+/// Like [`viewer_retry_delay`] but against an explicit window, so a viewer that
+/// knows the host is restarting can wait the longer [`VIEWER_RESTART_WINDOW`].
+pub fn viewer_retry_delay_within(attempt: u32, elapsed: Duration, window: Duration) -> Option<Duration> {
+    let remaining = window.checked_sub(elapsed).filter(|remaining| !remaining.is_zero())?;
     Some(backoff_delay(attempt).min(remaining))
 }
 
@@ -270,6 +280,17 @@ mod tests {
         assert_eq!(backoff_delay(3), Duration::from_secs(4));
         assert_eq!(backoff_delay(4), Duration::from_secs(4));
         assert_eq!(backoff_delay(u32::MAX), Duration::from_secs(4));
+    }
+
+    #[test]
+    fn the_restart_window_keeps_retrying_well_past_the_transient_one() {
+        // Just after the transient window: a normal drop gives up, a restart
+        // keeps going.
+        let past_transient = VIEWER_RECONNECT_WINDOW + Duration::from_secs(1);
+        assert_eq!(viewer_retry_delay_within(9, past_transient, VIEWER_RECONNECT_WINDOW), None);
+        assert!(viewer_retry_delay_within(9, past_transient, VIEWER_RESTART_WINDOW).is_some());
+        // The restart window itself still ends.
+        assert_eq!(viewer_retry_delay_within(9, VIEWER_RESTART_WINDOW, VIEWER_RESTART_WINDOW), None);
     }
 
     #[test]

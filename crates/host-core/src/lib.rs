@@ -7,6 +7,7 @@ pub mod filexfer;
 pub mod inject;
 pub mod relay_client;
 pub mod reconnect;
+pub mod restart;
 pub mod roles;
 pub mod secure_attention;
 #[cfg(target_os = "windows")]

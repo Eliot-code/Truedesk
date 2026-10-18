@@ -696,6 +696,12 @@ where
     if aux_supported {
         reliable.sender().send_frame(Tag::Control, &seal_control(&control_sealer, &Control::MultiMonitorSupport { max: AUX_STREAM_MAX })).await?;
     }
+    // Only when unattended is on (so the host comes back hosting after the
+    // reboot) and the platform can restart without a prompt. Old viewers ignore
+    // it and hide the restart control.
+    if unattended_enabled && crate::restart::available() {
+        reliable.sender().send_frame(Tag::Control, &seal_control(&control_sealer, &Control::RestartSupport)).await?;
+    }
     let path = transport.path();
     let (transport_tx, transport_rx) = transport.into_split();
     if let Some(ready) = data_ready {
@@ -810,6 +816,19 @@ where
                     Some(Control::RequestSecureAttention) => {
                         if let Err(error) = crate::secure_attention::deliver() {
                             log::debug!("ignoring secure attention request: {error}");
+                        }
+                    }
+                    Some(Control::RequestRestart) => {
+                        // Only honor it on the same terms it was advertised, so a
+                        // viewer can't reboot a host that won't come back.
+                        if unattended_enabled && crate::restart::available() {
+                            // Tell the viewer to expect a long gap before we return.
+                            let _ = sender.send_frame(Tag::Control, &seal_control(&control_sealer, &Control::Restarting)).await;
+                            if let Err(error) = crate::restart::restart() {
+                                log::warn!("host restart request failed: {error}");
+                            }
+                        } else {
+                            log::debug!("ignoring restart request: unattended off or unsupported platform");
                         }
                     }
                     Some(Control::OpenMonitorStream { id }) => {
@@ -1859,7 +1878,8 @@ async fn run_viewer_media_loop_with_control(
                 match Control::from_bytes(&plaintext) {
                     Some(Control::Bye { .. }) => return Err(crate::reconnect::HOST_ENDED_MESSAGE.into()),
                     Some(Control::MonitorList { .. } | Control::VirtualDisplaySupport { .. } | Control::VirtualDisplayAdded { .. } | Control::VirtualDisplayRefused { .. } | Control::SecureAttentionSupport
-                        | Control::MultiMonitorSupport { .. } | Control::MonitorStreamOpened { .. } | Control::MonitorStreamClosed { .. } | Control::MonitorStreamRefused { .. }) => {
+                        | Control::MultiMonitorSupport { .. } | Control::MonitorStreamOpened { .. } | Control::MonitorStreamClosed { .. } | Control::MonitorStreamRefused { .. }
+                        | Control::RestartSupport | Control::Restarting) => {
                         if let Some(sink) = &monitor_sink { let _ = sink.send(plaintext).await; }
                     }
                     Some(Control::Pong { sent_us }) if relay_ping.is_some() => {

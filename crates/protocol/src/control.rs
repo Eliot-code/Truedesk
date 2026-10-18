@@ -114,6 +114,18 @@ pub enum Control {
     Presence { ids: Vec<String> },
     /// Relay → viewer: the subset of a `Presence` query whose hosts are online.
     PresenceResult { online: Vec<String> },
+    /// Host → viewer, after the first `MonitorList`: this host can restart the
+    /// computer and come back hosting (unattended access on, and the platform
+    /// can reboot without a prompt). Hosts that can't never send it, so viewers
+    /// hide the restart control.
+    RestartSupport,
+    /// Viewer → host: restart the host computer, then let me reconnect. Only
+    /// sent to hosts that sent `RestartSupport`.
+    RequestRestart,
+    /// Host → viewer: I am about to restart; expect a longer gap before I come
+    /// back. The viewer keeps retrying for the restart window instead of the
+    /// short transient one.
+    Restarting,
 }
 
 /// Most IDs one `Presence` query may ask about.
@@ -190,6 +202,9 @@ mod tests {
             Control::SetInputMonitor { id: 7 },
             Control::Presence { ids: vec!["123456789".into(), "987654321".into()] },
             Control::PresenceResult { online: vec!["123456789".into()] },
+            Control::RestartSupport,
+            Control::RequestRestart,
+            Control::Restarting,
         ] {
             assert_eq!(Control::from_bytes(&c.to_bytes()), Some(c));
         }
