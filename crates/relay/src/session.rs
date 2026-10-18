@@ -51,6 +51,9 @@ pub enum Bridge {
     HostRegistered { peer_id: String, notify_rx: oneshot::Receiver<(Outbound, CloseOutbound, String)> },
     /// This connection is a viewer bridged to the given host sender.
     ViewerPaired { host_tx: Outbound, host_close_tx: CloseOutbound, requester_id: String, target_id: String },
+    /// This connection asked which IDs are online. The relay answers and closes
+    /// it; no pairing happens.
+    Presence { online: Vec<String> },
 }
 
 /// Reads the classification of the first frame. Returns `None` when the
@@ -80,8 +83,24 @@ pub fn classify(msg: &[u8], me: Outbound, me_close_tx: CloseOutbound, reg: &Regi
             let _ = notify.send((me, me_close_tx, peer_id.clone()));
             Ok(Bridge::ViewerPaired { host_tx, host_close_tx, requester_id: peer_id, target_id: target })
         }
+        Control::Presence { ids } => {
+            // Bounded and valid-only, so this cannot scan the ID space: each
+            // query costs one rate-limited connection and asks about at most
+            // MAX_PRESENCE_IDS well-formed IDs.
+            let online = ids
+                .into_iter()
+                .take(protocol::control::MAX_PRESENCE_IDS)
+                .filter(|id| valid_peer_id(id) && reg.is_online(id))
+                .collect();
+            Ok(Bridge::Presence { online })
+        }
         _ => Err(ClassifyError::InvalidControl),
     }
+}
+
+/// The `PresenceResult` frame sent in answer to a `Presence` query.
+pub fn presence_frame(online: Vec<String>) -> Vec<u8> {
+    frame::wrap(Tag::Control, &Control::PresenceResult { online }.to_bytes())
 }
 
 /// Builds the `error` Control frame sent before closing a rejected socket.
@@ -126,5 +145,38 @@ mod tests {
         assert!(decode_token(&"AB".repeat(32)).is_none());
         assert!(decode_token(&"gg".repeat(32)).is_none());
         assert!(decode_token("00").is_none());
+    }
+
+    #[test]
+    fn presence_frame_carries_the_online_ids() {
+        let bytes = super::presence_frame(vec!["123456789".into()]);
+        let (tag, body) = frame::unwrap(&bytes).unwrap();
+        assert_eq!(tag, Tag::Control);
+        assert_eq!(Control::from_bytes(body), Some(Control::PresenceResult { online: vec!["123456789".into()] }));
+    }
+
+    #[test]
+    fn presence_reports_only_registered_online_ids() {
+        use crate::registry::{Registration, Registry, RegistryConfig};
+        use std::net::{IpAddr, Ipv4Addr};
+        use tokio::sync::{mpsc, oneshot, watch};
+
+        let source = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
+        let reg = Registry::new(RegistryConfig::default());
+        let (htx, _hrx) = mpsc::channel(1);
+        let (hclose, _hclose_rx) = watch::channel(None);
+        let (hnotify, _hwait) = oneshot::channel();
+        assert!(matches!(reg.register("123456789".into(), [1u8; 32], source, htx, hclose, hnotify), Registration::Accepted));
+
+        // Asks about the online id, an offline id, and a malformed one.
+        let query = frame::wrap(Tag::Control, &Control::Presence {
+            ids: vec!["123456789".into(), "987654321".into(), "bad".into()],
+        }.to_bytes());
+        let (me, _me_rx) = mpsc::channel(1);
+        let (me_close, _me_close_rx) = watch::channel(None);
+        match super::classify(&query, me, me_close, &reg, source).expect("presence classifies") {
+            super::Bridge::Presence { online } => assert_eq!(online, vec!["123456789".to_string()]),
+            _ => panic!("expected a presence bridge"),
+        }
     }
 }

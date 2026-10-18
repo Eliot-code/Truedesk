@@ -76,6 +76,36 @@ pub async fn register(
     .await
 }
 
+/// Ask the first reachable relay which of `ids` have a host online right now.
+/// Opens a short-lived socket, sends one `Presence` query, and returns the
+/// online subset. A missing or malformed answer resolves to an empty list.
+pub async fn query_presence(urls: &[String], ids: &[String]) -> Result<Vec<String>, String> {
+    use futures_util::{SinkExt, StreamExt};
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (_, mut ws) = connect_best(urls).await?;
+    let query = Control::Presence { ids: ids.to_vec() };
+    ws.send(Message::Binary(frame::wrap(Tag::Control, &query.to_bytes()).into()))
+        .await
+        .map_err(|error| error.to_string())?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match tokio::time::timeout_at(deadline, ws.next()).await.map_err(|_| "presence query timed out".to_string())? {
+            Some(Ok(Message::Binary(bytes))) => {
+                return match frame::unwrap(&bytes).and_then(|(tag, body)| (tag == Tag::Control).then(|| Control::from_bytes(body)).flatten()) {
+                    Some(Control::PresenceResult { online }) => Ok(online),
+                    // Any other answer (e.g. an error frame) means none are known online.
+                    _ => Ok(Vec::new()),
+                };
+            }
+            Some(Ok(_)) => continue,
+            Some(Err(error)) => return Err(error.to_string()),
+            None => return Ok(Vec::new()),
+        }
+    }
+}
+
 /// A host registration that a viewer has paired with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pairing {

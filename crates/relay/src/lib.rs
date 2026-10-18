@@ -348,6 +348,14 @@ async fn handle(socket: WebSocket, state: RelayState, addr: IpAddr, guard: Optio
             log_event("pairing_success", addr, "viewer");
             (host_tx, host_close_tx, None)
         }
+        Ok(Bridge::Presence { online }) => {
+            // Answer the query, then close: a presence socket never pairs.
+            let _ = my_tx.send(session::presence_frame(online)).await;
+            let _ = close_tx.send(Some(CloseFrame { code: 1000, reason: "presence".into() }));
+            log_event("connection_close", addr, "presence");
+            let _ = tokio::time::timeout(Duration::from_secs(2), writer).await;
+            return;
+        }
         Ok(Bridge::HostRegistered { peer_id, notify_rx }) => {
             let pairing = tokio::time::timeout(state.config.pair_timeout, notify_rx);
             tokio::pin!(pairing);

@@ -200,6 +200,12 @@ impl Registry {
 
     pub fn binding_count(&self) -> usize { self.bindings.load(Ordering::Relaxed) }
 
+    /// Whether a host for `id` is connected right now (parked or in a session).
+    /// A lease kept for an offline host does not count as online.
+    pub fn is_online(&self, id: &str) -> bool {
+        self.hosts.get(id).is_some_and(|state| state.online())
+    }
+
     /// Drops offline bindings whose lease has expired and rate buckets that
     /// have refilled.
     pub fn sweep(&self, now: Instant) -> SweepStats {

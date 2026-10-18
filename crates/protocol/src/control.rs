@@ -107,7 +107,17 @@ pub enum Control {
     /// clicks and keys land on its own monitor; the main view sends it to take
     /// input back. Unlike `SelectMonitor`, it never switches capture.
     SetInputMonitor { id: u32 },
+    /// Viewer → relay as a first message: which of these IDs have a host
+    /// online right now. The relay answers `PresenceResult` and closes. It is
+    /// rate-limited like any connection and the list is capped, so it cannot be
+    /// used to scan the ID space cheaply.
+    Presence { ids: Vec<String> },
+    /// Relay → viewer: the subset of a `Presence` query whose hosts are online.
+    PresenceResult { online: Vec<String> },
 }
+
+/// Most IDs one `Presence` query may ask about.
+pub const MAX_PRESENCE_IDS: usize = 50;
 
 /// `MonitorStreamRefused` codes.
 pub const MONITOR_STREAM_LIMIT: &str = "limit";
@@ -178,6 +188,8 @@ mod tests {
             Control::MonitorStreamClosed { id: 7 },
             Control::MonitorStreamRefused { id: 7, code: MONITOR_STREAM_LIMIT.into() },
             Control::SetInputMonitor { id: 7 },
+            Control::Presence { ids: vec!["123456789".into(), "987654321".into()] },
+            Control::PresenceResult { online: vec!["123456789".into()] },
         ] {
             assert_eq!(Control::from_bytes(&c.to_bytes()), Some(c));
         }
