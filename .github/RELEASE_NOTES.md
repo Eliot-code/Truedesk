@@ -2,14 +2,20 @@ Beta build for testing. Expect rough edges, and please report what breaks.
 
 ## What's new
 
-- **Each monitor in its own window (new):** on a host with more than one
-  display, the monitor picker has a **New window** button. It opens that
-  monitor in a separate window you can drop onto one of your own screens and
-  go fullscreen, the way TeamViewer does. Each window controls its monitor
-  while your pointer is in it. The browser viewer still switches monitors with
-  the picker.
-- This is new and runs an extra capture per window, so please report anything
-  rough, especially on Windows and Linux.
+- **Remote file manager (new):** the Files panel now has a two-pane browser,
+  your computer on the left and the other one on the right. Open folders on
+  both, and download a remote file with the arrow next to it (it saves to your
+  Downloads). "Send file…" still sends the other way.
+- **Address book shows who's online:** saved devices now have a green dot when
+  they're reachable, and online ones sort to the top.
+- **Restart the remote and reconnect:** when the other computer has unattended
+  access on, a **Restart** button reboots it and reconnects automatically once
+  it's back. Windows only for now.
+- **Privacy mode (Windows, new):** blank the other computer's screen and block
+  its local keyboard and mouse while you work; you still see and control it
+  normally. It always restores when the session ends, and someone at that
+  computer can take back control with Ctrl+Alt+Del.
+- These are new; please report anything rough, especially on Windows.
 
 If you installed an earlier beta, this one arrives as an "Update available"
 banner on the home screen. On macOS you may need to grant Screen Recording and
