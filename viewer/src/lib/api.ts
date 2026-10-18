@@ -130,6 +130,18 @@ export const openMonitorStream = (id: number) => invoke<void>("open_monitor_stre
 export const closeMonitorStream = (id: number) => invoke<void>("close_monitor_stream", { id });
 /** Point the host's input at monitor `id` without switching the main view. */
 export const setInputMonitor = (id: number) => invoke<void>("set_input_monitor", { id });
+/**
+ * Which of `ids` (saved device IDs) have a host online on the configured
+ * relays right now. Returns the online subset; resolves to `[]` on any relay
+ * error so the address book degrades to "unknown" rather than failing.
+ */
+export const getPresence = async (ids: string[]): Promise<string[]> => {
+  try {
+    return await invoke<string[]>("get_presence", { ids });
+  } catch {
+    return [];
+  }
+};
 export const sendChat = (text: string) => invoke<void>("send_chat", { text });
 export const setClipboardSync = (enabled: boolean) => invoke<void>("set_clipboard_sync", { enabled });
 export const setAudioMuted = (muted: boolean) => invoke<void>("set_audio_muted", { muted });

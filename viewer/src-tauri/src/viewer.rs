@@ -155,6 +155,14 @@ pub(crate) async fn set_input_monitor(state: tauri::State<'_, AppState>, id: u32
     send_control(&state, Control::SetInputMonitor { id }).await
 }
 
+/// Which of `ids` (saved devices) have a host online on the configured relays
+/// right now. Used by the address book's status dots.
+#[tauri::command]
+pub(crate) async fn get_presence(state: tauri::State<'_, AppState>, ids: Vec<String>) -> Result<Vec<String>, String> {
+    let relays = { state.lock().config.config.relay_urls.clone() };
+    host_core::relay_client::query_presence(&relays, &ids).await
+}
+
 #[tauri::command]
 pub(crate) fn connect(
     state: tauri::State<'_, AppState>,

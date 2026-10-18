@@ -21,6 +21,8 @@ button, input { font: inherit; } button { cursor: pointer; }
 
 .session-screen { position: relative; width: 100vw; height: 100vh; overflow: hidden; background: #070a0e; }
 .session-canvas { display: block; width: 100%; height: 100%; object-fit: contain; outline: none; }
+.presence-dot { display: inline-block; width: 8px; height: 8px; margin-right: 7px; border-radius: 50%; background: #5b6473; vertical-align: middle; }
+.presence-dot--online { background: #22c55e; box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.25); }
 .monitor-window { position: relative; width: 100vw; height: 100vh; overflow: hidden; background: #070a0e; }
 .monitor-window__canvas { display: block; width: 100%; height: 100%; object-fit: contain; outline: none; }
 .monitor-window__notice { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); margin: 0; max-width: 80%; padding: 10px 14px; border-radius: 10px; background: rgba(10, 14, 20, 0.9); color: #e6edf3; font-size: 13px; text-align: center; z-index: 2; }
