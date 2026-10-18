@@ -27,14 +27,9 @@ pub fn accessibility() -> bool {
     }
 }
 
-pub fn settings_url(which: &str) -> &'static str {
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = which;
-        return "";
-    }
-
-    #[cfg(target_os = "macos")]
+/// The System Settings pane for a macOS privacy permission.
+#[cfg(target_os = "macos")]
+fn settings_url(which: &str) -> &'static str {
     match which {
         "screen" => "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
         "accessibility" => {
@@ -47,10 +42,11 @@ pub fn settings_url(which: &str) -> &'static str {
 pub fn open_settings(which: &str) -> Result<(), String> {
     #[cfg(not(target_os = "macos"))]
     {
-        return match which {
+        // Nothing to open: other platforms ask while capture or input starts.
+        match which {
             "screen" | "accessibility" => Ok(()),
             _ => Err(format!("unknown permission: {which}")),
-        };
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -75,10 +71,10 @@ pub fn open_settings(which: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::settings_url;
-
+    #[cfg(target_os = "macos")]
     #[test]
     fn settings_urls_are_mapped() {
+        use super::settings_url;
         assert_eq!(
             settings_url("screen"),
             "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
@@ -88,5 +84,13 @@ mod tests {
             "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
         );
         assert_eq!(settings_url("other"), "");
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn other_platforms_have_nothing_to_open() {
+        assert_eq!(super::open_settings("screen"), Ok(()));
+        assert_eq!(super::open_settings("accessibility"), Ok(()));
+        assert!(super::open_settings("other").is_err());
     }
 }
