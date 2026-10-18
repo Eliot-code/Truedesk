@@ -26,6 +26,8 @@ const { title, description } = Astro.props;
         if (saved === "light" || saved === "dark") document.documentElement.dataset.theme = saved;
       } catch {}
     </script>
+    <!-- Self-hosted, cookieless page-view analytics (Umami). -->
+    <script defer src="https://analytics.treeot.dev/script.js" data-website-id="bf61a112-ba8d-446a-b4fd-0f9003036a93"></script>
   </head>
   <body>
     <a class="skip" href="#main">Skip to content</a>

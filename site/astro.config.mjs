@@ -64,11 +64,13 @@ export default defineConfig({
         "default-src 'none'",
         "img-src 'self'",
         "font-src 'self'",
-        "connect-src 'self'",
+        // analytics.treeot.dev is the self-hosted Umami collector the landing
+        // page reports page views to.
+        "connect-src 'self' https://analytics.treeot.dev",
         "base-uri 'none'",
         "form-action 'none'",
       ],
-      scriptDirective: { resources: ["'self'"] },
+      scriptDirective: { resources: ["'self'", "https://analytics.treeot.dev"] },
       styleDirective: { resources: ["'self'"] },
     },
   },
