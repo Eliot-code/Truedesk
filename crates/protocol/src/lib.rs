@@ -13,4 +13,6 @@ pub mod clipboard;
 pub mod chat;
 pub mod browse;
 pub mod datamsg;
+pub mod tunnel;
+mod wire;
 pub mod audio;

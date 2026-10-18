@@ -1,7 +1,8 @@
 //! Demultiplexing of a session's inbound, sealed Data channel.
 //!
-//! One Data channel carries clipboard updates and any number of file
-//! transfers in both directions for the whole session. [`dispatch_data`]
+//! One Data channel carries clipboard updates, chat, remote browsing, TCP
+//! tunnels and any number of file transfers in both directions for the whole
+//! session. [`dispatch_data`]
 //! opens and decodes every frame and never stops on a message it does not
 //! expect: ending the dispatch would drop the reliable reader's Data queue and
 //! with it the whole session. [`FileRouter`] hands each transfer its own
@@ -10,7 +11,7 @@
 
 use crate::filexfer::FileSource;
 use async_trait::async_trait;
-use protocol::{chat::ChatMsg, clipboard::ClipboardMsg, datamsg::DataMsg, filexfer::FileMsg};
+use protocol::{chat::ChatMsg, clipboard::ClipboardMsg, datamsg::DataMsg, filexfer::FileMsg, tunnel::TunnelMsg};
 use std::{collections::HashMap, sync::{Arc, Mutex, MutexGuard}};
 use tokio::sync::mpsc;
 
@@ -138,18 +139,20 @@ impl FileRouter {
 /// Open, decode and dispatch every inbound Data frame until the channel
 /// closes. Undecryptable, undecodable or unexpected frames are logged and
 /// skipped; they never end the dispatch (and so never end the session).
-pub async fn dispatch_data<O, C, H, B>(
+pub async fn dispatch_data<O, C, H, B, T>(
     mut incoming: mpsc::Receiver<Vec<u8>>,
     mut open: O,
     router: Arc<FileRouter>,
     mut on_clipboard: C,
     mut on_chat: H,
     mut on_browse: B,
+    mut on_tunnel: T,
 ) where
     O: FnMut(&[u8]) -> Option<Vec<u8>>,
     C: FnMut(ClipboardMsg),
     H: FnMut(ChatMsg),
     B: FnMut(protocol::browse::BrowseMsg),
+    T: FnMut(TunnelMsg),
 {
     while let Some(sealed) = incoming.recv().await {
         let Some(plaintext) = open(&sealed) else {
@@ -161,6 +164,7 @@ pub async fn dispatch_data<O, C, H, B>(
             Some(DataMsg::Clipboard(message)) => on_clipboard(message),
             Some(DataMsg::Chat(message)) => on_chat(message),
             Some(DataMsg::Browse(message)) => on_browse(message),
+            Some(DataMsg::Tunnel(message)) => on_tunnel(message),
             None => log::debug!("dropping an unrecognized Data message"),
         }
     }
@@ -217,7 +221,7 @@ mod tests {
             let (clip_tx, clipboard) = mpsc::unbounded_channel();
             tokio::spawn(dispatch_data(incoming, |bytes: &[u8]| Some(bytes.to_vec()), Arc::clone(&router), move |message| {
                 let _ = clip_tx.send(message);
-            }, |_chat| {}, |_browse| {}));
+            }, |_chat| {}, |_browse| {}, |_tunnel| {}));
             Peer { router, offers, out, clipboard }
         };
         let a = make(a_in, a_out.clone());

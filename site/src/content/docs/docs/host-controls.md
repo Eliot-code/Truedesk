@@ -10,7 +10,7 @@ session.
 
 ## Permissions
 
-Four switches decide what the connected viewer can do. All four start **on**
+Five switches decide what the connected viewer can do. All five start **on**
 when a session begins, and turning one off takes effect at once.
 
 | Permission | Off means |
@@ -19,6 +19,7 @@ when a session begins, and turning one off takes effect at once.
 | **File transfer** | Files the viewer sends are refused without a prompt. |
 | **Clipboard** | Clipboard text stops syncing in both directions. |
 | **Audio** | The host stops sending its sound. |
+| **TCP tunnels** | The viewer can't open [tunnels](/docs/tunnels/) to this computer's network, and the open ones close. |
 
 These are enforced by the host, not the viewer. When **Control** is off, the
 viewer's input never reaches your computer; when **Audio** is off, no sound is
@@ -27,8 +28,9 @@ sent. A viewer cannot turn any of them back on.
 ## Activity log
 
 The panel keeps a short log of the session: when the viewer connected and
-disconnected, each file received or refused, and every permission change. It
-clears when a new session starts.
+disconnected, each file received or refused, each tunnel connection and the
+address it reached, and every permission change. It clears when a new
+session starts.
 
 A viewer can only ever **send** you a file, and you're asked to accept each
 one; there is no way for a viewer to take a file from your computer. See

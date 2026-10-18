@@ -31,8 +31,9 @@ advisory is published unless you prefer otherwise.
    independently never share a key. Payloads that fail authentication are
    discarded.
 
-The media keys cover screen video, audio, and remote input. File and
-clipboard messages use the reliable Data channel and its own keys. Monitor
+The media keys cover screen video, audio, and remote input. File, clipboard,
+chat, remote-browsing and TCP tunnel messages use the reliable Data channel
+and its own keys. Monitor
 control messages use the Control keys. The relay fallback and the direct UDP
 path carry the same sealed payloads.
 
@@ -61,7 +62,7 @@ when TLS is enabled at the edge.
 The relay never receives the SPAKE2-derived keys. As long as the endpoints and
 the password are not compromised, it cannot read or forge authenticated
 session payloads: screen frames, remote input, audio, file contents,
-clipboard text, or sealed monitor-control payloads. It can forward those
+clipboard text, tunnel traffic, or sealed monitor-control payloads. It can forward those
 bytes or refuse to, but the relay code does not open their AEAD ciphertext.
 
 ## Unattended access
@@ -119,6 +120,17 @@ program added after it. The package's licence mentions an "advertisement
 page". Neither the driver nor anything Truedesk installs from the package
 can show one: the driver has no networking or UI code, and Amyuni's
 installer, which Truedesk skips, only shows a standard error box.
+
+## TCP tunnels
+
+A connected viewer can ask the host to open TCP connections to any address
+the host can reach, and carry them through the session. That gives the
+viewer the host's network position, so the host enforces it: the **TCP
+tunnels** permission in the host control panel refuses new tunnels and closes
+open ones when turned off, and every tunnel connection, with its target, is
+written to the host's activity log. The viewer's end of a tunnel listens only
+on `127.0.0.1`. Each connection keeps at most 512 KiB unacknowledged in each
+direction, so a tunnel cannot exhaust the other side's memory.
 
 ## Known limitations and threat model
 

@@ -82,7 +82,7 @@ same sealed protocol frames.
 | Function | Protocol path | Key space |
 | --- | --- | --- |
 | Screen video, audio, and remote input | `Video`, `Audio`, and `Input` transport frames | Directional media keys |
-| File transfer and text clipboard sync | Reliable `Data` channel | Directional data keys |
+| File transfer, text clipboard sync, chat, remote browsing and TCP tunnels | Reliable `Data` channel | Directional data keys |
 | Monitor list and monitor selection | Sealed `Control` payloads | Directional control keys |
 
 The `Kex` frames, initial pairing controls, and ICE signaling are setup

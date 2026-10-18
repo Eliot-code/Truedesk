@@ -1,4 +1,4 @@
-use crate::{browse::BrowseMsg, chat::ChatMsg, clipboard::ClipboardMsg, filexfer::FileMsg};
+use crate::{browse::BrowseMsg, chat::ChatMsg, clipboard::ClipboardMsg, filexfer::FileMsg, tunnel::TunnelMsg};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DataMsg {
@@ -6,6 +6,7 @@ pub enum DataMsg {
     Clipboard(ClipboardMsg),
     Chat(ChatMsg),
     Browse(BrowseMsg),
+    Tunnel(TunnelMsg),
 }
 
 impl DataMsg {
@@ -15,6 +16,7 @@ impl DataMsg {
             Self::Clipboard(message) => (2, message.to_bytes()),
             Self::Chat(message) => (3, message.to_bytes()),
             Self::Browse(message) => (4, message.to_bytes()),
+            Self::Tunnel(message) => (5, message.to_bytes()),
         };
         let mut bytes = Vec::with_capacity(1 + inner.len());
         bytes.push(tag);
@@ -29,6 +31,7 @@ impl DataMsg {
             2 => ClipboardMsg::from_bytes(inner).map(Self::Clipboard),
             3 => ChatMsg::from_bytes(inner).map(Self::Chat),
             4 => BrowseMsg::from_bytes(inner).map(Self::Browse),
+            5 => TunnelMsg::from_bytes(inner).map(Self::Tunnel),
             _ => None,
         }
     }
@@ -56,6 +59,13 @@ mod tests {
         assert_eq!(DataMsg::from_bytes(&file.to_bytes()), Some(file));
         assert_eq!(DataMsg::from_bytes(&clipboard.to_bytes()), Some(clipboard));
         assert_eq!(DataMsg::from_bytes(&chat.to_bytes()), Some(chat));
+    }
+
+    #[test]
+    fn round_trips_tunnel_messages() {
+        let tunnel = DataMsg::Tunnel(TunnelMsg::Data { id: 3, data: vec![1, 2, 3] });
+        assert_eq!(tunnel.to_bytes()[0], 5);
+        assert_eq!(DataMsg::from_bytes(&tunnel.to_bytes()), Some(tunnel));
     }
 
     #[test]

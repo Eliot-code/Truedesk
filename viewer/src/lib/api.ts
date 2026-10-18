@@ -32,10 +32,12 @@ export interface MonitorInfo { id: number; name: string; width: number; height: 
 /** Media path of a viewer session and its measured round trip; `rtt_ms` is null until there is a real sample. */
 export interface LinkStats { path: "direct" | "relay"; rtt_ms: number | null }
 /** Host-enforced capabilities for the connected viewer; all default to enabled and reset each session. */
-export interface ViewerPermissions { control: boolean; files: boolean; clipboard: boolean; audio: boolean }
+export interface ViewerPermissions { control: boolean; files: boolean; clipboard: boolean; audio: boolean; tunnels: boolean }
 export type Capability = keyof ViewerPermissions;
 /** One line in the host's session activity log; `at` is Unix milliseconds. */
 export interface Activity { at: number; kind: string; detail: string }
+/** A TCP tunnel: `localhost:local_port` here leads to `host:port` as the other computer sees it. */
+export interface TunnelInfo { id: number; local_port: number; host: string; port: number; connections: number }
 
 export const getIdentity = () => invoke<Identity>("get_identity");
 export const rotatePassword = () => invoke<{ password: string }>("rotate_password");
@@ -209,6 +211,18 @@ export const onPrivacyModeSupport = (handler: () => void) => on("privacy_mode_su
 export const onPrivacyModeChanged = (handler: (payload: { on: boolean }) => void) => on("privacy_mode_changed", handler);
 /** Turn the host's privacy mode on or off. */
 export const setPrivacyMode = (on: boolean) => invoke<void>("set_privacy_mode", { on });
+/** The host takes TCP tunnels; older hosts never say so, and the control stays hidden. */
+export const onTunnelSupport = (handler: () => void) => on("tunnel_support", handler);
+/** The host refused a connection made through the tunnel on `local_port`; `code` explains why. */
+export const onTunnelRefused = (handler: (payload: { local_port: number; code: string }) => void) => on("tunnel_refused", handler);
+/** Tunnels were added or removed, or their connections changed; read them with {@link listTunnels}. */
+export const onTunnelsChanged = (handler: () => void) => on("tunnels_changed", handler);
+/** Listen on `localPort` (0 picks a free one) and carry each connection to `host:port` on the other computer's side. */
+export const openTunnel = (localPort: number, host: string, port: number) => invoke<TunnelInfo>("open_tunnel", { localPort, host, port });
+export const closeTunnel = (id: number) => invoke<void>("close_tunnel", { id });
+export const listTunnels = () => invoke<TunnelInfo[]>("list_tunnels");
+/** Whether the current session's host takes tunnels (for a screen that may have missed {@link onTunnelSupport}). */
+export const getTunnelSupport = () => invoke<boolean>("tunnel_support");
 
 /** One entry in a remote directory listing. */
 export interface DirEntry { name: string; is_dir: boolean; size: number; modified: number }

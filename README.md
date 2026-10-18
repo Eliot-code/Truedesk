@@ -48,6 +48,7 @@ path is used whenever the network allows it.
 | 🖥️ **Hardware H.264** | VideoToolbox on macOS, Media Foundation on Windows, openh264 elsewhere |
 | 🔊 **System sound** | macOS 14.6+, Windows, Linux (PulseAudio / PipeWire) |
 | 📁 **Files and clipboard** | Encrypted file transfer with consent and hash check; text clipboard sync |
+| 🔀 **TCP tunnels** | Reach Remote Desktop, SSH or any TCP service on the remote network through the session; the host can turn it off |
 | 🪟 **Multi-monitor** | Pick a monitor, or add a virtual display on macOS and Windows |
 | 🌙 **Unattended access** | Stored password, optional 2FA code, start at sign-in with a tray icon |
 | 🌐 **Browser viewer** | Connect from any modern browser, nothing to install ([how it works](site/src/content/docs/docs/browser-viewer.md)) |
@@ -138,9 +139,10 @@ To run two instances on one machine, see [`docs/TESTING.md`](docs/TESTING.md).
 - [x] Browser viewer
 - [x] Virtual displays on macOS and Windows
 - [x] In-session text chat and view-only sessions
+- [x] TCP tunnels (local port forwarding)
 - [ ] Windows sign-in screen, UAC prompts, lock screen and Ctrl+Alt+Del (shipped experimental; needs hardware/VM validation)
 - [ ] Hardware H.264 on Linux (VAAPI)
-- [ ] Wake-on-LAN, privacy mode, TCP tunneling
+- [ ] Wake-on-LAN, privacy mode on Linux
 
 ### Longer term
 

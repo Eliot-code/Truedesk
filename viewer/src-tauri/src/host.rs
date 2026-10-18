@@ -431,7 +431,7 @@ pub(crate) async fn run_paired_host_session(
             match handle {
                 Ok(handle) => {
                     streamed = true;
-                    activate_data_channel(app, handle, remote_id.clone());
+                    activate_data_channel(app, handle, remote_id.clone(), DataRole::Host);
                     tokio::select! {
                         result = &mut session => Some(result),
                         _ = &mut *stop_rx => None,

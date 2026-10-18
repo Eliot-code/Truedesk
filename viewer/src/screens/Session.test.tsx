@@ -2,7 +2,7 @@
 import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { onVirtualDisplaySupport, onVirtualDisplayAdded, onVirtualDisplayRefused, addVirtualDisplay, removeVirtualDisplay, startVideo, requestKeyframe, closeDecoder, onAudioFrame, onMonitorList, onLinkStats, onFileOffer, onFileProgress, onFileDone, onFileError, onFileDrop, pickFile, startRecording, appendRecording, finishRecording, sendFile, respondFile, sendInput, selectMonitor, setInputMonitor, setAudioMuted, setClipboardSync, getConfig, onChatMessage, sendChat, onSecureAttentionSupport, onMultiMonitorSupport, onRestartSupport, onHostRestarting, requestRemoteRestart, onPrivacyModeSupport, onPrivacyModeChanged, setPrivacyMode, browseLocal, browseRemote, onRemoteListing, pullRemote, sendSecureAttention, getViewerPermissions, setViewerPermission, disconnectViewer, onViewerPermissions, onActivity, decode } = vi.hoisted(() => ({
+const { onVirtualDisplaySupport, onVirtualDisplayAdded, onVirtualDisplayRefused, addVirtualDisplay, removeVirtualDisplay, startVideo, requestKeyframe, closeDecoder, onAudioFrame, onMonitorList, onLinkStats, onFileOffer, onFileProgress, onFileDone, onFileError, onFileDrop, pickFile, startRecording, appendRecording, finishRecording, sendFile, respondFile, sendInput, selectMonitor, setInputMonitor, setAudioMuted, setClipboardSync, getConfig, onChatMessage, sendChat, onSecureAttentionSupport, onMultiMonitorSupport, onRestartSupport, onHostRestarting, requestRemoteRestart, onPrivacyModeSupport, onPrivacyModeChanged, setPrivacyMode, browseLocal, browseRemote, onRemoteListing, pullRemote, sendSecureAttention, getViewerPermissions, setViewerPermission, disconnectViewer, onViewerPermissions, onActivity, onTunnelSupport, onTunnelRefused, onTunnelsChanged, getTunnelSupport, listTunnels, decode } = vi.hoisted(() => ({
   onVirtualDisplaySupport: vi.fn<(handler: (payload: { max: number }) => void) => Promise<() => void>>(() => Promise.resolve(vi.fn())),
   onVirtualDisplayAdded: vi.fn<(handler: (payload: { id: number }) => void) => Promise<() => void>>(() => Promise.resolve(vi.fn())),
   onVirtualDisplayRefused: vi.fn<(handler: (payload: { code: string }) => void) => Promise<() => void>>(() => Promise.resolve(vi.fn())),
@@ -46,15 +46,20 @@ const { onVirtualDisplaySupport, onVirtualDisplayAdded, onVirtualDisplayRefused,
   onRemoteListing: vi.fn<(handler: (payload: unknown) => void) => Promise<() => void>>(() => Promise.resolve(vi.fn())),
   pullRemote: vi.fn<(path: string) => Promise<void>>(() => Promise.resolve()),
   sendSecureAttention: vi.fn(() => Promise.resolve()),
-  getViewerPermissions: vi.fn(() => Promise.resolve({ control: true, files: true, clipboard: true, audio: true })),
+  getViewerPermissions: vi.fn(() => Promise.resolve({ control: true, files: true, clipboard: true, audio: true, tunnels: true })),
   setViewerPermission: vi.fn(() => Promise.resolve()),
   disconnectViewer: vi.fn(() => Promise.resolve()),
-  onViewerPermissions: vi.fn<(handler: (payload: { control: boolean; files: boolean; clipboard: boolean; audio: boolean }) => void) => Promise<() => void>>(() => Promise.resolve(vi.fn())),
+  onViewerPermissions: vi.fn<(handler: (payload: { control: boolean; files: boolean; clipboard: boolean; audio: boolean; tunnels: boolean }) => void) => Promise<() => void>>(() => Promise.resolve(vi.fn())),
   onActivity: vi.fn<(handler: (payload: { at: number; kind: string; detail: string }) => void) => Promise<() => void>>(() => Promise.resolve(vi.fn())),
+  onTunnelSupport: vi.fn<(handler: () => void) => Promise<() => void>>(() => Promise.resolve(vi.fn())),
+  onTunnelRefused: vi.fn<(handler: (payload: { local_port: number; code: string }) => void) => Promise<() => void>>(() => Promise.resolve(vi.fn())),
+  onTunnelsChanged: vi.fn<(handler: () => void) => Promise<() => void>>(() => Promise.resolve(vi.fn())),
+  getTunnelSupport: vi.fn<() => Promise<boolean>>(() => Promise.resolve(false)),
+  listTunnels: vi.fn(() => Promise.resolve([])),
   decode: vi.fn(),
 }));
 
-vi.mock("../lib/api", () => ({ onVirtualDisplaySupport, onVirtualDisplayAdded, onVirtualDisplayRefused, addVirtualDisplay, removeVirtualDisplay, startVideo, requestKeyframe, onAudioFrame, onMonitorList, onLinkStats, onFileOffer, onFileProgress, onFileDone, onFileError, onFileDrop, pickFile, startRecording, appendRecording, finishRecording, sendFile, respondFile, sendInput, selectMonitor, setInputMonitor, setAudioMuted, setClipboardSync, getConfig, onChatMessage, sendChat, onSecureAttentionSupport, onMultiMonitorSupport, onRestartSupport, onHostRestarting, requestRemoteRestart, onPrivacyModeSupport, onPrivacyModeChanged, setPrivacyMode, browseLocal, browseRemote, onRemoteListing, pullRemote, sendSecureAttention, getViewerPermissions, setViewerPermission, disconnectViewer, onViewerPermissions, onActivity }));
+vi.mock("../lib/api", () => ({ onVirtualDisplaySupport, onVirtualDisplayAdded, onVirtualDisplayRefused, addVirtualDisplay, removeVirtualDisplay, startVideo, requestKeyframe, onAudioFrame, onMonitorList, onLinkStats, onFileOffer, onFileProgress, onFileDone, onFileError, onFileDrop, pickFile, startRecording, appendRecording, finishRecording, sendFile, respondFile, sendInput, selectMonitor, setInputMonitor, setAudioMuted, setClipboardSync, getConfig, onChatMessage, sendChat, onSecureAttentionSupport, onMultiMonitorSupport, onRestartSupport, onHostRestarting, requestRemoteRestart, onPrivacyModeSupport, onPrivacyModeChanged, setPrivacyMode, browseLocal, browseRemote, onRemoteListing, pullRemote, sendSecureAttention, getViewerPermissions, setViewerPermission, disconnectViewer, onViewerPermissions, onActivity, onTunnelSupport, onTunnelRefused, onTunnelsChanged, getTunnelSupport, listTunnels }));
 vi.mock("../lib/decode", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/decode")>()),
   makeDecoder: vi.fn(() => ({ push: decode, close: closeDecoder })),
@@ -200,6 +205,28 @@ describe("Session viewer transport", () => {
     expect(virtualDisplayRefusal("not_newest")).toContain("newest virtual display first");
   });
 
+  it("offers tunnels once the host does, reports refusals, and drops them while reconnecting", async () => {
+    const notify = vi.fn();
+    const view = render(<NotifyContext.Provider value={notify}><Session remoteId="123" role="viewer" status="in_session" onDisconnect={vi.fn()} /></NotifyContext.Provider>);
+    const last = <T,>(mock: { mock: { calls: T[][] } }) => mock.mock.calls[mock.mock.calls.length - 1][0];
+    expect(view.queryByRole("button", { name: "Tunnels" })).toBeNull();
+    await waitFor(() => expect(onTunnelSupport).toHaveBeenCalled());
+    act(() => last(onTunnelSupport)());
+    fireEvent.click(view.getByRole("button", { name: "Tunnels" }));
+    expect(view.getByLabelText("TCP tunnels").hidden).toBe(false);
+    act(() => last(onTunnelRefused)({ local_port: 13389, code: "not_allowed" }));
+    await waitFor(() => expect(notify).toHaveBeenCalledWith("Tunnel on port 13389: The other computer doesn't allow tunnels."));
+    view.rerender(<NotifyContext.Provider value={notify}><Session remoteId="123" role="viewer" status="connecting" onDisconnect={vi.fn()} /></NotifyContext.Provider>);
+    expect(view.queryByRole("button", { name: "Tunnels" })).toBeNull();
+    expect(view.queryByLabelText("TCP tunnels")).toBeNull();
+  });
+
+  it("asks whether the host offers tunnels in case the event came first", async () => {
+    getTunnelSupport.mockResolvedValueOnce(true);
+    const view = render(<Session remoteId="123" role="viewer" status="in_session" onDisconnect={vi.fn()} />);
+    expect(await view.findByRole("button", { name: "Tunnels" })).toBeTruthy();
+  });
+
   it("shows link reports in the toolbar and clears them while reconnecting", () => {
     const view = render(<Session remoteId="123" role="viewer" status="in_session" onDisconnect={vi.fn()} />);
     const report = onLinkStats.mock.calls[onLinkStats.mock.calls.length - 1][0];
@@ -234,6 +261,8 @@ describe("Session host role", () => {
     await waitFor(() => expect(getViewerPermissions).toHaveBeenCalled());
     fireEvent.click(view.getByLabelText("Keyboard & mouse"));
     expect(setViewerPermission).toHaveBeenCalledWith("control", false);
+    fireEvent.click(view.getByLabelText("TCP tunnels"));
+    expect(setViewerPermission).toHaveBeenCalledWith("tunnels", false);
     fireEvent.click(view.getByText("Disconnect viewer"));
     expect(disconnectViewer).toHaveBeenCalledOnce();
   });

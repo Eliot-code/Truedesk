@@ -20,6 +20,8 @@ hosting has had less testing than macOS.
   button does, file transfer, recording, and what Direct and Relayed mean.
 - [Unattended access and 2FA](/docs/unattended/): reach your own computer
   when nobody is there to click Allow.
+- [TCP tunnels](/docs/tunnels/): reach Remote Desktop, SSH or a web page on
+  the other computer's network through the session.
 - [Browser viewer](/docs/browser-viewer/): control a computer from a browser,
   and what it can't do yet.
 

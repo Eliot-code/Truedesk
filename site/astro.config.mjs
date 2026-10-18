@@ -37,6 +37,7 @@ export default defineConfig({
         "docs/getting-started",
         "docs/sessions",
         "docs/host-controls",
+        "docs/tunnels",
         "docs/unattended",
         "docs/browser-viewer",
         "docs/virtual-displays",

@@ -13,6 +13,7 @@ mod windows_service;
 #[cfg(windows)]
 pub use windows_service::run_windows_service;
 mod viewer;
+mod tunnels;
 
 use config::ConfigStore;
 use contacts::{Contact, ContactStore};
@@ -28,6 +29,7 @@ pub(crate) use recording::*;
 pub(crate) use files::*;
 pub(crate) use host::*;
 pub(crate) use viewer::*;
+pub(crate) use tunnels::*;
 
 struct RuntimeState {
     config: ConfigStore,
@@ -49,6 +51,8 @@ struct RuntimeState {
     control_sealer: Option<Arc<Mutex<Sealer>>>,
     /// Routes the session's inbound file messages to their transfers.
     file_router: Option<Arc<FileRouter>>,
+    /// The session's TCP tunnels (either role).
+    tunnels: Option<host_core::tunnel::Tunnels>,
     /// Destination for the next uploaded file (the folder the viewer is
     /// browsing), consumed once; `None` means save to Downloads.
     upload_dir: Arc<Mutex<Option<String>>>,
@@ -66,15 +70,17 @@ struct RuntimeState {
     disconnect_viewer: Option<oneshot::Sender<()>>,
 }
 
-/// The four host-enforced capabilities a connected viewer may use. Each is a
-/// cheaply shared atomic so the session paths (input, audio, clipboard, files)
-/// can read it without locking `AppState`. All default to enabled.
+/// The host-enforced capabilities a connected viewer may use. Each is a
+/// cheaply shared atomic so the session paths (input, audio, clipboard, files,
+/// tunnels) can read it without locking `AppState`. All default to enabled.
 #[derive(Clone)]
 pub(crate) struct ViewerPermissions {
     pub(crate) control: Arc<AtomicBool>,
     pub(crate) files: Arc<AtomicBool>,
     pub(crate) clipboard: Arc<AtomicBool>,
     pub(crate) audio: Arc<AtomicBool>,
+    /// Open TCP tunnels to this computer's network.
+    pub(crate) tunnels: Arc<AtomicBool>,
 }
 
 impl ViewerPermissions {
@@ -84,12 +90,13 @@ impl ViewerPermissions {
             files: Arc::new(AtomicBool::new(true)),
             clipboard: Arc::new(AtomicBool::new(true)),
             audio: Arc::new(AtomicBool::new(true)),
+            tunnels: Arc::new(AtomicBool::new(true)),
         }
     }
 
     /// Back to all-on, for the start of a new session.
     pub(crate) fn reset(&self) {
-        for flag in [&self.control, &self.files, &self.clipboard, &self.audio] {
+        for flag in [&self.control, &self.files, &self.clipboard, &self.audio, &self.tunnels] {
             flag.store(true, Ordering::Relaxed);
         }
     }
@@ -101,6 +108,7 @@ impl ViewerPermissions {
             "files" => Some(&self.files),
             "clipboard" => Some(&self.clipboard),
             "audio" => Some(&self.audio),
+            "tunnels" => Some(&self.tunnels),
             _ => None,
         }
     }
@@ -111,6 +119,7 @@ impl ViewerPermissions {
             files: self.files.load(Ordering::Relaxed),
             clipboard: self.clipboard.load(Ordering::Relaxed),
             audio: self.audio.load(Ordering::Relaxed),
+            tunnels: self.tunnels.load(Ordering::Relaxed),
         }
     }
 }
@@ -236,6 +245,7 @@ fn dispatch_data(
     data_sender: ReliableSender,
     data_sealer: Arc<Mutex<Sealer>>,
     files_allowed: Arc<std::sync::atomic::AtomicBool>,
+    tunnels: host_core::tunnel::Tunnels,
 ) -> (Arc<FileRouter>, mpsc::Receiver<IncomingTransfer>) {
     let (router, offers) = FileRouter::new();
     let clipboard_app = app.clone();
@@ -251,6 +261,7 @@ fn dispatch_data(
         },
         move |message| emit(&chat_app, "chat_message", ChatMessage { text: message.text }),
         move |message| handle_browse(&browse_app, &data_sender, &data_sealer, &files_allowed, message),
+        move |message| tunnels.route(message),
     ));
     (router, offers)
 }
@@ -310,18 +321,23 @@ fn handle_browse(
     }
 }
 
-fn activate_data_channel(app: &AppHandle, handle: DataHandle, from: String) {
+fn activate_data_channel(app: &AppHandle, handle: DataHandle, from: String, role: DataRole) {
     let DataHandle { sender, receiver, sealer, opener, control_sender, control_sealer, .. } = handle;
     let (enabled, clipboard_allowed) = {
         let state = app.state::<AppState>();
         let state = state.lock();
         (state.clipboard_enabled.clone(), state.viewer_permissions.clipboard.clone())
     };
-    let files_allowed = { app.state::<AppState>().lock().viewer_permissions.files.clone() };
+    let (files_allowed, tunnels_allowed) = {
+        let state = app.state::<AppState>();
+        let state = state.lock();
+        (state.viewer_permissions.files.clone(), state.viewer_permissions.tunnels.clone())
+    };
     let sealer = Arc::new(Mutex::new(sealer));
     let clipboard_thread = spawn_clipboard_thread(sender.clone(), sealer.clone(), enabled, clipboard_allowed);
     let clipboard_tx = clipboard_thread.as_ref().map(|(tx, _)| tx.clone());
-    let (file_router, offers) = dispatch_data(app.clone(), receiver, Arc::new(Mutex::new(opener)), clipboard_tx, sender.clone(), sealer.clone(), files_allowed);
+    let tunnels = start_tunnels(app, role, sender.clone(), sealer.clone(), tunnels_allowed);
+    let (file_router, offers) = dispatch_data(app.clone(), receiver, Arc::new(Mutex::new(opener)), clipboard_tx, sender.clone(), sealer.clone(), files_allowed, tunnels.clone());
     let state = app.state::<AppState>();
     let mut state = state.lock();
     state.file_outgoing = Some(sender);
@@ -329,8 +345,10 @@ fn activate_data_channel(app: &AppHandle, handle: DataHandle, from: String) {
     state.control_sender = Some(control_sender);
     state.control_sealer = Some(control_sealer);
     state.file_router = Some(file_router);
+    let previous_tunnels = state.tunnels.replace(tunnels);
     state.clipboard_thread = clipboard_thread.map(|(command_tx, join)| ClipboardThread { command_tx, join });
     drop(state);
+    if let Some(previous) = previous_tunnels { previous.shutdown(); }
     spawn_file_receiver(app.clone(), offers, from);
 }
 
@@ -340,9 +358,10 @@ fn clear_data_channel(app: &AppHandle) {
     // lock BEFORE joining. The clipboard thread may be mid `block_on(send_frame)`
     // when it observes Stop; joining while holding the AppState mutex would
     // freeze every other Tauri command behind a network-dependent join.
-    let thread = {
+    let (thread, tunnels) = {
         let mut state = state.lock();
         let thread = state.clipboard_thread.take();
+        let tunnels = state.tunnels.take();
         state.file_outgoing = None;
         state.file_sealer = None;
         state.control_sender = None;
@@ -352,8 +371,10 @@ fn clear_data_channel(app: &AppHandle) {
         let saved = state.config.config.clipboard_sync;
         state.clipboard_enabled.store(saved, Ordering::Relaxed);
         state.pending_file_requests.clear();
-        thread
+        (thread, tunnels)
     };
+    // Outside the lock: shutting down reports to the UI.
+    if let Some(tunnels) = tunnels { tunnels.shutdown(); }
     if let Some(thread) = thread {
         let _ = thread.command_tx.send(ClipboardCommand::Stop);
         let _ = thread.join.join();
@@ -698,15 +719,19 @@ fn set_viewer_permission(
     capability: String,
     allowed: bool,
 ) -> Result<(), String> {
-    let snapshot = {
+    let (snapshot, tunnels) = {
         let state = state.lock();
         let flag = state
             .viewer_permissions
             .flag(&capability)
             .ok_or_else(|| format!("unknown capability: {capability}"))?;
         flag.store(allowed, Ordering::Relaxed);
-        state.viewer_permissions.snapshot()
+        (state.viewer_permissions.snapshot(), state.tunnels.clone())
     };
+    // Turning tunnels off also ends the ones already open.
+    if capability == "tunnels" && !allowed {
+        if let Some(tunnels) = tunnels { tunnels.close_all(); }
+    }
     emit(&app, "viewer_permissions", snapshot);
     emit_activity(&app, "permission", format!("{capability} {}", if allowed { "allowed" } else { "blocked" }));
     Ok(())
@@ -847,6 +872,7 @@ pub fn run() {
                 clipboard_thread: None,
                 identity_conflicts: Vec::new(),
                 viewer_permissions: ViewerPermissions::new(),
+                tunnels: None,
                 disconnect_viewer: None,
             })));
             #[cfg(windows)]
@@ -935,7 +961,11 @@ pub fn run() {
             startup::close_keeps_running,
             startup::quit_app,
             reset_identity,
-            get_identity_conflicts
+            get_identity_conflicts,
+            open_tunnel,
+            close_tunnel,
+            list_tunnels,
+            tunnel_support
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -961,22 +991,22 @@ mod tests {
     fn viewer_permissions_default_to_all_enabled() {
         let perms = ViewerPermissions::new();
         let snapshot = perms.snapshot();
-        assert!(snapshot.control && snapshot.files && snapshot.clipboard && snapshot.audio);
+        assert!(snapshot.control && snapshot.files && snapshot.clipboard && snapshot.audio && snapshot.tunnels);
     }
 
     #[test]
     fn viewer_permission_flag_toggles_and_snapshot_tracks_it() {
         let perms = ViewerPermissions::new();
         assert!(perms.flag("bogus").is_none());
-        for name in ["control", "files", "clipboard", "audio"] {
+        for name in ["control", "files", "clipboard", "audio", "tunnels"] {
             perms.flag(name).unwrap().store(false, Ordering::Relaxed);
         }
         let off = perms.snapshot();
-        assert_eq!((off.control, off.files, off.clipboard, off.audio), (false, false, false, false));
+        assert_eq!((off.control, off.files, off.clipboard, off.audio, off.tunnels), (false, false, false, false, false));
         // Reset puts every capability back on for a new session.
         perms.reset();
         let on = perms.snapshot();
-        assert!(on.control && on.files && on.clipboard && on.audio);
+        assert!(on.control && on.files && on.clipboard && on.audio && on.tunnels);
     }
 
     #[test]
@@ -1227,6 +1257,7 @@ mod tests {
             clipboard_thread: None,
             identity_conflicts: Vec::new(),
             viewer_permissions: ViewerPermissions::new(),
+            tunnels: None,
             disconnect_viewer: None,
         }));
 

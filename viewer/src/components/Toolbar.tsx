@@ -35,6 +35,10 @@ interface ToolbarProps {
   chatOpen?: boolean;
   onChatToggle?: () => void;
   chatUnread?: number;
+  /** The host takes TCP tunnels. */
+  canTunnel?: boolean;
+  tunnelsOpen?: boolean;
+  onTunnelsToggle?: () => void;
   viewOnly?: boolean;
   onViewOnlyChange?: (viewOnly: boolean) => void;
   canSecureAttention?: boolean;
@@ -73,6 +77,7 @@ const icons = {
   record: <Icon><circle cx="12" cy="12" r="7" fill="currentColor" stroke="none" /></Icon>,
   stop: <Icon><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none" /></Icon>,
   chat: <Icon><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z" /></Icon>,
+  network: <Icon><rect x="16" y="16" width="6" height="6" rx="1" /><rect x="2" y="16" width="6" height="6" rx="1" /><rect x="9" y="2" width="6" height="6" rx="1" /><path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3" /><path d="M12 12V8" /></Icon>,
   eye: <Icon><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0" /><circle cx="12" cy="12" r="3" /></Icon>,
   keyboard: <Icon><rect width="20" height="16" x="2" y="4" rx="2" /><path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M6 12h.01M18 12h.01M8 16h8" /></Icon>,
 };
@@ -134,7 +139,7 @@ export function LinkBadge({ link }: { link: LinkStats }) {
 
 const connectionLabels: Record<Status, string> = { in_session: "Connected", connecting: "Reconnecting", online: "Connected", offline: "Disconnected" };
 
-export default function Toolbar({ remoteId, role = "viewer", status = "in_session", link, clipboardSync = true, onClipboardSyncChange = () => {}, onDisconnect, monitors = [], selectedMonitor, onMonitorChange = () => {}, canAddDisplay = false, onAddDisplay = () => {}, onRemoveDisplay = () => {}, canOpenMonitorWindow = false, onOpenMonitorWindow = () => {}, audioMuted = false, onAudioMutedChange = () => {}, recordingActive = false, recordingElapsed = 0, onRecordingToggle = () => {}, filesOpen = false, onFilesToggle = () => {}, chatOpen = false, onChatToggle = () => {}, chatUnread = 0, viewOnly = false, onViewOnlyChange = () => {}, canSecureAttention = false, onSecureAttention = () => {}, canRestart = false, onRestart = () => {}, canPrivacy = false, privacyOn = false, onPrivacyChange = () => {} }: ToolbarProps) {
+export default function Toolbar({ remoteId, role = "viewer", status = "in_session", link, clipboardSync = true, onClipboardSyncChange = () => {}, onDisconnect, monitors = [], selectedMonitor, onMonitorChange = () => {}, canAddDisplay = false, onAddDisplay = () => {}, onRemoveDisplay = () => {}, canOpenMonitorWindow = false, onOpenMonitorWindow = () => {}, audioMuted = false, onAudioMutedChange = () => {}, recordingActive = false, recordingElapsed = 0, onRecordingToggle = () => {}, filesOpen = false, onFilesToggle = () => {}, chatOpen = false, onChatToggle = () => {}, chatUnread = 0, canTunnel = false, tunnelsOpen = false, onTunnelsToggle = () => {}, viewOnly = false, onViewOnlyChange = () => {}, canSecureAttention = false, onSecureAttention = () => {}, canRestart = false, onRestart = () => {}, canPrivacy = false, privacyOn = false, onPrivacyChange = () => {} }: ToolbarProps) {
   const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
@@ -178,6 +183,7 @@ export default function Toolbar({ remoteId, role = "viewer", status = "in_sessio
             <IconButton label="Mute audio" pressed={audioMuted} title={audioMuted ? "Audio is muted. Click to unmute." : "Audio is on. Click to mute."} onClick={() => onAudioMutedChange(!audioMuted)} text={audioMuted ? "Muted" : "Sound"} icon={audioMuted ? icons.muted : icons.sound} />
             <IconButton label="Files" pressed={filesOpen} expanded={filesOpen} title={filesOpen ? "Hide file transfer" : "Send or receive files"} onClick={onFilesToggle} text="Files" icon={icons.files} />
             <IconButton label="Chat" pressed={chatOpen} expanded={chatOpen} badge={chatUnread} title={chatOpen ? "Hide chat" : "Open chat"} onClick={onChatToggle} text="Chat" icon={icons.chat} />
+            {canTunnel && <IconButton label="Tunnels" pressed={tunnelsOpen} expanded={tunnelsOpen} title={tunnelsOpen ? "Hide TCP tunnels" : "Reach a port on the other computer's network"} onClick={onTunnelsToggle} text="Tunnels" icon={icons.network} />}
             <IconButton label="View only" pressed={viewOnly} title={viewOnly ? "View only is on. Click to send input again." : "View only is off. Click to stop sending input."} onClick={() => onViewOnlyChange(!viewOnly)} text="View only" icon={icons.eye} />
             {canSecureAttention && <IconButton label="Send Ctrl+Alt+Del" text="Ctrl+Alt+Del" title="Send Ctrl+Alt+Del to the other computer" icon={icons.keyboard} onClick={onSecureAttention} />}
             {canRestart && <IconButton label="Restart remote" text="Restart" title="Restart the other computer and reconnect when it comes back" icon={icons.restart} onClick={onRestart} />}

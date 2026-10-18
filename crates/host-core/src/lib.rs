@@ -15,4 +15,5 @@ pub mod secure_attention;
 #[cfg(target_os = "windows")]
 mod windows_service;
 pub mod transport;
+pub mod tunnel;
 pub mod vdisplay;
