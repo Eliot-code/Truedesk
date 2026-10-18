@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import * as api from "../lib/api";
+import FileBrowser from "./FileBrowser";
 
 interface Transfer {
   id: number;
@@ -142,6 +143,7 @@ export default function FileTransfer({ open, onOpenChange }: FileTransferProps) 
         <div className="file-transfer__control"><button className="primary-button" type="button" onClick={() => void choose()}>Send file…</button><small>or drop files anywhere on this window</small></div>
         {message && <p className="message" role="alert">{message}</p>}
       </div>
+      {open && <FileBrowser />}
       {offers.map((offer) => <div className="file-transfer__offer" role="dialog" aria-label={`Incoming file ${offer.name}`} key={offer.id}>
         <span className="eyebrow">INCOMING FILE</span><strong>{offer.name}</strong><span>{formatFileSize(offer.size)} · from {offer.from}</span>
         <div className="incoming-actions"><button className="ghost-button" type="button" disabled={offer.responding} onClick={() => void answer(offer, false)}>Reject</button><button className="primary-button" type="button" disabled={offer.responding} onClick={() => void answer(offer, true)}>Accept</button></div>

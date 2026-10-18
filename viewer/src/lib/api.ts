@@ -212,6 +212,8 @@ export const setPrivacyMode = (on: boolean) => invoke<void>("set_privacy_mode", 
 
 /** One entry in a remote directory listing. */
 export interface DirEntry { name: string; is_dir: boolean; size: number; modified: number }
+/** List a directory on this computer (empty path = home folder). */
+export const browseLocal = (path: string) => invoke<{ path: string; entries: DirEntry[] }>("browse_local", { path });
 /** Ask the host to list a directory (empty path = its starting folder). The
  * answer arrives via {@link onRemoteListing}. */
 export const browseRemote = (path: string) => invoke<void>("browse_remote", { path });

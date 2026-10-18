@@ -16,6 +16,7 @@ const { listeners, mocks } = vi.hoisted(() => {
     onMultiMonitorSupport: on("multi_monitor_support"), onMonitorStreamOpened: on("monitor_stream_opened"), onMonitorStreamClosed: on("monitor_stream_closed"), onMonitorStreamRefused: on("monitor_stream_refused"), setInputMonitor: vi.fn(),
     onRestartSupport: on("restart_support"), onHostRestarting: on("host_restarting"), requestRemoteRestart: vi.fn(),
     onPrivacyModeSupport: on("privacy_mode_support"), onPrivacyModeChanged: on("privacy_mode_changed"), setPrivacyMode: vi.fn(),
+    browseLocal: vi.fn(() => Promise.resolve({ path: "/home", entries: [] })), browseRemote: vi.fn(() => Promise.resolve()), onRemoteListing: on("remote_listing"),
     onFileDrop: on("drop"), onPasswordRotated: on("password_rotated"), onIdentityChanged: on("identity_changed"),
     onIdentityConflicts: on("identity_conflicts"), getIdentityConflicts: () => Promise.resolve([]),
     permissionStatus: vi.fn(), connect: vi.fn(), disconnect: vi.fn(),

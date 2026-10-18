@@ -885,6 +885,7 @@ pub fn run() {
             request_remote_restart,
             set_privacy_mode,
             browse_remote,
+            browse_local,
             request_keyframe,
             set_clipboard_sync,
             set_allow_virtual_displays,

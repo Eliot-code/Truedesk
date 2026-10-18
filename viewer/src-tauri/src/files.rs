@@ -264,6 +264,23 @@ pub(crate) async fn send_file(
     Ok(id)
 }
 
+/// A directory listing returned to the UI (the local pane of the file manager).
+#[derive(serde::Serialize)]
+pub(crate) struct Listing {
+    pub(crate) path: String,
+    pub(crate) entries: Vec<protocol::browse::DirEntry>,
+}
+
+/// List a directory on THIS computer (the file manager's local pane). An empty
+/// path means the user's home folder.
+#[tauri::command]
+pub(crate) async fn browse_local(path: String) -> Result<Listing, String> {
+    let (path, entries) = tauri::async_runtime::spawn_blocking(move || host_core::browse::list_dir(&path))
+        .await
+        .map_err(|error| error.to_string())??;
+    Ok(Listing { path, entries })
+}
+
 /// Ask the host to list a directory for the file manager. The answer arrives as
 /// a `remote_listing` event. An empty path means the host's starting folder.
 #[tauri::command]
