@@ -702,6 +702,10 @@ where
     if unattended_enabled && crate::restart::available() {
         reliable.sender().send_frame(Tag::Control, &seal_control(&control_sealer, &Control::RestartSupport)).await?;
     }
+    // Old viewers ignore this; new ones only offer privacy mode after it.
+    if crate::privacy::available() {
+        reliable.sender().send_frame(Tag::Control, &seal_control(&control_sealer, &Control::PrivacyModeSupport)).await?;
+    }
     let path = transport.path();
     let (transport_tx, transport_rx) = transport.into_split();
     if let Some(ready) = data_ready {
@@ -734,6 +738,9 @@ where
     // task seals and sends them on the aux video channel.
     let (aux_tx, aux_rx) = mpsc::channel::<(u32, Vec<u8>)>(AUX_STREAM_QUEUE);
     let mut aux_streams: std::collections::HashMap<u32, AbortOnDrop<()>> = std::collections::HashMap::new();
+    // Held for the session; dropping it (session end, error, or panic) always
+    // restores local input and the screen.
+    let mut privacy_guard: Option<crate::privacy::PrivacyMode> = None;
     let (video, mut video_events) = VideoSource::start(capturer, encoder_factory, Arc::clone(&dims), rate, timings.capture_restore).await?;
     // Input injection makes blocking OS calls, so it runs on its own thread
     // and never stalls capture/encode/send or audio. The injector is built on
@@ -817,6 +824,21 @@ where
                         if let Err(error) = crate::secure_attention::deliver() {
                             log::debug!("ignoring secure attention request: {error}");
                         }
+                    }
+                    Some(Control::SetPrivacyMode { on }) => {
+                        if on {
+                            if privacy_guard.is_none() {
+                                match crate::privacy::enable() {
+                                    Ok(guard) => privacy_guard = Some(guard),
+                                    Err(error) => log::warn!("privacy mode could not start: {error}"),
+                                }
+                            }
+                        } else {
+                            // Dropping the guard restores local input and the screen.
+                            privacy_guard = None;
+                        }
+                        let now_on = privacy_guard.is_some();
+                        let _ = sender.send_frame(Tag::Control, &seal_control(&control_sealer, &Control::PrivacyModeChanged { on: now_on })).await;
                     }
                     Some(Control::RequestRestart) => {
                         // Only honor it on the same terms it was advertised, so a
@@ -1879,7 +1901,8 @@ async fn run_viewer_media_loop_with_control(
                     Some(Control::Bye { .. }) => return Err(crate::reconnect::HOST_ENDED_MESSAGE.into()),
                     Some(Control::MonitorList { .. } | Control::VirtualDisplaySupport { .. } | Control::VirtualDisplayAdded { .. } | Control::VirtualDisplayRefused { .. } | Control::SecureAttentionSupport
                         | Control::MultiMonitorSupport { .. } | Control::MonitorStreamOpened { .. } | Control::MonitorStreamClosed { .. } | Control::MonitorStreamRefused { .. }
-                        | Control::RestartSupport | Control::Restarting) => {
+                        | Control::RestartSupport | Control::Restarting
+                        | Control::PrivacyModeSupport | Control::PrivacyModeChanged { .. }) => {
                         if let Some(sink) = &monitor_sink { let _ = sink.send(plaintext).await; }
                     }
                     Some(Control::Pong { sent_us }) if relay_ping.is_some() => {

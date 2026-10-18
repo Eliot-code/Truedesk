@@ -126,6 +126,18 @@ pub enum Control {
     /// back. The viewer keeps retrying for the restart window instead of the
     /// short transient one.
     Restarting,
+    /// Host → viewer, after the first `MonitorList`: this host can turn on
+    /// privacy mode (blank its physical screen and ignore its local keyboard
+    /// and mouse during the session). Hosts that can't never send it, so
+    /// viewers hide the control.
+    PrivacyModeSupport,
+    /// Viewer → host: turn privacy mode on or off. Only sent to hosts that sent
+    /// `PrivacyModeSupport`. The host always restores normal input and display
+    /// when the session ends.
+    SetPrivacyMode { on: bool },
+    /// Host → viewer: privacy mode is now on or off (the real state after the
+    /// host tried to apply it).
+    PrivacyModeChanged { on: bool },
 }
 
 /// Most IDs one `Presence` query may ask about.
@@ -205,6 +217,9 @@ mod tests {
             Control::RestartSupport,
             Control::RequestRestart,
             Control::Restarting,
+            Control::PrivacyModeSupport,
+            Control::SetPrivacyMode { on: true },
+            Control::PrivacyModeChanged { on: false },
         ] {
             assert_eq!(Control::from_bytes(&c.to_bytes()), Some(c));
         }
