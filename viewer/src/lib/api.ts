@@ -209,6 +209,14 @@ export const onPrivacyModeSupport = (handler: () => void) => on("privacy_mode_su
 export const onPrivacyModeChanged = (handler: (payload: { on: boolean }) => void) => on("privacy_mode_changed", handler);
 /** Turn the host's privacy mode on or off. */
 export const setPrivacyMode = (on: boolean) => invoke<void>("set_privacy_mode", { on });
+
+/** One entry in a remote directory listing. */
+export interface DirEntry { name: string; is_dir: boolean; size: number; modified: number }
+/** Ask the host to list a directory (empty path = its starting folder). The
+ * answer arrives via {@link onRemoteListing}. */
+export const browseRemote = (path: string) => invoke<void>("browse_remote", { path });
+/** A remote directory listing, or an error, for the file manager. */
+export const onRemoteListing = (handler: (payload: { path: string; entries: DirEntry[]; error: string | null }) => void) => on("remote_listing", handler);
 /** Something the host user should know, e.g. that the viewer added a display. */
 export const onHostNotice = (handler: (payload: { message: string }) => void) => on("host_notice", handler);
 export const onLinkStats = (handler: (payload: LinkStats) => void) => on("link_stats", handler);

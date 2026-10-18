@@ -224,14 +224,20 @@ fn spawn_clipboard_thread(
 /// Dispatch the session's inbound Data channel for the whole session. It
 /// never stops on an unexpected message: ending it would drop the reliable
 /// reader's Data queue and with it the session.
+#[allow(clippy::too_many_arguments)]
 fn dispatch_data(
     app: AppHandle,
     incoming: mpsc::Receiver<Vec<u8>>,
     opener: Arc<Mutex<Opener>>,
     clipboard_tx: Option<std_mpsc::Sender<ClipboardCommand>>,
+    data_sender: ReliableSender,
+    data_sealer: Arc<Mutex<Sealer>>,
+    files_allowed: Arc<std::sync::atomic::AtomicBool>,
 ) -> (Arc<FileRouter>, mpsc::Receiver<IncomingTransfer>) {
     let (router, offers) = FileRouter::new();
     let clipboard_app = app.clone();
+    let chat_app = app.clone();
+    let browse_app = app.clone();
     tauri::async_runtime::spawn(host_core::datachan::dispatch_data(
         incoming,
         move |sealed: &[u8]| lock_unpoisoned(&opener).open(&[Tag::Data as u8], sealed),
@@ -240,9 +246,46 @@ fn dispatch_data(
             emit_activity(&clipboard_app, "clipboard", "clipboard received");
             if let Some(sender) = &clipboard_tx { let _ = sender.send(ClipboardCommand::Apply(message.text)); }
         },
-        move |message| emit(&app, "chat_message", ChatMessage { text: message.text }),
+        move |message| emit(&chat_app, "chat_message", ChatMessage { text: message.text }),
+        move |message| handle_browse(&browse_app, &data_sender, &data_sealer, &files_allowed, message),
     ));
     (router, offers)
+}
+
+/// Handle one browse message. On the host we list the directory and reply (if
+/// file access is on); on the viewer we surface the listing to the UI. The two
+/// message kinds never overlap between roles, so one handler serves both.
+fn handle_browse(
+    app: &AppHandle,
+    sender: &ReliableSender,
+    sealer: &Arc<Mutex<Sealer>>,
+    files_allowed: &Arc<std::sync::atomic::AtomicBool>,
+    message: protocol::browse::BrowseMsg,
+) {
+    use protocol::browse::BrowseMsg;
+    use protocol::datamsg::DataMsg;
+    match message {
+        BrowseMsg::ListDir { req, path } => {
+            let allowed = files_allowed.load(std::sync::atomic::Ordering::Relaxed);
+            let sender = sender.clone();
+            let sealer = sealer.clone();
+            tauri::async_runtime::spawn(async move {
+                let reply = if !allowed {
+                    BrowseMsg::BrowseError { req, message: "The other computer turned off file access.".into() }
+                } else {
+                    match tauri::async_runtime::spawn_blocking(move || host_core::browse::list_dir(&path)).await {
+                        Ok(Ok((shown, entries))) => BrowseMsg::DirListing { req, path: shown, entries },
+                        Ok(Err(error)) => BrowseMsg::BrowseError { req, message: error },
+                        Err(_) => BrowseMsg::BrowseError { req, message: "could not read that folder".into() },
+                    }
+                };
+                let sealed = lock_unpoisoned(&sealer).seal(&[Tag::Data as u8], &DataMsg::Browse(reply).to_bytes());
+                let _ = sender.send_frame(Tag::Data, &sealed).await;
+            });
+        }
+        BrowseMsg::DirListing { path, entries, .. } => emit(app, "remote_listing", RemoteListingEvent { path, entries, error: None }),
+        BrowseMsg::BrowseError { message, .. } => emit(app, "remote_listing", RemoteListingEvent { path: String::new(), entries: Vec::new(), error: Some(message) }),
+    }
 }
 
 fn activate_data_channel(app: &AppHandle, handle: DataHandle, from: String) {
@@ -252,10 +295,11 @@ fn activate_data_channel(app: &AppHandle, handle: DataHandle, from: String) {
         let state = state.lock();
         (state.clipboard_enabled.clone(), state.viewer_permissions.clipboard.clone())
     };
+    let files_allowed = { app.state::<AppState>().lock().viewer_permissions.files.clone() };
     let sealer = Arc::new(Mutex::new(sealer));
     let clipboard_thread = spawn_clipboard_thread(sender.clone(), sealer.clone(), enabled, clipboard_allowed);
     let clipboard_tx = clipboard_thread.as_ref().map(|(tx, _)| tx.clone());
-    let (file_router, offers) = dispatch_data(app.clone(), receiver, Arc::new(Mutex::new(opener)), clipboard_tx);
+    let (file_router, offers) = dispatch_data(app.clone(), receiver, Arc::new(Mutex::new(opener)), clipboard_tx, sender.clone(), sealer.clone(), files_allowed);
     let state = app.state::<AppState>();
     let mut state = state.lock();
     state.file_outgoing = Some(sender);
@@ -840,6 +884,7 @@ pub fn run() {
             get_presence,
             request_remote_restart,
             set_privacy_mode,
+            browse_remote,
             request_keyframe,
             set_clipboard_sync,
             set_allow_virtual_displays,

@@ -120,6 +120,13 @@ pub(crate) struct MonitorStreamRefusedEvent { pub(crate) id: u32, pub(crate) cod
 /// Privacy mode turned on or off on the host.
 #[derive(Serialize, Clone)]
 pub(crate) struct PrivacyModeEvent { pub(crate) on: bool }
+/// A remote directory listing for the file manager, or an error.
+#[derive(Serialize, Clone)]
+pub(crate) struct RemoteListingEvent {
+    pub(crate) path: String,
+    pub(crate) entries: Vec<protocol::browse::DirEntry>,
+    pub(crate) error: Option<String>,
+}
 /// Something the host user should know about, shown as an info toast.
 #[derive(Serialize, Clone)]
 pub(crate) struct HostNoticeEvent { pub(crate) message: &'static str }
