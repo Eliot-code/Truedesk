@@ -203,6 +203,12 @@ export const onRestartSupport = (handler: () => void) => on("restart_support", h
 export const onHostRestarting = (handler: () => void) => on("host_restarting", handler);
 /** Ask the host to restart its computer. */
 export const requestRemoteRestart = () => invoke<void>("request_remote_restart");
+/** The host can blank its screen and ignore its local input (privacy mode). */
+export const onPrivacyModeSupport = (handler: () => void) => on("privacy_mode_support", handler);
+/** Privacy mode turned on or off on the host. */
+export const onPrivacyModeChanged = (handler: (payload: { on: boolean }) => void) => on("privacy_mode_changed", handler);
+/** Turn the host's privacy mode on or off. */
+export const setPrivacyMode = (on: boolean) => invoke<void>("set_privacy_mode", { on });
 /** Something the host user should know, e.g. that the viewer added a display. */
 export const onHostNotice = (handler: (payload: { message: string }) => void) => on("host_notice", handler);
 export const onLinkStats = (handler: (payload: LinkStats) => void) => on("link_stats", handler);

@@ -117,6 +117,9 @@ pub(crate) struct MonitorStreamEvent { pub(crate) id: u32 }
 /// The host refused an aux stream for monitor `id`.
 #[derive(Serialize, Clone)]
 pub(crate) struct MonitorStreamRefusedEvent { pub(crate) id: u32, pub(crate) code: String }
+/// Privacy mode turned on or off on the host.
+#[derive(Serialize, Clone)]
+pub(crate) struct PrivacyModeEvent { pub(crate) on: bool }
 /// Something the host user should know about, shown as an info toast.
 #[derive(Serialize, Clone)]
 pub(crate) struct HostNoticeEvent { pub(crate) message: &'static str }

@@ -18,6 +18,7 @@ across the top. From left to right:
 | **Files** | Opens the file transfer panel. |
 | **Record** / **Stop** | Records the session to a video file. A red timer shows while it runs. |
 | **Restart** | Restarts the other computer and reconnects when it comes back. Shows only when the host has unattended access on and can restart on its own; it returns only if it is also set to start at sign-in. |
+| **Privacy** | Blanks the other computer's screen and blocks its local keyboard and mouse, so nobody at it can watch or interfere while you work. You still see and control it normally. The host always restores both when the session ends, and someone at the host can regain control with Ctrl+Alt+Del. Windows only for now. |
 | Timer | How long this session has run. |
 | **Disconnect** | Ends the session. |
 

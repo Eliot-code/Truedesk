@@ -22,6 +22,9 @@ interface ToolbarProps {
   onOpenMonitorWindow?: (id: number) => void;
   canRestart?: boolean;
   onRestart?: () => void;
+  canPrivacy?: boolean;
+  privacyOn?: boolean;
+  onPrivacyChange?: (on: boolean) => void;
   audioMuted?: boolean;
   onAudioMutedChange?: (muted: boolean) => void;
   recordingActive?: boolean;
@@ -61,6 +64,7 @@ const icons = {
   monitor: <Icon><rect width="20" height="14" x="2" y="3" rx="2" /><line x1="8" x2="16" y1="21" y2="21" /><line x1="12" x2="12" y1="17" y2="21" /></Icon>,
   newWindow: <Icon><rect width="18" height="14" x="3" y="5" rx="2" /><path d="M3 9h18" /><path d="M14 13h4v4" /><path d="M18 13l-5 5" /></Icon>,
   restart: <Icon><path d="M21 12a9 9 0 1 1-2.64-6.36" /><path d="M21 3v6h-6" /></Icon>,
+  privacy: <Icon><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z" /><circle cx="12" cy="12" r="3" /><path d="M3 3l18 18" /></Icon>,
   clipboard: <Icon><rect width="8" height="4" x="8" y="2" rx="1" /><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" /></Icon>,
   sound: <Icon>{speaker}<path d="M16 9a5 5 0 0 1 0 6" /><path d="M19.364 18.364a9 9 0 0 0 0-12.728" /></Icon>,
   muted: <Icon>{speaker}<line x1="22" x2="16" y1="9" y2="15" /><line x1="16" x2="22" y1="9" y2="15" /></Icon>,
@@ -130,7 +134,7 @@ export function LinkBadge({ link }: { link: LinkStats }) {
 
 const connectionLabels: Record<Status, string> = { in_session: "Connected", connecting: "Reconnecting", online: "Connected", offline: "Disconnected" };
 
-export default function Toolbar({ remoteId, role = "viewer", status = "in_session", link, clipboardSync = true, onClipboardSyncChange = () => {}, onDisconnect, monitors = [], selectedMonitor, onMonitorChange = () => {}, canAddDisplay = false, onAddDisplay = () => {}, onRemoveDisplay = () => {}, canOpenMonitorWindow = false, onOpenMonitorWindow = () => {}, audioMuted = false, onAudioMutedChange = () => {}, recordingActive = false, recordingElapsed = 0, onRecordingToggle = () => {}, filesOpen = false, onFilesToggle = () => {}, chatOpen = false, onChatToggle = () => {}, chatUnread = 0, viewOnly = false, onViewOnlyChange = () => {}, canSecureAttention = false, onSecureAttention = () => {}, canRestart = false, onRestart = () => {} }: ToolbarProps) {
+export default function Toolbar({ remoteId, role = "viewer", status = "in_session", link, clipboardSync = true, onClipboardSyncChange = () => {}, onDisconnect, monitors = [], selectedMonitor, onMonitorChange = () => {}, canAddDisplay = false, onAddDisplay = () => {}, onRemoveDisplay = () => {}, canOpenMonitorWindow = false, onOpenMonitorWindow = () => {}, audioMuted = false, onAudioMutedChange = () => {}, recordingActive = false, recordingElapsed = 0, onRecordingToggle = () => {}, filesOpen = false, onFilesToggle = () => {}, chatOpen = false, onChatToggle = () => {}, chatUnread = 0, viewOnly = false, onViewOnlyChange = () => {}, canSecureAttention = false, onSecureAttention = () => {}, canRestart = false, onRestart = () => {}, canPrivacy = false, privacyOn = false, onPrivacyChange = () => {} }: ToolbarProps) {
   const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
@@ -177,6 +181,7 @@ export default function Toolbar({ remoteId, role = "viewer", status = "in_sessio
             <IconButton label="View only" pressed={viewOnly} title={viewOnly ? "View only is on. Click to send input again." : "View only is off. Click to stop sending input."} onClick={() => onViewOnlyChange(!viewOnly)} text="View only" icon={icons.eye} />
             {canSecureAttention && <IconButton label="Send Ctrl+Alt+Del" text="Ctrl+Alt+Del" title="Send Ctrl+Alt+Del to the other computer" icon={icons.keyboard} onClick={onSecureAttention} />}
             {canRestart && <IconButton label="Restart remote" text="Restart" title="Restart the other computer and reconnect when it comes back" icon={icons.restart} onClick={onRestart} />}
+            {canPrivacy && <IconButton label="Privacy mode" pressed={privacyOn} title={privacyOn ? "Privacy mode is on: the other screen is blank and its local input is blocked. Click to turn off." : "Blank the other screen and block its local keyboard and mouse"} icon={icons.privacy} text="Privacy" onClick={() => onPrivacyChange(!privacyOn)} />}
             {recordingActive && <span className="session-toolbar__recording-status" aria-label="Recording elapsed"><span className="session-toolbar__recording-dot" aria-hidden="true" />{formatDuration(recordingElapsed)}</span>}
             <IconButton label={recordingActive ? "Stop recording" : "Record"} text={recordingActive ? "Stop" : "Record"} icon={recordingActive ? icons.stop : icons.record} tone="danger" onClick={onRecordingToggle} />
           </>}

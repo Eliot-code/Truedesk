@@ -162,6 +162,13 @@ pub(crate) async fn request_remote_restart(state: tauri::State<'_, AppState>) ->
     send_control(&state, Control::RequestRestart).await
 }
 
+/// Turn the host's privacy mode on or off (blank its screen, ignore its local
+/// input). Only offered when the host sent `PrivacyModeSupport`.
+#[tauri::command]
+pub(crate) async fn set_privacy_mode(state: tauri::State<'_, AppState>, on: bool) -> Result<(), String> {
+    send_control(&state, Control::SetPrivacyMode { on }).await
+}
+
 /// Which of `ids` (saved devices) have a host online on the configured relays
 /// right now. Used by the address book's status dots.
 #[tauri::command]
@@ -330,6 +337,8 @@ pub(crate) fn connect(
                             monitor_restart.store(true, Ordering::Relaxed);
                             emit(&monitor_app, "host_restarting", ());
                         }
+                        Some(Control::PrivacyModeSupport) => emit(&monitor_app, "privacy_mode_support", ()),
+                        Some(Control::PrivacyModeChanged { on }) => emit(&monitor_app, "privacy_mode_changed", PrivacyModeEvent { on }),
                         _ => {}
                     }
                 }
