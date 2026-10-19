@@ -40,8 +40,9 @@ pub fn format_mac(mac: [u8; 6]) -> String {
 
 pub fn magic_packet(mac: [u8; 6]) -> [u8; 102] {
     let mut packet = [0xFF; 102];
-    for copy in packet[6..].chunks_exact_mut(6) {
-        copy.copy_from_slice(&mac);
+    let (copies, _) = packet[6..].as_chunks_mut::<6>();
+    for copy in copies {
+        *copy = mac;
     }
     packet
 }
@@ -282,7 +283,8 @@ mod tests {
         let packet = magic_packet(MAC);
         assert_eq!(packet[..6], [0xFF; 6]);
         assert_eq!(packet.len(), 6 + 16 * 6);
-        assert!(packet[6..].chunks(6).all(|copy| copy == MAC));
+        let (copies, rest) = packet[6..].as_chunks::<6>();
+        assert!(rest.is_empty() && copies.len() == 16 && copies.iter().all(|copy| *copy == MAC));
     }
 
     #[test]
