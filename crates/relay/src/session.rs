@@ -1,4 +1,4 @@
-use crate::registry::{CloseOutbound, Outbound, Registration, Registry};
+use crate::registry::{CloseOutbound, Outbound, PeerNotify, Registration, Registry};
 use protocol::{control::Control, frame, Tag};
 use tokio::sync::oneshot;
 
@@ -49,8 +49,10 @@ pub enum Bridge {
     /// This connection is a host that just parked its sender. Resolves to
     /// the viewer's sender once a matching `connect` takes it.
     HostRegistered { peer_id: String, notify_rx: oneshot::Receiver<(Outbound, CloseOutbound, String)> },
-    /// This connection is a viewer bridged to the given host sender.
-    ViewerPaired { host_tx: Outbound, host_close_tx: CloseOutbound, requester_id: String, target_id: String },
+    /// This connection is a viewer bridged to the given host sender. The
+    /// host's task waits for `host_notify`; send both `paired` frames before
+    /// firing it, so neither side hears from the other before its `paired`.
+    ViewerPaired { host_tx: Outbound, host_close_tx: CloseOutbound, host_notify: PeerNotify, requester_id: String, target_id: String },
     /// This connection asked which IDs are online. The relay answers and closes
     /// it; no pairing happens.
     Presence { online: Vec<String> },
@@ -79,9 +81,8 @@ pub fn classify(msg: &[u8], me: Outbound, me_close_tx: CloseOutbound, reg: &Regi
         Control::Connect { target, peer_id, ver } => {
             if !valid_peer_id(&target) || !valid_peer_id(&peer_id) || ver != SUPPORTED_VERSION { return Err(ClassifyError::InvalidConnect); }
             if !reg.allow_connect(source, &target) { return Err(ClassifyError::ConnectRateLimited); }
-            let (host_tx, host_close_tx, notify) = reg.take(&target).ok_or(ClassifyError::PeerUnavailable)?;
-            let _ = notify.send((me, me_close_tx, peer_id.clone()));
-            Ok(Bridge::ViewerPaired { host_tx, host_close_tx, requester_id: peer_id, target_id: target })
+            let (host_tx, host_close_tx, host_notify) = reg.take(&target).ok_or(ClassifyError::PeerUnavailable)?;
+            Ok(Bridge::ViewerPaired { host_tx, host_close_tx, host_notify, requester_id: peer_id, target_id: target })
         }
         Control::Presence { ids } => {
             // Bounded and valid-only, so this cannot scan the ID space: each

@@ -342,9 +342,14 @@ async fn handle(socket: WebSocket, state: RelayState, addr: IpAddr, guard: Optio
 
     let bridge = session::classify(&first, my_tx.clone(), close_tx.clone(), &state.registry, addr);
     let (peer_tx, peer_close_tx, registered_peer) = match bridge {
-        Ok(Bridge::ViewerPaired { host_tx, host_close_tx, requester_id, target_id }) => {
+        Ok(Bridge::ViewerPaired { host_tx, host_close_tx, host_notify, requester_id, target_id }) => {
+            // Both `paired` frames go out before the host's task wakes, so
+            // nothing from the host (it may have sent its key exchange while
+            // it waited) can reach the viewer ahead of its `paired`, and
+            // nothing from the viewer can reach the host ahead of its own.
             let _ = host_tx.send(session::paired_frame("host", &requester_id)).await;
             let _ = my_tx.send(session::paired_frame("viewer", &target_id)).await;
+            let _ = host_notify.send((my_tx.clone(), close_tx.clone(), requester_id));
             log_event("pairing_success", addr, "viewer");
             (host_tx, host_close_tx, None)
         }
@@ -376,8 +381,8 @@ async fn handle(socket: WebSocket, state: RelayState, addr: IpAddr, guard: Optio
                     }
                 }
             };
-            let Some((peer, peer_close_tx, requester_id)) = peer else { state.registry.unregister(&peer_id, &my_tx); writer.abort(); log_event("pairing_failure", addr, "pair_timeout"); return; };
-            let _ = my_tx.send(session::paired_frame("host", &requester_id)).await;
+            // The viewer's task already sent this host its `paired`.
+            let Some((peer, peer_close_tx, _requester_id)) = peer else { state.registry.unregister(&peer_id, &my_tx); writer.abort(); log_event("pairing_failure", addr, "pair_timeout"); return; };
             log_event("pairing_success", addr, "host");
             for frame in early {
                 if !bytes.allow(frame.len()) || peer.send(frame).await.is_err() { break; }
