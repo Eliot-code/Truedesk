@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Screen sharing runs in a foreground service, as Android requires for
+         MediaProjection; the notification needs POST_NOTIFICATIONS on 13+. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application>
+        <!-- Holds the MediaProjection the user granted and pushes screen
+             frames to the engine. Not exported: only this app starts it. -->
+        <service
+            android:name="com.truedesk.host.CaptureService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+
+        <!-- Carries out the viewer's taps and typing. The user turns it on in
+             Settings > Accessibility; the system binds it with its own
+             permission, so it is exported as every accessibility service is. -->
+        <service
+            android:name="com.truedesk.host.ControlService"
+            android:exported="true"
+            android:label="@string/truedesk_accessibility_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/truedesk_accessibility" />
+        </service>
+    </application>
+</manifest>

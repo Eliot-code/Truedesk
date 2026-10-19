@@ -1,6 +1,6 @@
 ---
 title: Phones and tablets
-description: Control a computer from an Android phone or tablet with the Truedesk app, or from any phone's browser, with touch gestures and the on-screen keyboard.
+description: Control a computer from an Android phone or tablet with the Truedesk app, or from any phone's browser, and share an Android device so someone can control it.
 ---
 
 You can control a computer running Truedesk from a phone or tablet. The
@@ -21,6 +21,29 @@ Install the Truedesk app for Android:
 The app is the [browser viewer](/docs/browser-viewer/) in an app window, so
 it can do what the browser viewer can: screen, mouse and keyboard, sound,
 files and clipboard, over the relay.
+
+## Share an Android device
+
+The Android app can also be shared, so a Truedesk viewer sees and controls
+*this* phone or tablet — remote support for a phone.
+
+1. On the connect form, tap **Share this device**.
+2. Turn on **Truedesk remote control** when asked: this is an Android
+   accessibility service, which lets the app carry out the viewer's taps and
+   typing. You turn it on in **Settings → Accessibility**; turn it off there
+   any time.
+3. Tap **Start sharing** and allow the system's screen-capture prompt. A
+   notification stays up for as long as you share.
+4. Give the **device ID** and **password** on the screen to the person
+   connecting. When they connect you get an **Allow / Deny** prompt, unless
+   you share without asking.
+
+The viewer's mouse becomes touches: a click taps, a drag drags, the wheel and
+two-finger drags scroll, and right-click is Back. Typing goes to the focused
+field, and the arrows, Home, End and Esc map to editing and the Back button.
+
+Only Android can be shared this way. iPhone and iPad can be viewed from
+Truedesk but not controlled, because iOS does not let an app inject input.
 
 ## iPhone and iPad
 

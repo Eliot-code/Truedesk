@@ -19,9 +19,11 @@ export interface ConnectFormProps {
   busy?: boolean;
   initialTarget?: string;
   onConnect(request: ConnectRequest): void;
+  /** Shown only in the app on a device that can be shared (Android). */
+  onShare?: () => void;
 }
 
-export default function ConnectForm({ viewerId, relay: savedRelay, defaultRelay, message, unsupported, busy = false, initialTarget = "", onConnect }: ConnectFormProps) {
+export default function ConnectForm({ viewerId, relay: savedRelay, defaultRelay, message, unsupported, busy = false, initialTarget = "", onConnect, onShare }: ConnectFormProps) {
   const [target, setTarget] = useState(initialTarget);
   const [password, setPassword] = useState("");
   const [relay, setRelay] = useState(savedRelay);
@@ -75,6 +77,11 @@ export default function ConnectForm({ viewerId, relay: savedRelay, defaultRelay,
         <p className="caption web-reassure">
           Everything you see and do stays encrypted all the way to the other computer. The relay only passes sealed data through; it can't read your screen or what you type.
         </p>
+        {onShare && (
+          <p className="web-share-link">
+            Want to be controlled instead? <button type="button" className="ghost-button" onClick={onShare}>Share this device</button>
+          </p>
+        )}
       </section>
     </main>
   );

@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-stop-hosting"
+description = "Enables the stop_hosting command without any pre-configured scope."
+commands.allow = ["stop_hosting"]
+
+[[permission]]
+identifier = "deny-stop-hosting"
+description = "Denies the stop_hosting command without any pre-configured scope."
+commands.deny = ["stop_hosting"]

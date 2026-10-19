@@ -215,3 +215,20 @@ fn poll<'local>(
         std::thread::sleep(Duration::from_millis(15).min(deadline.saturating_duration_since(std::time::Instant::now())));
     }
 }
+
+/// Keeps the JNI symbols in the final shared library. A dependency crate's
+/// `#[no_mangle]` functions are dropped unless something references them, and
+/// Kotlin resolves these by name at runtime, so the app calls this once on
+/// startup to pin them.
+pub fn keep_linked() -> usize {
+    let exports: [*const (); 7] = [
+        Java_com_truedesk_host_Native_nativeInit as *const (),
+        Java_com_truedesk_host_Native_nativeStart as *const (),
+        Java_com_truedesk_host_Native_nativeStop as *const (),
+        Java_com_truedesk_host_Native_nativeAnswer as *const (),
+        Java_com_truedesk_host_Native_nativePushFrame as *const (),
+        Java_com_truedesk_host_Native_nativeNextAction as *const (),
+        Java_com_truedesk_host_Native_nativeNextEvent as *const (),
+    ];
+    exports.iter().map(|pointer| *pointer as usize).sum()
+}

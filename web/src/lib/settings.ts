@@ -75,3 +75,63 @@ export function savedRelay(): string {
 export function saveRelay(url: string) {
   write(RELAY_KEY, url === DEFAULT_RELAY ? null : url);
 }
+
+// --- Hosting this device (the Android app's "Share this phone" screen) ---
+
+const HOST_ID_KEY = "truedesk.hostId";
+const HOST_TOKEN_KEY = "truedesk.hostToken";
+const HOST_PASSWORD_KEY = "truedesk.hostPassword";
+
+/** The ID a viewer dials to control this device. Kept so it stays the same. */
+export function hostId(): string {
+  const saved = read(HOST_ID_KEY);
+  if (saved && /^[1-9]\d{8}$/.test(saved)) return saved;
+  return resetHostId();
+}
+
+/** Picks a fresh host ID, e.g. after the relay reports the ID is in use. */
+export function resetHostId(): string {
+  const id = generateViewerId();
+  write(HOST_ID_KEY, id);
+  return id;
+}
+
+/** A random token that binds the host ID to this device on the relay. */
+export function hostToken(): string {
+  const saved = read(HOST_TOKEN_KEY);
+  if (saved && /^[0-9a-f]{64}$/.test(saved)) return saved;
+  const bytes = new Uint8Array(32);
+  try {
+    crypto.getRandomValues(bytes);
+  } catch {
+    for (let i = 0; i < bytes.length; i += 1) bytes[i] = Math.floor(Math.random() * 256);
+  }
+  const token = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  write(HOST_TOKEN_KEY, token);
+  return token;
+}
+
+/** The password a viewer must enter to control this device. */
+export function hostPassword(): string {
+  const saved = read(HOST_PASSWORD_KEY);
+  if (saved) return saved;
+  const password = generateHostPassword();
+  write(HOST_PASSWORD_KEY, password);
+  return password;
+}
+
+export function setHostPassword(password: string) {
+  write(HOST_PASSWORD_KEY, password || null);
+}
+
+/** A short, readable password: no look-alike characters. */
+export function generateHostPassword(random: (array: Uint8Array<ArrayBuffer>) => void = (array) => crypto.getRandomValues(array)): string {
+  const alphabet = "abcdefghjkmnpqrstuvwxyz23456789";
+  const bytes = new Uint8Array(8);
+  try {
+    random(bytes);
+  } catch {
+    for (let i = 0; i < bytes.length; i += 1) bytes[i] = Math.floor(Math.random() * 256);
+  }
+  return Array.from(bytes, (b) => alphabet[b % alphabet.length]).join("");
+}

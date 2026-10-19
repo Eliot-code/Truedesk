@@ -18,3 +18,5 @@ tauri-build = { version = "2.7", features = [] }
 
 [dependencies]
 tauri = { version = "2.12", features = [] }
+# Lets the app host this device from a viewer (Android only; a no-op elsewhere).
+tauri-plugin-truedesk-host = { path = "../plugins/truedesk-host" }

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The remote-control service needs to perform gestures (taps, swipes) and
+     to read the focused field so typing and editing land in the right place.
+     It listens for no events; the host engine drives it. -->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:canPerformGestures="true"
+    android:canRetrieveWindowContent="true"
+    android:description="@string/truedesk_accessibility_description"
+    android:notificationTimeout="0" />

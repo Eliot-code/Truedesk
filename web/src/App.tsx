@@ -6,6 +6,8 @@ import type { Core, FileSignal, MonitorInfo } from "./lib/types";
 import ConnectForm, { type ConnectRequest } from "./screens/ConnectForm";
 import Session, { type SessionControls } from "./screens/Session";
 import TwofaPrompt from "./screens/TwofaPrompt";
+import ShareScreen from "./screens/ShareScreen";
+import { canShareDevice } from "./lib/host";
 
 export interface AppProps {
   loadCore(): Promise<Core>;
@@ -20,6 +22,7 @@ interface Active {
 
 export default function App({ loadCore, openSocket, unsupported = unsupportedReason() }: AppProps) {
   const [ownId] = useState(viewerId);
+  const [mode, setMode] = useState<"connect" | "share">("connect");
   const [active, setActive] = useState<Active | null>(null);
   const [monitors, setMonitors] = useState<MonitorInfo[]>([]);
   const [message, setMessage] = useState<string>();
@@ -111,6 +114,9 @@ export default function App({ loadCore, openSocket, unsupported = unsupportedRea
       {prompt}
     </>;
   }
+  if (mode === "share") {
+    return <ShareScreen onBack={() => setMode("connect")} />;
+  }
   return (
     <>
       <ConnectForm
@@ -122,6 +128,7 @@ export default function App({ loadCore, openSocket, unsupported = unsupportedRea
         busy={busy}
         initialTarget={lastTarget}
         onConnect={(request) => void connect(request)}
+        onShare={canShareDevice() ? () => setMode("share") : undefined}
       />
       {prompt}
     </>

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="truedesk_accessibility_label">Truedesk remote control</string>
+    <string name="truedesk_accessibility_description">Lets a remote viewer you have allowed carry out taps, swipes and typing on this device while you are sharing it. Only active while you are hosting a session; turn it off here any time.</string>
+</resources>

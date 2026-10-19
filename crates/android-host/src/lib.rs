@@ -11,7 +11,7 @@ pub mod host;
 pub mod input;
 
 #[cfg(target_os = "android")]
-mod jni;
+pub mod jni;
 
 pub use capture::{FramePusher, PushCapturer};
 pub use host::{host, HostConfig, HostController, HostEvent, HostEvents, HostStatus};

@@ -1,0 +1,12 @@
+"$schema" = "schemas/schema.json"
+
+[default]
+description = "Lets the app's own UI share this device: check readiness, start and stop hosting, answer the allow/deny prompt and read host events."
+permissions = [
+  "allow-host-state",
+  "allow-open-accessibility-settings",
+  "allow-start-hosting",
+  "allow-stop-hosting",
+  "allow-answer-request",
+  "allow-poll-event",
+]
