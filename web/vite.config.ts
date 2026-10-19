@@ -34,8 +34,11 @@ export default defineConfig({
   base: "./",
   plugins: [react(), contentSecurityPolicy()],
   define: { __DEFAULT_RELAY__: JSON.stringify(defaultRelay) },
-  // The video and input code is shared with the desktop viewer.
+  // The video and input code is shared with the desktop viewer. Its React
+  // components use this app's React: the desktop viewer's packages may not
+  // be installed, and two copies of React would break hooks.
   server: { fs: { allow: [".."] } },
+  resolve: { dedupe: ["react", "react-dom"] },
   // Never inline assets as data: URLs; the CSP only allows this origin.
   build: { assetsInlineLimit: 0 },
 });
