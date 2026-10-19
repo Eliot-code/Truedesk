@@ -8,6 +8,7 @@ import FileTransfer from "../components/FileTransfer";
 import ChatPanel, { type ChatEntry } from "../components/ChatPanel";
 import HostControlPanel from "../components/HostControlPanel";
 import TunnelPanel, { tunnelRefusal } from "../components/TunnelPanel";
+import WakePanel from "../components/WakePanel";
 import { friendlyError, useNotify } from "../lib/notify";
 
 /** Why the host didn't add or remove a virtual display. */
@@ -74,6 +75,8 @@ export default function Session({ remoteId, role, status = "in_session", onDisco
   const [privacyOn, setPrivacyOn] = useState(false);
   const [canTunnel, setCanTunnel] = useState(false);
   const [tunnelsOpen, setTunnelsOpen] = useState(false);
+  const [canWake, setCanWake] = useState(false);
+  const [wakeOpen, setWakeOpen] = useState(false);
   // Off until the saved preference loads (clipboard sync defaults off).
   const [clipboardSync, setClipboardSync] = useState(false);
   const [audioMuted, setAudioMuted] = useState(false);
@@ -176,6 +179,24 @@ export default function Session({ remoteId, role, status = "in_session", onDisco
     if (status !== "in_session") { setCanTunnel(false); setTunnelsOpen(false); return; }
     let active = true;
     void api.getTunnelSupport().then((available) => { if (active && available) setCanTunnel(true); }).catch(() => {});
+    return () => { active = false; };
+  }, [role, status]);
+
+  // The host wakes computers on its networks, and says when it couldn't.
+  useEffect(() => {
+    if (role !== "viewer") return;
+    const listeners = Promise.all([
+      api.onWakeRelaySupport(() => setCanWake(true)),
+      api.onWakeSent(({ sent }) => { if (sent === 0) notify("The other computer couldn't send the wake-up signal. It may have remote control turned off."); }),
+    ]);
+    return () => { void listeners.then((stops) => stops.forEach((stop) => stop())); };
+  }, [role, notify]);
+
+  useEffect(() => {
+    if (role !== "viewer") return;
+    if (status !== "in_session") { setCanWake(false); setWakeOpen(false); return; }
+    let active = true;
+    void api.getWakeRelaySupport().then((available) => { if (active && available) setCanWake(true); }).catch(() => {});
     return () => { active = false; };
   }, [role, status]);
 
@@ -377,10 +398,11 @@ export default function Session({ remoteId, role, status = "in_session", onDisco
       {role === "viewer" && <canvas ref={canvasRef} className="session-canvas" tabIndex={0} aria-label="Remote screen" onPointerEnter={reclaimInput} onPointerDown={reclaimInput} />}
       {role === "host" && <div className="session-host-overlay"><span className="eyebrow">TRUEDESK · SECURE SESSION</span><h1>You are being controlled by {remoteId}</h1><p>Your screen is shared for this session.</p></div>}
       {role === "host" && <HostControlPanel remoteId={remoteId} onDisconnect={() => void api.disconnectViewer().catch((error: unknown) => notify(friendlyError(error)))} />}
-      <Toolbar remoteId={remoteId} role={role} status={status} link={link} monitors={monitors} selectedMonitor={selectedMonitor} onMonitorChange={chooseMonitor} canAddDisplay={canAddDisplay} onAddDisplay={addDisplay} onRemoveDisplay={removeDisplay} canOpenMonitorWindow={canOpenMonitorWindow} onOpenMonitorWindow={openMonitorWindow} clipboardSync={clipboardSync} onClipboardSyncChange={toggleClipboardSync} audioMuted={audioMuted} onAudioMutedChange={toggleAudioMuted} recordingActive={recordingActive} recordingElapsed={recordingElapsed} onRecordingToggle={() => void toggleRecording()} filesOpen={filesOpen} onFilesToggle={() => setFilesOpen((open) => !open)} chatOpen={chatOpen} onChatToggle={toggleChat} chatUnread={chatUnread} canTunnel={canTunnel} tunnelsOpen={tunnelsOpen} onTunnelsToggle={() => setTunnelsOpen((open) => !open)} viewOnly={viewOnly} onViewOnlyChange={setViewOnly} canSecureAttention={canSecureAttention} onSecureAttention={sendSecureAttention} canRestart={canRestart} onRestart={restartRemote} canPrivacy={canPrivacy} privacyOn={privacyOn} onPrivacyChange={togglePrivacy} onDisconnect={onDisconnect} />
+      <Toolbar remoteId={remoteId} role={role} status={status} link={link} monitors={monitors} selectedMonitor={selectedMonitor} onMonitorChange={chooseMonitor} canAddDisplay={canAddDisplay} onAddDisplay={addDisplay} onRemoveDisplay={removeDisplay} canOpenMonitorWindow={canOpenMonitorWindow} onOpenMonitorWindow={openMonitorWindow} clipboardSync={clipboardSync} onClipboardSyncChange={toggleClipboardSync} audioMuted={audioMuted} onAudioMutedChange={toggleAudioMuted} recordingActive={recordingActive} recordingElapsed={recordingElapsed} onRecordingToggle={() => void toggleRecording()} filesOpen={filesOpen} onFilesToggle={() => setFilesOpen((open) => !open)} chatOpen={chatOpen} onChatToggle={toggleChat} chatUnread={chatUnread} canTunnel={canTunnel} tunnelsOpen={tunnelsOpen} onTunnelsToggle={() => setTunnelsOpen((open) => !open)} canWake={canWake} wakeOpen={wakeOpen} onWakeToggle={() => setWakeOpen((open) => !open)} viewOnly={viewOnly} onViewOnlyChange={setViewOnly} canSecureAttention={canSecureAttention} onSecureAttention={sendSecureAttention} canRestart={canRestart} onRestart={restartRemote} canPrivacy={canPrivacy} privacyOn={privacyOn} onPrivacyChange={togglePrivacy} onDisconnect={onDisconnect} />
       {role === "viewer" && <FileTransfer open={filesOpen} onOpenChange={onFilesOpenChange} />}
       {role === "viewer" && <ChatPanel open={chatOpen} messages={messages} onSend={sendChat} onClose={() => setChatOpen(false)} />}
       {role === "viewer" && canTunnel && <TunnelPanel open={tunnelsOpen} onClose={() => setTunnelsOpen(false)} />}
+      {role === "viewer" && canWake && <WakePanel open={wakeOpen} currentId={remoteId} onClose={() => setWakeOpen(false)} />}
     </main>
   );
 }

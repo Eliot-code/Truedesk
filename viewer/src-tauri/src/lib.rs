@@ -14,6 +14,7 @@ mod windows_service;
 pub use windows_service::run_windows_service;
 mod viewer;
 mod tunnels;
+mod wake;
 
 use config::ConfigStore;
 use contacts::{Contact, ContactStore};
@@ -30,10 +31,15 @@ pub(crate) use files::*;
 pub(crate) use host::*;
 pub(crate) use viewer::*;
 pub(crate) use tunnels::*;
+pub(crate) use wake::*;
 
 struct RuntimeState {
     config: ConfigStore,
     contacts: ContactStore,
+    /// How to wake the computers this app has viewed.
+    wake: WakeStore,
+    /// The host this app is viewing sends wake packets on its networks.
+    wake_relay: bool,
     password: Option<String>,
     host_thread: Option<HostThread>,
     /// Set while a `start_hosting` registration task is connecting/waiting for
@@ -371,6 +377,7 @@ fn clear_data_channel(app: &AppHandle) {
         let saved = state.config.config.clipboard_sync;
         state.clipboard_enabled.store(saved, Ordering::Relaxed);
         state.pending_file_requests.clear();
+        state.wake_relay = false;
         (thread, tunnels)
     };
     // Outside the lock: shutting down reports to the UI.
@@ -849,10 +856,13 @@ pub fn run() {
             let app_data_dir = std::env::var_os("TRUEDESK_DATA_DIR").map(PathBuf::from).unwrap_or(app_data_dir);
             let config = ConfigStore::load(&app_data_dir)?;
             let contacts = ContactStore::load(&app_data_dir)?;
+            let wake = WakeStore::load(&app_data_dir)?;
             let clipboard_sync = config.config.clipboard_sync;
             app.manage(AppState(Mutex::new(RuntimeState {
                 config,
                 contacts,
+                wake,
+                wake_relay: false,
                 password: None,
                 host_thread: None,
                 host_starting: None,
@@ -965,7 +975,10 @@ pub fn run() {
             open_tunnel,
             close_tunnel,
             list_tunnels,
-            tunnel_support
+            tunnel_support,
+            wake_device,
+            wakeable_devices,
+            wake_relay_support
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -1238,6 +1251,8 @@ mod tests {
         let app_state = AppState(Mutex::new(RuntimeState {
             config: ConfigStore::load(&directory).unwrap(),
             contacts: ContactStore::load(&directory).unwrap(),
+            wake: WakeStore::load(&directory).unwrap(),
+            wake_relay: false,
             password: None,
             host_thread: None,
             host_starting: None,

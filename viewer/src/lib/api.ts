@@ -223,6 +223,16 @@ export const closeTunnel = (id: number) => invoke<void>("close_tunnel", { id });
 export const listTunnels = () => invoke<TunnelInfo[]>("list_tunnels");
 /** Whether the current session's host takes tunnels (for a screen that may have missed {@link onTunnelSupport}). */
 export const getTunnelSupport = () => invoke<boolean>("tunnel_support");
+/** The host sends Wake-on-LAN packets on its networks for this viewer. */
+export const onWakeRelaySupport = (handler: () => void) => on("wake_relay_support", handler);
+/** Whether the current session's host wakes computers on its networks (for a screen that may have missed {@link onWakeRelaySupport}). */
+export const getWakeRelaySupport = () => invoke<boolean>("wake_relay_support");
+/** The host answered a relayed wake request; `sent` is 0 when it sent nothing. */
+export const onWakeSent = (handler: (payload: { sent: number }) => void) => on("wake_sent", handler);
+/** Wake a device: from this computer's network and, when it offers that, through the host being viewed. */
+export const wakeDevice = (peerId: string) => invoke<{ sent: number; relayed: boolean }>("wake_device", { peerId });
+/** IDs of the devices Truedesk knows how to wake (it learns while connected to them). */
+export const listWakeable = () => invoke<string[]>("wakeable_devices");
 
 /** One entry in a remote directory listing. */
 export interface DirEntry { name: string; is_dir: boolean; size: number; modified: number }

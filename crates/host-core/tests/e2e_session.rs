@@ -4,7 +4,7 @@ use host_core::{
     filexfer::{ConsentDecision, FileReceiver, FileSink, FileSource, FileSender},
     inject::{InputInjector, NoopInjector},
     relay_client,
-    roles::{run_host_session, run_host_session_with_data, run_viewer_session, run_viewer_session_with_data, DataHandle},
+    roles::{run_host_session, run_host_session_with_data, run_viewer_session, run_viewer_session_with_data, run_viewer_session_with_monitors, DataHandle},
 };
 use async_trait::async_trait;
 use protocol::{clipboard::ClipboardMsg, crypto::{Opener, Sealer}, datamsg::DataMsg, filexfer::FileMsg, input::InputEvent, Tag};
@@ -531,4 +531,55 @@ async fn host_session_ends_when_viewer_disappears() {
     viewer.abort();
     let ended = timeout(Duration::from_secs(10), host).await;
     assert!(ended.is_ok(), "host session kept running after the viewer disconnected");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_host_offers_wake_on_lan_and_answers_wake_requests() {
+    use protocol::control::Control;
+    let addr = relay::spawn_test_server().await;
+    let host_ws = connect_to_peer(&addr, false).await;
+    let host = tokio::spawn(async move {
+        run_host_session(
+            host_ws,
+            PASSWORD,
+            "e2e-wake",
+            FakeCapturer::new(64, 64),
+            |width, height| H264Encoder::new(width, height, 15, 1_000_000),
+            NoopInjector::default(),
+        )
+        .await
+    });
+
+    let viewer_ws = connect_to_peer(&addr, true).await;
+    let (frame_tx, _frame_rx) = tokio::sync::mpsc::channel(4);
+    let (_input_tx, input_rx) = tokio::sync::mpsc::channel(4);
+    let (viewer_ready_tx, viewer_ready_rx) = tokio::sync::oneshot::channel();
+    let (monitor_tx, mut monitor_rx) = tokio::sync::mpsc::channel(32);
+    let viewer = tokio::spawn(run_viewer_session_with_monitors(viewer_ws, PASSWORD, "e2e-wake", frame_tx, input_rx, Some(viewer_ready_tx), Some(monitor_tx), None));
+    let DataHandle { control_sender, control_sealer, .. } = timeout(Duration::from_secs(15), viewer_ready_rx)
+        .await
+        .expect("timed out waiting for viewer Data handle")
+        .expect("viewer session closed before Data handle");
+
+    async fn next_control(monitor_rx: &mut tokio::sync::mpsc::Receiver<Vec<u8>>, wanted: fn(&Control) -> bool) -> Control {
+        timeout(Duration::from_secs(15), async {
+            loop {
+                let body = monitor_rx.recv().await.expect("viewer control sink closed");
+                if let Some(control) = Control::from_bytes(&body).filter(wanted) { return control; }
+            }
+        })
+        .await
+        .expect("control message in time")
+    }
+    // The host announces it relays wakes (and, if it has a network card,
+    // how to wake it, before that).
+    next_control(&mut monitor_rx, |control| matches!(control, Control::WakeRelaySupport)).await;
+
+    let request = Control::WakeOnLan { macs: vec!["00:1a:2b:3c:4d:5e".into()] }.to_bytes();
+    let sealed = control_sealer.lock().unwrap().seal(&[Tag::Control as u8], &request);
+    control_sender.send_frame(Tag::Control, &sealed).await.expect("send WakeOnLan");
+    assert!(matches!(next_control(&mut monitor_rx, |control| matches!(control, Control::WakeOnLanSent { .. })).await, Control::WakeOnLanSent { .. }));
+
+    viewer.abort();
+    host.abort();
 }

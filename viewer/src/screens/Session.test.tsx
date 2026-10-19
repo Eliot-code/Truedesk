@@ -2,7 +2,7 @@
 import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { onVirtualDisplaySupport, onVirtualDisplayAdded, onVirtualDisplayRefused, addVirtualDisplay, removeVirtualDisplay, startVideo, requestKeyframe, closeDecoder, onAudioFrame, onMonitorList, onLinkStats, onFileOffer, onFileProgress, onFileDone, onFileError, onFileDrop, pickFile, startRecording, appendRecording, finishRecording, sendFile, respondFile, sendInput, selectMonitor, setInputMonitor, setAudioMuted, setClipboardSync, getConfig, onChatMessage, sendChat, onSecureAttentionSupport, onMultiMonitorSupport, onRestartSupport, onHostRestarting, requestRemoteRestart, onPrivacyModeSupport, onPrivacyModeChanged, setPrivacyMode, browseLocal, browseRemote, onRemoteListing, pullRemote, sendSecureAttention, getViewerPermissions, setViewerPermission, disconnectViewer, onViewerPermissions, onActivity, onTunnelSupport, onTunnelRefused, onTunnelsChanged, getTunnelSupport, listTunnels, decode } = vi.hoisted(() => ({
+const { onVirtualDisplaySupport, onVirtualDisplayAdded, onVirtualDisplayRefused, addVirtualDisplay, removeVirtualDisplay, startVideo, requestKeyframe, closeDecoder, onAudioFrame, onMonitorList, onLinkStats, onFileOffer, onFileProgress, onFileDone, onFileError, onFileDrop, pickFile, startRecording, appendRecording, finishRecording, sendFile, respondFile, sendInput, selectMonitor, setInputMonitor, setAudioMuted, setClipboardSync, getConfig, onChatMessage, sendChat, onSecureAttentionSupport, onMultiMonitorSupport, onRestartSupport, onHostRestarting, requestRemoteRestart, onPrivacyModeSupport, onPrivacyModeChanged, setPrivacyMode, browseLocal, browseRemote, onRemoteListing, pullRemote, sendSecureAttention, getViewerPermissions, setViewerPermission, disconnectViewer, onViewerPermissions, onActivity, onTunnelSupport, onTunnelRefused, onTunnelsChanged, getTunnelSupport, listTunnels, onWakeRelaySupport, onWakeSent, getWakeRelaySupport, listWakeable, listContacts, wakeDevice, decode } = vi.hoisted(() => ({
   onVirtualDisplaySupport: vi.fn<(handler: (payload: { max: number }) => void) => Promise<() => void>>(() => Promise.resolve(vi.fn())),
   onVirtualDisplayAdded: vi.fn<(handler: (payload: { id: number }) => void) => Promise<() => void>>(() => Promise.resolve(vi.fn())),
   onVirtualDisplayRefused: vi.fn<(handler: (payload: { code: string }) => void) => Promise<() => void>>(() => Promise.resolve(vi.fn())),
@@ -56,10 +56,16 @@ const { onVirtualDisplaySupport, onVirtualDisplayAdded, onVirtualDisplayRefused,
   onTunnelsChanged: vi.fn<(handler: () => void) => Promise<() => void>>(() => Promise.resolve(vi.fn())),
   getTunnelSupport: vi.fn<() => Promise<boolean>>(() => Promise.resolve(false)),
   listTunnels: vi.fn(() => Promise.resolve([])),
+  onWakeRelaySupport: vi.fn<(handler: () => void) => Promise<() => void>>(() => Promise.resolve(vi.fn())),
+  onWakeSent: vi.fn<(handler: (payload: { sent: number }) => void) => Promise<() => void>>(() => Promise.resolve(vi.fn())),
+  getWakeRelaySupport: vi.fn<() => Promise<boolean>>(() => Promise.resolve(false)),
+  listWakeable: vi.fn(() => Promise.resolve(["123", "555555555"])),
+  listContacts: vi.fn(() => Promise.resolve([{ id: "555555555", alias: "Printer room", last_connected: null }])),
+  wakeDevice: vi.fn(() => Promise.resolve({ sent: 2, relayed: true })),
   decode: vi.fn(),
 }));
 
-vi.mock("../lib/api", () => ({ onVirtualDisplaySupport, onVirtualDisplayAdded, onVirtualDisplayRefused, addVirtualDisplay, removeVirtualDisplay, startVideo, requestKeyframe, onAudioFrame, onMonitorList, onLinkStats, onFileOffer, onFileProgress, onFileDone, onFileError, onFileDrop, pickFile, startRecording, appendRecording, finishRecording, sendFile, respondFile, sendInput, selectMonitor, setInputMonitor, setAudioMuted, setClipboardSync, getConfig, onChatMessage, sendChat, onSecureAttentionSupport, onMultiMonitorSupport, onRestartSupport, onHostRestarting, requestRemoteRestart, onPrivacyModeSupport, onPrivacyModeChanged, setPrivacyMode, browseLocal, browseRemote, onRemoteListing, pullRemote, sendSecureAttention, getViewerPermissions, setViewerPermission, disconnectViewer, onViewerPermissions, onActivity, onTunnelSupport, onTunnelRefused, onTunnelsChanged, getTunnelSupport, listTunnels }));
+vi.mock("../lib/api", () => ({ onVirtualDisplaySupport, onVirtualDisplayAdded, onVirtualDisplayRefused, addVirtualDisplay, removeVirtualDisplay, startVideo, requestKeyframe, onAudioFrame, onMonitorList, onLinkStats, onFileOffer, onFileProgress, onFileDone, onFileError, onFileDrop, pickFile, startRecording, appendRecording, finishRecording, sendFile, respondFile, sendInput, selectMonitor, setInputMonitor, setAudioMuted, setClipboardSync, getConfig, onChatMessage, sendChat, onSecureAttentionSupport, onMultiMonitorSupport, onRestartSupport, onHostRestarting, requestRemoteRestart, onPrivacyModeSupport, onPrivacyModeChanged, setPrivacyMode, browseLocal, browseRemote, onRemoteListing, pullRemote, sendSecureAttention, getViewerPermissions, setViewerPermission, disconnectViewer, onViewerPermissions, onActivity, onTunnelSupport, onTunnelRefused, onTunnelsChanged, getTunnelSupport, listTunnels, onWakeRelaySupport, onWakeSent, getWakeRelaySupport, listWakeable, listContacts, wakeDevice }));
 vi.mock("../lib/decode", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/decode")>()),
   makeDecoder: vi.fn(() => ({ push: decode, close: closeDecoder })),
@@ -219,6 +225,24 @@ describe("Session viewer transport", () => {
     view.rerender(<NotifyContext.Provider value={notify}><Session remoteId="123" role="viewer" status="connecting" onDisconnect={vi.fn()} /></NotifyContext.Provider>);
     expect(view.queryByRole("button", { name: "Tunnels" })).toBeNull();
     expect(view.queryByLabelText("TCP tunnels")).toBeNull();
+  });
+
+  it("wakes devices through the host once it offers that, and says when it couldn't", async () => {
+    const notify = vi.fn();
+    const view = render(<NotifyContext.Provider value={notify}><Session remoteId="123" role="viewer" status="in_session" onDisconnect={vi.fn()} /></NotifyContext.Provider>);
+    const last = <T,>(mock: { mock: { calls: T[][] } }) => mock.mock.calls[mock.mock.calls.length - 1][0];
+    expect(view.queryByRole("button", { name: "Wake devices" })).toBeNull();
+    await waitFor(() => expect(onWakeRelaySupport).toHaveBeenCalled());
+    act(() => last(onWakeRelaySupport)());
+    fireEvent.click(view.getByRole("button", { name: "Wake devices" }));
+    // The computer being viewed isn't listed; saved devices go by their alias.
+    fireEvent.click(await view.findByRole("button", { name: "Wake Printer room" }));
+    await waitFor(() => expect(wakeDevice).toHaveBeenCalledWith("555555555"));
+    await waitFor(() => expect(notify).toHaveBeenCalledWith("Wake-up signal sent to Printer room. It can take a minute to come online.", "info"));
+    act(() => last(onWakeSent)({ sent: 0 }));
+    await waitFor(() => expect(notify).toHaveBeenCalledWith("The other computer couldn't send the wake-up signal. It may have remote control turned off."));
+    view.rerender(<NotifyContext.Provider value={notify}><Session remoteId="123" role="viewer" status="connecting" onDisconnect={vi.fn()} /></NotifyContext.Provider>);
+    expect(view.queryByRole("button", { name: "Wake devices" })).toBeNull();
   });
 
   it("asks whether the host offers tunnels in case the event came first", async () => {

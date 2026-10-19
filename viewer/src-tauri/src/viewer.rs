@@ -320,6 +320,7 @@ pub(crate) fn connect(
 
             let monitor_app = task_app.clone();
             let monitor_restart = Arc::clone(&restart_expected);
+            let monitor_target = target.clone();
             let _monitor_task = AbortOnDrop::new(tauri::async_runtime::spawn(async move {
                 while let Some(body) = monitor_rx.recv().await {
                     match Control::from_bytes(&body) {
@@ -339,6 +340,15 @@ pub(crate) fn connect(
                         }
                         Some(Control::PrivacyModeSupport) => emit(&monitor_app, "privacy_mode_support", ()),
                         Some(Control::PrivacyModeChanged { on }) => emit(&monitor_app, "privacy_mode_changed", PrivacyModeEvent { on }),
+                        Some(Control::WakeInfo { targets }) => {
+                            let recorded = monitor_app.state::<AppState>().lock().wake.record(&monitor_target, targets);
+                            if let Err(error) = recorded { log::warn!("could not save how to wake {monitor_target}: {error}"); }
+                        }
+                        Some(Control::WakeRelaySupport) => {
+                            monitor_app.state::<AppState>().lock().wake_relay = true;
+                            emit(&monitor_app, "wake_relay_support", ());
+                        }
+                        Some(Control::WakeOnLanSent { sent }) => emit(&monitor_app, "wake_sent", WakeSentEvent { sent }),
                         _ => {}
                     }
                 }
@@ -529,7 +539,7 @@ pub(crate) async fn send_secure_attention(state: tauri::State<'_, AppState>) -> 
     send_control(&state, Control::RequestSecureAttention).await
 }
 
-async fn send_control(state: &tauri::State<'_, AppState>, control: Control) -> Result<(), String> {
+pub(crate) async fn send_control(state: &tauri::State<'_, AppState>, control: Control) -> Result<(), String> {
     let (sender, sealer) = { let state = state.lock(); (state.control_sender.clone(), state.control_sealer.clone()) };
     let sender = sender.ok_or_else(|| "no active viewer session".to_owned())?;
     let sealer = sealer.ok_or_else(|| "control channel is not ready".to_owned())?;

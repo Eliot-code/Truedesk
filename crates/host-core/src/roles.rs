@@ -201,6 +201,9 @@ impl Default for SessionTimings {
     }
 }
 
+/// The shortest time between two wake requests a host acts on.
+const WAKE_RELAY_INTERVAL: Duration = Duration::from_secs(1);
+
 /// How long a new virtual display gets to show up for capture.
 const VIRTUAL_DISPLAY_WAIT: Duration = Duration::from_secs(5);
 /// Time macOS needs to bring up a headless host's virtual display before
@@ -706,6 +709,13 @@ where
     if crate::privacy::available() {
         reliable.sender().send_frame(Tag::Control, &seal_control(&control_sealer, &Control::PrivacyModeSupport)).await?;
     }
+    // Old viewers ignore these; new ones remember how to wake this computer
+    // and offer to wake others on its networks through it.
+    let wake_targets = crate::wol::local_targets();
+    if !wake_targets.is_empty() {
+        reliable.sender().send_frame(Tag::Control, &seal_control(&control_sealer, &Control::WakeInfo { targets: wake_targets })).await?;
+    }
+    reliable.sender().send_frame(Tag::Control, &seal_control(&control_sealer, &Control::WakeRelaySupport)).await?;
     let path = transport.path();
     let (transport_tx, transport_rx) = transport.into_split();
     if let Some(ready) = data_ready {
@@ -749,6 +759,10 @@ where
     let inject_tx = spawn_injection_thread(injector_factory, Arc::clone(&dims), Arc::clone(&display))?;
     // Aborting the forwarder on exit drops the last injection sender, which
     // ends the injection thread together with the session.
+    // Waking computers on this one's networks acts from it, like input does,
+    // so it follows the same permission.
+    let wake_allowed = Arc::clone(&gates.control);
+    let mut last_wake: Option<Instant> = None;
     let mut input_forwarder = AbortOnDrop(tokio::spawn(forward_input(transport_rx, opener, inject_tx, gates.control)));
     let mut media = AbortOnDrop(tokio::spawn(send_media(transport_tx, sealer, audio_rx, Arc::clone(&video.units), aux_rx, gates.audio)));
     // The viewer keepalives on the relay socket even when media is direct, so
@@ -885,6 +899,22 @@ where
                     }
                     Some(Control::Ping { sent_us }) => {
                         let _ = sender.send_frame(Tag::Control, &seal_control(&control_sealer, &Control::Pong { sent_us })).await;
+                    }
+                    Some(Control::WakeOnLan { macs }) => {
+                        let due = last_wake.is_none_or(|at| at.elapsed() >= WAKE_RELAY_INTERVAL);
+                        if wake_allowed.load(Ordering::Relaxed) && due {
+                            last_wake = Some(Instant::now());
+                            // Sending takes a few hundred ms of repeats; don't
+                            // hold up the control loop for it.
+                            let (sender, sealer) = (sender.clone(), Arc::clone(&control_sealer));
+                            tokio::spawn(async move {
+                                let sent = crate::wol::wake_macs(&macs).await;
+                                let reply = Control::WakeOnLanSent { sent: u32::try_from(sent).unwrap_or(u32::MAX) };
+                                let _ = sender.send_frame(Tag::Control, &seal_control(&sealer, &reply)).await;
+                            });
+                        } else {
+                            let _ = sender.send_frame(Tag::Control, &seal_control(&control_sealer, &Control::WakeOnLanSent { sent: 0 })).await;
+                        }
                     }
                     _ => {}
                 }
@@ -1902,7 +1932,8 @@ async fn run_viewer_media_loop_with_control(
                     Some(Control::MonitorList { .. } | Control::VirtualDisplaySupport { .. } | Control::VirtualDisplayAdded { .. } | Control::VirtualDisplayRefused { .. } | Control::SecureAttentionSupport
                         | Control::MultiMonitorSupport { .. } | Control::MonitorStreamOpened { .. } | Control::MonitorStreamClosed { .. } | Control::MonitorStreamRefused { .. }
                         | Control::RestartSupport | Control::Restarting
-                        | Control::PrivacyModeSupport | Control::PrivacyModeChanged { .. }) => {
+                        | Control::PrivacyModeSupport | Control::PrivacyModeChanged { .. }
+                        | Control::WakeInfo { .. } | Control::WakeRelaySupport | Control::WakeOnLanSent { .. }) => {
                         if let Some(sink) = &monitor_sink { let _ = sink.send(plaintext).await; }
                     }
                     Some(Control::Pong { sent_us }) if relay_ping.is_some() => {
@@ -3228,7 +3259,7 @@ mod tests {
             capturer.script().monitors = vec![monitor(1)];
             let host = spawn_scripted_host(host_ws, timings, capturer.clone());
             let (frame_tx, mut frames) = mpsc::channel(64);
-            let (monitor_tx, mut monitor_lists) = mpsc::channel(4);
+            let (monitor_tx, mut monitor_lists) = mpsc::channel(16);
             let (_input, input_rx) = mpsc::channel(4);
             let viewer = tokio::spawn(async move {
                 run_viewer_session_inner(viewer_ws, PASSWORD, SESSION, frame_tx, input_rx, None, Some(monitor_tx), None, None, None, timings).await
@@ -3245,7 +3276,11 @@ mod tests {
             let second = timeout(Duration::from_secs(3), async {
                 loop {
                     tokio::select! {
-                        body = monitor_lists.recv() => break body.unwrap(),
+                        body = monitor_lists.recv() => {
+                            // Other announcements (Wake-on-LAN) share the sink.
+                            let body = body.unwrap();
+                            if matches!(Control::from_bytes(&body), Some(Control::MonitorList { .. })) { break body; }
+                        }
                         _ = frames.recv() => {}
                     }
                 }
@@ -3306,9 +3341,16 @@ mod tests {
                 handle.control_sender.send_frame(Tag::Control, &seal_control(&handle.control_sealer, &control)).await.unwrap();
             }
 
+            /// The next message about displays; the host's Wake-on-LAN
+            /// announcements are skipped.
             async fn next(&mut self) -> Control {
-                let body = timeout(Duration::from_secs(10), self.messages.recv()).await.expect("no message from the host").expect("sink closed");
-                Control::from_bytes(&body).expect("a control message")
+                loop {
+                    let body = timeout(Duration::from_secs(10), self.messages.recv()).await.expect("no message from the host").expect("sink closed");
+                    match Control::from_bytes(&body).expect("a control message") {
+                        Control::WakeInfo { .. } | Control::WakeRelaySupport => continue,
+                        control => return control,
+                    }
+                }
             }
 
             async fn end(self) -> Arc<vdisplay::fake::FakeDisplays> {

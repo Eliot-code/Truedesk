@@ -15,7 +15,7 @@ when a session begins, and turning one off takes effect at once.
 
 | Permission | Off means |
 | --- | --- |
-| **Control** | The viewer can see the screen but their mouse and keyboard do nothing. |
+| **Control** | The viewer can see the screen but their mouse and keyboard do nothing, and can't [wake other computers](/docs/wake-on-lan/) through this one. |
 | **File transfer** | Files the viewer sends are refused without a prompt. |
 | **Clipboard** | Clipboard text stops syncing in both directions. |
 | **Audio** | The host stops sending its sound. |

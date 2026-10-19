@@ -138,6 +138,34 @@ pub enum Control {
     /// Host → viewer: privacy mode is now on or off (the real state after the
     /// host tried to apply it).
     PrivacyModeChanged { on: bool },
+    /// Host → viewer, after the first `MonitorList`: how to wake this host
+    /// with Wake-on-LAN once it sleeps, one entry per network of each of its
+    /// network cards. Old viewers ignore it.
+    WakeInfo { targets: Vec<WakeTarget> },
+    /// Host → viewer, after the first `MonitorList`: this host sends
+    /// Wake-on-LAN packets on its networks for the viewer, to wake other
+    /// computers there. Hosts that can't never send it.
+    WakeRelaySupport,
+    /// Viewer → host: wake the computers with these MAC addresses on your
+    /// networks. Only sent to hosts that sent `WakeRelaySupport`; at most
+    /// [`MAX_WAKE_TARGETS`] are used.
+    WakeOnLan { macs: Vec<String> },
+    /// Host → viewer: the answer to a `WakeOnLan`: how many packets went out
+    /// (0 when the host refused or couldn't send any).
+    WakeOnLanSent { sent: u32 },
+}
+
+/// Most entries a `WakeInfo` or `WakeOnLan` carries that are used.
+pub const MAX_WAKE_TARGETS: usize = 16;
+
+/// Where to send a Wake-on-LAN packet for one network card.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WakeTarget {
+    /// The card's MAC address, like `aa:bb:cc:dd:ee:ff`.
+    pub mac: String,
+    /// The IPv4 broadcast address of the card's network, like
+    /// `192.168.1.255`, or `255.255.255.255` when it had none.
+    pub broadcast: String,
 }
 
 /// Most IDs one `Presence` query may ask about.
@@ -181,6 +209,21 @@ impl Control {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wake_messages_roundtrip() {
+        let target = WakeTarget { mac: "aa:bb:cc:dd:ee:ff".into(), broadcast: "192.168.1.255".into() };
+        for control in [
+            Control::WakeInfo { targets: vec![target] },
+            Control::WakeRelaySupport,
+            Control::WakeOnLan { macs: vec!["aa:bb:cc:dd:ee:ff".into()] },
+            Control::WakeOnLanSent { sent: 4 },
+        ] {
+            assert_eq!(Control::from_bytes(&control.to_bytes()), Some(control));
+        }
+        let json = String::from_utf8(Control::WakeRelaySupport.to_bytes()).unwrap();
+        assert_eq!(json, r#"{"t":"wake_relay_support"}"#);
+    }
 
     #[test]
     fn register_roundtrips() {

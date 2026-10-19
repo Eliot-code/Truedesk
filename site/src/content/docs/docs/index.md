@@ -22,6 +22,8 @@ hosting has had less testing than macOS.
   when nobody is there to click Allow.
 - [TCP tunnels](/docs/tunnels/): reach Remote Desktop, SSH or a web page on
   the other computer's network through the session.
+- [Wake-on-LAN](/docs/wake-on-lan/): turn on a sleeping computer, nearby or
+  through another computer on its network.
 - [Browser viewer](/docs/browser-viewer/): control a computer from a browser,
   and what it can't do yet.
 

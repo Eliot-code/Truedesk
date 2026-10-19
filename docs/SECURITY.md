@@ -132,6 +132,19 @@ written to the host's activity log. The viewer's end of a tunnel listens only
 on `127.0.0.1`. Each connection keeps at most 512 KiB unacknowledged in each
 direction, so a tunnel cannot exhaust the other side's memory.
 
+## Wake-on-LAN
+
+During a session the host tells the viewer how to wake it: the MAC address
+and IPv4 broadcast address of each of its wired and wireless cards. That goes
+on the sealed Control channel, so the relay doesn't see it. The viewer keeps
+it in `wake.json` with its other app data.
+
+A viewer can also ask the host to wake other computers on the host's
+networks. The host acts on it only while the viewer's **Control** permission
+is on, at most once a second, for at most 16 MAC addresses, and it sends the
+packets only to its own networks' broadcast addresses, never to addresses
+the viewer supplies.
+
 ## Known limitations and threat model
 
 - Password strength matters. SPAKE2 keeps the password off the wire and

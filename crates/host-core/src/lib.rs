@@ -17,3 +17,4 @@ mod windows_service;
 pub mod transport;
 pub mod tunnel;
 pub mod vdisplay;
+pub mod wol;
