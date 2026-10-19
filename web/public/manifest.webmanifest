@@ -1,0 +1,14 @@
+{
+  "name": "Truedesk",
+  "short_name": "Truedesk",
+  "description": "View and control a computer running Truedesk.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0b0e12",
+  "theme_color": "#0b0e12",
+  "icons": [
+    { "src": "truedesk-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "truedesk-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

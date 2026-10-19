@@ -5,6 +5,8 @@ import Viewer from "../viewer/Viewer";
 // wss:// relay. Nothing else.
 Astro.csp.insertScriptResource("'wasm-unsafe-eval'");
 Astro.csp.insertDirective("connect-src 'self' wss:");
+// Installable: Add to Home Screen opens the viewer like an app.
+Astro.csp.insertDirective("manifest-src 'self'");
 ---
 <!doctype html>
 <html lang="en">
@@ -14,6 +16,12 @@ Astro.csp.insertDirective("connect-src 'self' wss:");
     <meta name="referrer" content="no-referrer" />
     <meta name="color-scheme" content="dark" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="manifest" href="/connect.webmanifest" />
+    <meta name="theme-color" content="#0b0e12" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Truedesk" />
     <title>Truedesk browser viewer</title>
     <meta name="description" content="View and control a computer running Truedesk from your browser." />
   </head>

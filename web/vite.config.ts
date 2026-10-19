@@ -15,6 +15,7 @@ const csp = [
   "script-src 'self' 'wasm-unsafe-eval'",
   "style-src 'self'",
   "img-src 'self'",
+  "manifest-src 'self'",
   "connect-src 'self' wss:",
   "base-uri 'none'",
   "form-action 'none'",
