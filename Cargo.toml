@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/protocol", "crates/relay", "crates/host-core", "crates/web-core"]
+members = ["crates/protocol", "crates/relay", "crates/host-core", "crates/web-core", "crates/android-host"]
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }

@@ -1,0 +1,28 @@
+[package]
+name = "android-host"
+version = "0.1.0"
+publish = false
+license = "AGPL-3.0-only"
+edition = "2021"
+
+# The Android app loads this as a shared library through JNI; it is also an
+# rlib so the hosting loop and input mapping can be tested on the desktop.
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[dependencies]
+protocol = { path = "../protocol" }
+host-core = { path = "../host-core" }
+tokio = { workspace = true }
+log = "0.4"
+
+# JNI entry points, and the Android logger so Rust logs reach logcat. Only
+# built for Android; the rest of the crate builds and tests on the desktop.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+android_logger = "0.15"
+
+[dev-dependencies]
+relay = { path = "../relay" }
+web-core = { path = "../web-core" }
+tokio = { workspace = true, features = ["full", "test-util"] }

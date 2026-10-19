@@ -15,10 +15,12 @@ pub trait ClipboardBackend {
 /// The backend lives entirely on the dedicated clipboard thread, so the
 /// non-`Send`, single-thread-affine handle stays on one thread; `RefCell`
 /// gives the `&self` trait methods the interior mutability arboard needs.
+#[cfg(not(target_os = "android"))]
 pub struct ArboardBackend {
     clipboard: std::cell::RefCell<arboard::Clipboard>,
 }
 
+#[cfg(not(target_os = "android"))]
 impl ArboardBackend {
     pub fn new() -> Option<Self> {
         arboard::Clipboard::new()
@@ -29,6 +31,7 @@ impl ArboardBackend {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 impl ClipboardBackend for ArboardBackend {
     fn read(&self) -> Option<String> {
         self.clipboard.borrow_mut().get_text().ok()

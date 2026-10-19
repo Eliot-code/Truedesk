@@ -2,13 +2,15 @@
 
 use crate::{
     audio,
-    capture::{ScapCapturer, ScreenCapturer},
+    capture::ScreenCapturer,
     encode::{self, stream::{self, KeyframePolicy, STREAM_FPS}, Encoder, VideoEncoder},
-    inject::{EnigoInjector, InputInjector, NoopInjector},
+    inject::InputInjector,
     transport::{self, RelayIceSignaling, RelayTransport, ReliableChannel, Transport, TransportReceiver, TransportSender},
     vdisplay::{self, DisplaySpec, SessionDisplays, VirtualDisplays},
 };
 use crate::reconnect::{classify_viewer_error, reject_code, rejection_error, DisconnectReason};
+#[cfg(not(target_os = "android"))]
+use crate::{capture::ScapCapturer, inject::{EnigoInjector, NoopInjector}};
 use protocol::{
     control::Control,
     crypto::{Opener, Sealer},
@@ -2033,6 +2035,9 @@ fn capture_unavailable_message() -> &'static str {
 
     #[cfg(target_os = "linux")]
     return "Screen capture is unavailable. Approve the Linux desktop portal capture request and try again.";
+
+    #[cfg(target_os = "android")]
+    return "Screen capture is unavailable. Start sharing in Truedesk on the phone and allow the screen capture.";
 }
 
 #[cfg(target_os = "macos")]
@@ -2048,6 +2053,7 @@ fn report_input_unavailable() {
 
 /// Build the production injector. Called on the injection thread, so the
 /// thread-affine Enigo handle is created and used on one OS thread.
+#[cfg(not(target_os = "android"))]
 fn default_injector() -> Box<dyn InputInjector> {
     match EnigoInjector::new() {
         Some(injector) => Box::new(injector),
@@ -2060,11 +2066,12 @@ fn default_injector() -> Box<dyn InputInjector> {
 
 /// The production encoder for a stream of `width` x `height`, at the stream
 /// frame rate with a bitrate scaled to the stream size.
-fn default_encoder(width: u16, height: u16) -> Result<VideoEncoder, encode::EncoderInitError> {
+pub fn default_encoder(width: u16, height: u16) -> Result<VideoEncoder, encode::EncoderInitError> {
     VideoEncoder::best_available(width, height, STREAM_FPS, stream::stream_bitrate(width, height, STREAM_FPS))
 }
 
 /// Run a host session with the production capture, H.264 encoder, and Enigo injector.
+#[cfg(not(target_os = "android"))]
 pub async fn run_default_host_session<S>(
     ws: WebSocketStream<S>,
     password: &str,
@@ -2082,6 +2089,7 @@ where
     .await
 }
 
+#[cfg(not(target_os = "android"))]
 pub async fn run_default_host_session_with_data<S>(
     ws: WebSocketStream<S>,
     password: &str,
@@ -2096,6 +2104,7 @@ where
     ).await
 }
 
+#[cfg(not(target_os = "android"))]
 pub async fn run_default_host_session_with_data_and_accept<S, A, Fut>(
     ws: WebSocketStream<S>,
     password: &str,
@@ -2115,6 +2124,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(not(target_os = "android"))]
 pub async fn run_default_host_session_with_data_and_accept_and_2fa<S, A, Fut>(
     ws: WebSocketStream<S>, password: &str, ice_session: &str,
     unattended_enabled: bool, twofa_enabled: bool, totp_secret: Option<&str>,
@@ -2135,6 +2145,7 @@ where
 /// the host's virtual display settings and host-enforced viewer permission
 /// gates (control/audio), which the caller may flip live during the session.
 #[allow(clippy::too_many_arguments)]
+#[cfg(not(target_os = "android"))]
 pub async fn run_default_host_session_with_displays<S, A, Fut>(
     ws: WebSocketStream<S>, password: &str, ice_session: &str,
     unattended_enabled: bool, twofa_enabled: bool, totp_secret: Option<&str>,
@@ -2161,6 +2172,35 @@ where
         SessionTimings::default(),
         displays,
         gates,
+    )
+    .await
+}
+
+/// Run a host session whose screen and input come from outside this crate,
+/// such as a phone's screen capture and accessibility service, with the
+/// production encoder. `capture_factory` is called once the viewer is
+/// admitted; `None` refuses the session as capture unavailable.
+/// `injector_factory` runs on the injection thread. Approval and the
+/// host-enforced gates work as in
+/// [`run_default_host_session_with_displays`].
+#[allow(clippy::too_many_arguments)]
+pub async fn run_platform_host_session<S, C, CF, IF, A, Fut>(
+    ws: WebSocketStream<S>, password: &str, ice_session: &str, capture_factory: CF,
+    injector_factory: IF, unattended_enabled: bool, approve: A,
+    data_ready: Option<oneshot::Sender<DataHandle>>, gates: SessionGates,
+) -> SessionResult<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    C: ScreenCapturer + Send + 'static,
+    CF: Fn() -> Option<C> + Clone + Send + 'static,
+    IF: FnOnce() -> Box<dyn InputInjector> + Send + 'static,
+    A: FnOnce() -> Fut,
+    Fut: Future<Output = bool>,
+{
+    run_host_session_with_data_and_accept_and_2fa_with_factory(
+        ws, password, ice_session, capture_factory, default_encoder, injector_factory,
+        unattended_enabled, false, None, approve, data_ready, SessionTimings::default(),
+        HostDisplays::default(), gates,
     )
     .await
 }

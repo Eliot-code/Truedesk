@@ -16,16 +16,20 @@ tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 futures-util = "0.3"
 openh264 = "0.9"
-scap = "0.0.8"
-enigo = "0.6"
 webrtc-ice = "0.17"
 webrtc-util = "0.17"
 sha2 = "0.11"
 totp-lite = "2"
+log = "0.4"
+
+# Desktop capture, input, audio and clipboard. The Android app brings its own
+# screen capture and input (see crates/android-host).
+[target.'cfg(not(target_os = "android"))'.dependencies]
+scap = "0.0.8"
+enigo = "0.6"
 cpal = "0.18"
 opus = "0.4"
 arboard = "3.6.1"
-log = "0.4"
 
 # PulseAudio host (pure Rust; also talks to pipewire-pulse) for capturing the
 # default sink's monitor. Not cpal's "pipewire" feature: it needs pipewire
