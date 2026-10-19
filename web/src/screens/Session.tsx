@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { makeDecoder } from "../../../viewer/src/lib/decode";
 import { makeAudioPlayer } from "../lib/audio";
 import { attachInput } from "../../../viewer/src/lib/input";
+import TouchKeyboard, { hasTouchScreen, type TouchKeyboardHandle } from "../../../viewer/src/components/TouchKeyboard";
 import type { ConnectionStatus } from "../lib/connection";
 import { downloadBlob, downloadBytes, formatSize, nextFileId } from "../lib/files";
 import { formatId } from "../lib/settings";
@@ -98,6 +99,9 @@ function monitorName(monitor: MonitorInfo, index: number): string {
 export default function Session({ remoteId, status, monitors, controls, onDisconnect }: SessionProps) {
   const screenRef = useRef<HTMLElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const keyboardRef = useRef<TouchKeyboardHandle>(null);
+  const [touchScreen] = useState(hasTouchScreen);
+  const sendTyped = useCallback(async (bytes: Uint8Array) => controls.sendInput(bytes), [controls]);
   const [selected, setSelected] = useState<number>();
   const [clipboardOn, setClipboardOn] = useState(false);
   const [soundOn, setSoundOn] = useState(false);
@@ -279,6 +283,7 @@ export default function Session({ remoteId, status, monitors, controls, onDiscon
   return (
     <main ref={screenRef} className="session-screen web-session">
       <canvas ref={canvasRef} className="session-canvas" tabIndex={0} aria-label="Remote screen" />
+      {touchScreen && <TouchKeyboard ref={keyboardRef} send={sendTyped} />}
       {overlay && (
         <div className="session-host-overlay web-overlay" aria-live="polite">
           <span className="connecting-spinner" aria-hidden="true" />
@@ -299,6 +304,14 @@ export default function Session({ remoteId, status, monitors, controls, onDiscon
             </svg>
             <span className="session-toolbar__icon-text" aria-hidden="true">Fullscreen</span>
           </button>
+          {touchScreen && (
+            <button className="session-toolbar__icon" type="button" aria-label="Keyboard" title="Type on the other computer" onClick={() => keyboardRef.current?.show()}>
+              <svg className="session-toolbar__svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <rect width="20" height="16" x="2" y="4" rx="2" /><path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M6 12h.01M18 12h.01M8 16h8" />
+              </svg>
+              <span className="session-toolbar__icon-text" aria-hidden="true">Keyboard</span>
+            </button>
+          )}
           <button className="session-toolbar__icon" type="button" aria-pressed={clipboardOn} aria-label="Clipboard sync" title={clipboardOn ? "Clipboard sync on" : "Clipboard sync off"} onClick={() => setClipboardOn((on) => !on)}>
             <svg className="session-toolbar__svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
               <rect x="8" y="2" width="8" height="4" rx="1" /><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />

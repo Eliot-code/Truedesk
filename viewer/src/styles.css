@@ -20,7 +20,7 @@ button, input { font: inherit; } button { cursor: pointer; }
 @media (max-width: 720px) { .app-shell { padding: 20px 16px 44px; }.hero { padding-top: 48px; }.cards { grid-template-columns: 1fr; }.connect-fields { grid-template-columns: 1fr; }.primary-button { padding: 12px; } }
 
 .session-screen { position: relative; width: 100vw; height: 100vh; overflow: hidden; background: #070a0e; }
-.session-canvas { display: block; width: 100%; height: 100%; object-fit: contain; outline: none; }
+.session-canvas { display: block; width: 100%; height: 100%; object-fit: contain; outline: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
 .session-restarting { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); z-index: 5; display: inline-flex; align-items: center; gap: 9px; padding: 9px 15px; border-radius: 999px; background: rgba(10, 14, 20, 0.92); color: #e6edf3; font-size: 13px; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35); }
 .session-restarting__spinner { width: 13px; height: 13px; border-radius: 50%; border: 2px solid rgba(230, 237, 243, 0.3); border-top-color: #e6edf3; animation: session-spin 0.8s linear infinite; }
 @keyframes session-spin { to { transform: rotate(360deg); } }
@@ -145,3 +145,7 @@ button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-
 .tunnel-panel__form { display: grid; grid-template-columns: 1fr 2fr 1fr; gap: 8px; align-items: end; }.tunnel-panel__form label { display: grid; gap: 4px; color: var(--muted); font-size: 11px; }.tunnel-panel__form input { min-width: 0; padding: 8px 10px; color: var(--text); background: #0f131a; border: 1px solid var(--border); border-radius: 6px; }.tunnel-panel__form input:focus { outline: 1px solid var(--accent); }.tunnel-panel__form .primary-button { grid-column: 1 / -1; min-height: 36px; }
 .tunnel-panel__error { color: #f3ad4b; font-size: 12px; }
 .wake-panel__item { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 10px; font-size: 13px; background: #0f131a; border: 1px solid var(--border); border-radius: 6px; }.wake-panel__item > span { display: grid; gap: 2px; min-width: 0; overflow-wrap: anywhere; }.wake-panel__item small { color: var(--muted); font-size: 11px; }.wake-panel__item .ghost-button { padding: 6px 12px; }
+.touch-keyboard__field { position: fixed; left: 0; bottom: 0; width: 1px; height: 1px; padding: 0; border: 0; opacity: 0; font-size: 16px; }
+.touch-keyboard__keys { position: absolute; top: 76px; left: 50%; z-index: 3; display: flex; gap: 6px; max-width: calc(100vw - 24px); overflow-x: auto; padding: 8px; transform: translateX(-50%); background: #141922f2; border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 12px 35px #0008; }.touch-keyboard__keys button { flex: none; min-width: 40px; min-height: 40px; padding: 0 9px; color: var(--text); background: #0f131a; border: 1px solid var(--border); border-radius: 6px; font: 600 13px var(--mono); }.touch-keyboard__keys button[aria-pressed="true"] { color: #061116; background: var(--accent); border-color: transparent; }
+/* Phones: the toolbar drops the ID so Disconnect stays in view. */
+@media (max-width: 520px) { .session-toolbar__remote { display: none; } }

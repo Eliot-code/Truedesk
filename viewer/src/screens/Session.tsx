@@ -9,6 +9,7 @@ import ChatPanel, { type ChatEntry } from "../components/ChatPanel";
 import HostControlPanel from "../components/HostControlPanel";
 import TunnelPanel, { tunnelRefusal } from "../components/TunnelPanel";
 import WakePanel from "../components/WakePanel";
+import TouchKeyboard, { hasTouchScreen, type TouchKeyboardHandle } from "../components/TouchKeyboard";
 import { friendlyError, useNotify } from "../lib/notify";
 
 /** Why the host didn't add or remove a virtual display. */
@@ -67,6 +68,9 @@ export default function Session({ remoteId, role, status = "in_session", onDisco
   chatOpenRef.current = chatOpen;
   const [viewOnly, setViewOnly] = useState(false);
   const viewOnlyRef = useRef(false);
+  const keyboardRef = useRef<TouchKeyboardHandle>(null);
+  const [touchScreen] = useState(hasTouchScreen);
+  const sendTyped = useCallback((bytes: Uint8Array) => viewOnlyRef.current ? Promise.resolve() : api.sendInput(bytes), []);
   useEffect(() => { viewOnlyRef.current = viewOnly; }, [viewOnly]);
   const [canSecureAttention, setCanSecureAttention] = useState(false);
   const [canRestart, setCanRestart] = useState(false);
@@ -398,11 +402,12 @@ export default function Session({ remoteId, role, status = "in_session", onDisco
       {role === "viewer" && <canvas ref={canvasRef} className="session-canvas" tabIndex={0} aria-label="Remote screen" onPointerEnter={reclaimInput} onPointerDown={reclaimInput} />}
       {role === "host" && <div className="session-host-overlay"><span className="eyebrow">TRUEDESK · SECURE SESSION</span><h1>You are being controlled by {remoteId}</h1><p>Your screen is shared for this session.</p></div>}
       {role === "host" && <HostControlPanel remoteId={remoteId} onDisconnect={() => void api.disconnectViewer().catch((error: unknown) => notify(friendlyError(error)))} />}
-      <Toolbar remoteId={remoteId} role={role} status={status} link={link} monitors={monitors} selectedMonitor={selectedMonitor} onMonitorChange={chooseMonitor} canAddDisplay={canAddDisplay} onAddDisplay={addDisplay} onRemoveDisplay={removeDisplay} canOpenMonitorWindow={canOpenMonitorWindow} onOpenMonitorWindow={openMonitorWindow} clipboardSync={clipboardSync} onClipboardSyncChange={toggleClipboardSync} audioMuted={audioMuted} onAudioMutedChange={toggleAudioMuted} recordingActive={recordingActive} recordingElapsed={recordingElapsed} onRecordingToggle={() => void toggleRecording()} filesOpen={filesOpen} onFilesToggle={() => setFilesOpen((open) => !open)} chatOpen={chatOpen} onChatToggle={toggleChat} chatUnread={chatUnread} canTunnel={canTunnel} tunnelsOpen={tunnelsOpen} onTunnelsToggle={() => setTunnelsOpen((open) => !open)} canWake={canWake} wakeOpen={wakeOpen} onWakeToggle={() => setWakeOpen((open) => !open)} viewOnly={viewOnly} onViewOnlyChange={setViewOnly} canSecureAttention={canSecureAttention} onSecureAttention={sendSecureAttention} canRestart={canRestart} onRestart={restartRemote} canPrivacy={canPrivacy} privacyOn={privacyOn} onPrivacyChange={togglePrivacy} onDisconnect={onDisconnect} />
+      <Toolbar remoteId={remoteId} role={role} status={status} link={link} monitors={monitors} selectedMonitor={selectedMonitor} onMonitorChange={chooseMonitor} canAddDisplay={canAddDisplay} onAddDisplay={addDisplay} onRemoveDisplay={removeDisplay} canOpenMonitorWindow={canOpenMonitorWindow} onOpenMonitorWindow={openMonitorWindow} clipboardSync={clipboardSync} onClipboardSyncChange={toggleClipboardSync} audioMuted={audioMuted} onAudioMutedChange={toggleAudioMuted} recordingActive={recordingActive} recordingElapsed={recordingElapsed} onRecordingToggle={() => void toggleRecording()} filesOpen={filesOpen} onFilesToggle={() => setFilesOpen((open) => !open)} chatOpen={chatOpen} onChatToggle={toggleChat} chatUnread={chatUnread} canTunnel={canTunnel} tunnelsOpen={tunnelsOpen} onTunnelsToggle={() => setTunnelsOpen((open) => !open)} canWake={canWake} wakeOpen={wakeOpen} onWakeToggle={() => setWakeOpen((open) => !open)} viewOnly={viewOnly} onViewOnlyChange={setViewOnly} onKeyboard={role === "viewer" && touchScreen ? () => keyboardRef.current?.show() : undefined} canSecureAttention={canSecureAttention} onSecureAttention={sendSecureAttention} canRestart={canRestart} onRestart={restartRemote} canPrivacy={canPrivacy} privacyOn={privacyOn} onPrivacyChange={togglePrivacy} onDisconnect={onDisconnect} />
       {role === "viewer" && <FileTransfer open={filesOpen} onOpenChange={onFilesOpenChange} />}
       {role === "viewer" && <ChatPanel open={chatOpen} messages={messages} onSend={sendChat} onClose={() => setChatOpen(false)} />}
       {role === "viewer" && canTunnel && <TunnelPanel open={tunnelsOpen} onClose={() => setTunnelsOpen(false)} />}
       {role === "viewer" && canWake && <WakePanel open={wakeOpen} currentId={remoteId} onClose={() => setWakeOpen(false)} />}
+      {role === "viewer" && touchScreen && <TouchKeyboard ref={keyboardRef} send={sendTyped} />}
     </main>
   );
 }

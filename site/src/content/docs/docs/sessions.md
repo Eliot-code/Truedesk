@@ -15,6 +15,7 @@ across the top. From left to right:
 | **New window** | Opens the chosen monitor in its own window, so you can put each of the host's screens on one of yours. Shows when the host has more than one display. The window controls that monitor while your pointer is in it. |
 | **Clipboard** | Turns clipboard sync on or off. It starts off. |
 | **Sound** / **Muted** | Mutes or unmutes the host's sound on your side. |
+| **Keyboard** | Brings up the on-screen keyboard on a touch screen; see [Phones and tablets](/docs/mobile/#typing). |
 | **Files** | Opens the file panel: send a file, or use the two-pane browser to open folders on both computers, download a remote file (the arrow next to it), and upload into the remote folder you're viewing. |
 | **Tunnels** | Opens [TCP tunnels](/docs/tunnels/): a port on your computer that leads to a service on the other computer's network, like Remote Desktop or SSH. Shows when the host supports them. |
 | **Wake** | Turns on a sleeping computer on the other computer's network, through it. See [Wake-on-LAN](/docs/wake-on-lan/). Shows when the host supports it. |

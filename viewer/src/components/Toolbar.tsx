@@ -45,6 +45,8 @@ interface ToolbarProps {
   onWakeToggle?: () => void;
   viewOnly?: boolean;
   onViewOnlyChange?: (viewOnly: boolean) => void;
+  /** Opens the on-screen keyboard (touch screens); no button without it. */
+  onKeyboard?: () => void;
   canSecureAttention?: boolean;
   onSecureAttention?: () => void;
 }
@@ -144,7 +146,7 @@ export function LinkBadge({ link }: { link: LinkStats }) {
 
 const connectionLabels: Record<Status, string> = { in_session: "Connected", connecting: "Reconnecting", online: "Connected", offline: "Disconnected" };
 
-export default function Toolbar({ remoteId, role = "viewer", status = "in_session", link, clipboardSync = true, onClipboardSyncChange = () => {}, onDisconnect, monitors = [], selectedMonitor, onMonitorChange = () => {}, canAddDisplay = false, onAddDisplay = () => {}, onRemoveDisplay = () => {}, canOpenMonitorWindow = false, onOpenMonitorWindow = () => {}, audioMuted = false, onAudioMutedChange = () => {}, recordingActive = false, recordingElapsed = 0, onRecordingToggle = () => {}, filesOpen = false, onFilesToggle = () => {}, chatOpen = false, onChatToggle = () => {}, chatUnread = 0, canTunnel = false, tunnelsOpen = false, onTunnelsToggle = () => {}, canWake = false, wakeOpen = false, onWakeToggle = () => {}, viewOnly = false, onViewOnlyChange = () => {}, canSecureAttention = false, onSecureAttention = () => {}, canRestart = false, onRestart = () => {}, canPrivacy = false, privacyOn = false, onPrivacyChange = () => {} }: ToolbarProps) {
+export default function Toolbar({ remoteId, role = "viewer", status = "in_session", link, clipboardSync = true, onClipboardSyncChange = () => {}, onDisconnect, monitors = [], selectedMonitor, onMonitorChange = () => {}, canAddDisplay = false, onAddDisplay = () => {}, onRemoveDisplay = () => {}, canOpenMonitorWindow = false, onOpenMonitorWindow = () => {}, audioMuted = false, onAudioMutedChange = () => {}, recordingActive = false, recordingElapsed = 0, onRecordingToggle = () => {}, filesOpen = false, onFilesToggle = () => {}, chatOpen = false, onChatToggle = () => {}, chatUnread = 0, canTunnel = false, tunnelsOpen = false, onTunnelsToggle = () => {}, canWake = false, wakeOpen = false, onWakeToggle = () => {}, viewOnly = false, onViewOnlyChange = () => {}, onKeyboard, canSecureAttention = false, onSecureAttention = () => {}, canRestart = false, onRestart = () => {}, canPrivacy = false, privacyOn = false, onPrivacyChange = () => {} }: ToolbarProps) {
   const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
@@ -190,6 +192,7 @@ export default function Toolbar({ remoteId, role = "viewer", status = "in_sessio
             <IconButton label="Chat" pressed={chatOpen} expanded={chatOpen} badge={chatUnread} title={chatOpen ? "Hide chat" : "Open chat"} onClick={onChatToggle} text="Chat" icon={icons.chat} />
             {canTunnel && <IconButton label="Tunnels" pressed={tunnelsOpen} expanded={tunnelsOpen} title={tunnelsOpen ? "Hide TCP tunnels" : "Reach a port on the other computer's network"} onClick={onTunnelsToggle} text="Tunnels" icon={icons.network} />}
             {canWake && <IconButton label="Wake devices" pressed={wakeOpen} expanded={wakeOpen} title={wakeOpen ? "Hide Wake-on-LAN" : "Wake a sleeping computer on the other computer's network"} onClick={onWakeToggle} text="Wake" icon={icons.power} />}
+            {onKeyboard && <IconButton label="Keyboard" text="Keyboard" title="Type on the other computer with the on-screen keyboard" icon={icons.keyboard} onClick={onKeyboard} />}
             <IconButton label="View only" pressed={viewOnly} title={viewOnly ? "View only is on. Click to send input again." : "View only is off. Click to stop sending input."} onClick={() => onViewOnlyChange(!viewOnly)} text="View only" icon={icons.eye} />
             {canSecureAttention && <IconButton label="Send Ctrl+Alt+Del" text="Ctrl+Alt+Del" title="Send Ctrl+Alt+Del to the other computer" icon={icons.keyboard} onClick={onSecureAttention} />}
             {canRestart && <IconButton label="Restart remote" text="Restart" title="Restart the other computer and reconnect when it comes back" icon={icons.restart} onClick={onRestart} />}
