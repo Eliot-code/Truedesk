@@ -20,6 +20,20 @@ identity and config.
 On one machine you are viewing your own screen, so the stream shows itself
 recursively. That's expected.
 
+## Viewers without a desktop to share
+
+To try a viewer (the browser viewer, the phone app, or the desktop app as a
+viewer) on a machine with no screen, such as a server or a container, run the
+demo host. It shares a test pattern whose crosshair follows the viewer's
+pointer, and prints every input event it receives.
+
+1. Relay: `cargo run -p relay`.
+2. Demo host: `cargo run -p host-core --example demo_host` (ID `123456789`,
+   password `demo-password`; pass a relay URL, ID and password to change them).
+3. Browser viewer: `cd web && npm run wasm && npm run dev`, open it, and
+   connect to `123456789` with the password. Phone emulation in a desktop
+   browser's developer tools exercises the touch gestures.
+
 ## Two machines
 
 Run the relay where both machines can reach it, then point both apps at it
