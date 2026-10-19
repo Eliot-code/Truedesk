@@ -1,0 +1,20 @@
+# Standalone workspace: the mobile app is not a member of the repo-root workspace.
+[workspace]
+
+[package]
+name = "truedesk-mobile"
+version = "0.1.0"
+description = "Truedesk viewer for Android and iOS"
+publish = false
+license = "AGPL-3.0-only"
+edition = "2021"
+
+[lib]
+name = "truedesk_mobile_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.7", features = [] }
+
+[dependencies]
+tauri = { version = "2.12", features = [] }

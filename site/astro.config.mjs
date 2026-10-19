@@ -41,6 +41,7 @@ export default defineConfig({
         "docs/wake-on-lan",
         "docs/unattended",
         "docs/browser-viewer",
+        "docs/mobile",
         "docs/virtual-displays",
         "docs/self-hosting",
         "docs/security",

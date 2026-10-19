@@ -1,0 +1,41 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Truedesk",
+  "version": "0.1.0",
+  "identifier": "com.truedesk.viewer",
+  "build": {
+    "beforeDevCommand": "npm --prefix ../web run dev",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "npm --prefix ../web run build",
+    "frontendDist": "../../web/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Truedesk",
+        "width": 420,
+        "height": 860
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "Utility",
+    "copyright": "Copyright © 2026 Truedesk contributors. Based on OpenDesk, © 2026 OpenDesk contributors",
+    "icon": [
+      "../../viewer/src-tauri/icons/32x32.png",
+      "../../viewer/src-tauri/icons/128x128.png",
+      "../../viewer/src-tauri/icons/128x128@2x.png",
+      "../../viewer/src-tauri/icons/icon.icns",
+      "../../viewer/src-tauri/icons/icon.ico"
+    ],
+    "android": {
+      "minSdkVersion": 26
+    }
+  }
+}

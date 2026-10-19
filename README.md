@@ -52,6 +52,7 @@ path is used whenever the network allows it.
 | ⏰ **Wake-on-LAN** | Turn on a sleeping saved device, on your network or through another Truedesk computer on its network |
 | 🪟 **Multi-monitor** | Pick a monitor, or add a virtual display on macOS and Windows |
 | 🌙 **Unattended access** | Stored password, optional 2FA code, start at sign-in with a tray icon |
+| 📱 **Phones and tablets** | Android app and any phone's browser: tap, long-press, two-finger scroll, pinch zoom, on-screen keyboard with Ctrl/Alt/Win |
 | 🌐 **Browser viewer** | Connect from any modern browser, nothing to install ([how it works](site/src/content/docs/docs/browser-viewer.md)) |
 | 🔄 **Auto-update** | Signed updates checked from GitHub Releases |
 
@@ -80,6 +81,8 @@ covers each step in more detail.
 | **Windows** 10 1803+ | ✅ | ✅ | Less runtime-tested than macOS |
 | **Linux** | ✅ | ✅ | PipeWire + xdg-desktop-portal; Wayland input is limited |
 | **Browser** | — | ✅ | Relay only (no direct connection); can't host |
+| **Android** | — | ✅ | App with touch gestures and keyboard (the browser viewer in an app); relay only |
+| **iPhone / iPad** | — | ✅ | Through Safari for now; app planned |
 
 Release builds are not code-signed. The
 [install guide](site/src/content/docs/docs/getting-started.md) shows how to
@@ -153,7 +156,7 @@ replacement, in rough priority order:
 
 - **Accounts and a web console**: sign-in, synced address book, and device
   and user management for teams.
-- **Native mobile apps**: Android and iOS, beyond today's browser viewer.
+- **More mobile**: an iOS app, and controlling an Android phone from a computer (today phones can only view and control).
 - **More codecs**: H.265 and VP8/VP9, and hardware encoding on Linux.
 - **Session extras**: remote restart with auto-reconnect, swapping which side
   controls, and remote printing.

@@ -26,6 +26,8 @@ hosting has had less testing than macOS.
   through another computer on its network.
 - [Browser viewer](/docs/browser-viewer/): control a computer from a browser,
   and what it can't do yet.
+- [Phones and tablets](/docs/mobile/): the Android app, iPhone through
+  Safari, touch gestures and typing.
 
 ## Running and trusting it
 
