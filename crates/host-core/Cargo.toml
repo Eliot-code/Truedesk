@@ -7,8 +7,6 @@ edition = "2021"
 
 [dependencies]
 async-trait = "0.1"
-# Encodes clipboard images for transport (desktop clipboard image sync).
-png = "0.18"
 protocol = { path = "../protocol" }
 tokio = { workspace = true }
 # wss:// relays: rustls with the OS trust store. tokio-tungstenite pulls in

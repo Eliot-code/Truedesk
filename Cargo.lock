@@ -1323,7 +1323,6 @@ dependencies = [
  "objc2-video-toolbox",
  "openh264",
  "opus",
- "png",
  "protocol",
  "relay",
  "rustls",

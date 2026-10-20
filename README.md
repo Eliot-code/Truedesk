@@ -47,7 +47,7 @@ path is used whenever the network allows it.
 | ⚡ **Direct when possible** | Peer-to-peer UDP with automatic fallback to the relay; latency badge in the toolbar |
 | 🖥️ **Hardware H.264** | VideoToolbox on macOS, Media Foundation on Windows, openh264 elsewhere |
 | 🔊 **System sound** | macOS 14.6+, Windows, Linux (PulseAudio / PipeWire) |
-| 📁 **Files and clipboard** | Encrypted file transfer with consent and hash check; clipboard sync for text and images |
+| 📁 **Files and clipboard** | Encrypted file transfer with consent and hash check; text clipboard sync |
 | 🔀 **TCP tunnels** | Reach Remote Desktop, SSH or any TCP service on the remote network through the session; the host can turn it off |
 | ⏰ **Wake-on-LAN** | Turn on a sleeping saved device, on your network or through another Truedesk computer on its network |
 | 🔎 **Nearby devices** | Find other Truedesk computers on your local network and connect by name |
