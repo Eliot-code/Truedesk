@@ -7,7 +7,7 @@ import { NotifyContext } from "../lib/notify";
 
 vi.mock("../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
-  return { ...actual, getIdentity: vi.fn(), getConfig: vi.fn(), getUnattendedStatus: vi.fn(), listContacts: vi.fn(), listAllowed: vi.fn(), startHosting: vi.fn(), getWindowsServiceStatus: vi.fn(), installWindowsService: vi.fn(), uninstallWindowsService: vi.fn(), closeKeepsRunning: vi.fn(), quitApp: vi.fn(), connect: vi.fn(), setUnattendedAccess: vi.fn(), setUnattended2fa: vi.fn(), confirmUnattended2fa: vi.fn(), rotatePassword: vi.fn(), addContact: vi.fn(), getStartAtSignIn: vi.fn(), setStartAtSignIn: vi.fn(), onIdentityChanged: vi.fn(), resetIdentity: vi.fn(), getIdentityConflicts: vi.fn(), onIdentityConflicts: vi.fn(), setAllowVirtualDisplays: vi.fn(), getDisplayDriver: vi.fn(), installDisplayDriver: vi.fn(), uninstallDisplayDriver: vi.fn(), listWakeable: vi.fn(), wakeDevice: vi.fn(), listNearby: vi.fn() };
+  return { ...actual, getIdentity: vi.fn(), getConfig: vi.fn(), getUnattendedStatus: vi.fn(), listContacts: vi.fn(), listAllowed: vi.fn(), startHosting: vi.fn(), getWindowsServiceStatus: vi.fn(), installWindowsService: vi.fn(), uninstallWindowsService: vi.fn(), closeKeepsRunning: vi.fn(), quitApp: vi.fn(), connect: vi.fn(), setUnattendedAccess: vi.fn(), setUnattended2fa: vi.fn(), confirmUnattended2fa: vi.fn(), rotatePassword: vi.fn(), addContact: vi.fn(), getStartAtSignIn: vi.fn(), setStartAtSignIn: vi.fn(), onIdentityChanged: vi.fn(), resetIdentity: vi.fn(), getIdentityConflicts: vi.fn(), onIdentityConflicts: vi.fn(), setAllowVirtualDisplays: vi.fn(), getDisplayDriver: vi.fn(), installDisplayDriver: vi.fn(), uninstallDisplayDriver: vi.fn(), listWakeable: vi.fn(), wakeDevice: vi.fn(), listNearby: vi.fn(), getDeviceName: vi.fn(), setDeviceName: vi.fn() };
 });
 describe("Home", () => {
   afterEach(cleanup);
@@ -28,6 +28,7 @@ describe("Home", () => {
     vi.mocked(api.getDisplayDriver).mockResolvedValue({ applies: false, installed: false, license: "" });
     vi.mocked(api.listWakeable).mockResolvedValue([]);
     vi.mocked(api.listNearby).mockResolvedValue([]);
+    vi.mocked(api.getDeviceName).mockResolvedValue("my-pc");
   });
   it("offers to wake a saved device that is offline and can be woken", async () => {
     const notify = vi.fn();
@@ -42,6 +43,16 @@ describe("Home", () => {
     await waitFor(() => expect(notify).toHaveBeenCalledWith("Wake-up signal sent to Office PC. It can take a minute to come online.", "info"));
     fireEvent.click(wake);
     await waitFor(() => expect(notify).toHaveBeenCalledWith("Couldn't send the wake-up signal. Check this computer's network connection.", "error"));
+  });
+  it("shows this device's name and renames it", async () => {
+    vi.mocked(api.getDeviceName).mockResolvedValue("old-name");
+    vi.mocked(api.setDeviceName).mockResolvedValue("new-name");
+    render(<Home status="online" onConnect={vi.fn()} incomingRequest={null} onDismissRequest={vi.fn()} />);
+    const input = await screen.findByLabelText("This device's name") as HTMLInputElement;
+    await waitFor(() => expect(input.value).toBe("old-name"));
+    fireEvent.change(input, { target: { value: "new-name" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(api.setDeviceName).toHaveBeenCalledWith("new-name"));
   });
   it("lists nearby devices and fills the form when one is picked", async () => {
     vi.mocked(api.listNearby).mockResolvedValue([{ id: "333333333", alias: "Studio Mac" }]);

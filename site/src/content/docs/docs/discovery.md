@@ -19,7 +19,8 @@ Truedesk starts on it and drops off a few seconds after it stops.
 ## What is shared
 
 While Truedesk is running it broadcasts only its **ID** and its **device
-name** (the computer's hostname) on the local network, so other Truedesk
+name** (the name you set on the home screen, or the computer's hostname) on
+the local network, so other Truedesk
 computers can offer it in their list. It never broadcasts your screen,
 password or any session data, and nothing leaves the local network.
 

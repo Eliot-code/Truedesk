@@ -876,7 +876,7 @@ pub fn run() {
             let wake = WakeStore::load(&app_data_dir)?;
             let clipboard_sync = config.config.clipboard_sync;
             // LAN discovery: announce this device and watch for others nearby.
-            let lan = lan::start(config.config.id.clone());
+            let lan = lan::start(config.config.id.clone(), config.device_name());
             app.manage(AppState(Mutex::new(RuntimeState {
                 config,
                 contacts,
@@ -999,7 +999,9 @@ pub fn run() {
             wake_device,
             wakeable_devices,
             wake_relay_support,
-            nearby_devices
+            nearby_devices,
+            device_name,
+            set_device_name
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

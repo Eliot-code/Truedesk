@@ -140,6 +140,7 @@ impl Registry {
 pub struct Discovery {
     registry: Arc<Mutex<Registry>>,
     stop: Arc<Notify>,
+    alias: Arc<Mutex<String>>,
 }
 
 impl Discovery {
@@ -151,7 +152,12 @@ impl Discovery {
     pub fn start(id: String, alias: String) -> (Self, impl Future<Output = ()> + Send) {
         let registry = Arc::new(Mutex::new(Registry::new(DEVICE_TTL)));
         let stop = Arc::new(Notify::new());
-        let discovery = Self { registry: Arc::clone(&registry), stop: Arc::clone(&stop) };
+        let alias = Arc::new(Mutex::new(alias));
+        let discovery = Self {
+            registry: Arc::clone(&registry),
+            stop: Arc::clone(&stop),
+            alias: Arc::clone(&alias),
+        };
         (discovery, run(id, alias, registry, stop))
     }
 
@@ -161,6 +167,12 @@ impl Discovery {
         let now = Instant::now();
         registry.prune(now);
         registry.devices(now)
+    }
+
+    /// Changes the name announced on the network; takes effect within a few
+    /// seconds, on the next announcement.
+    pub fn set_alias(&self, alias: String) {
+        *self.alias.lock().unwrap_or_else(|p| p.into_inner()) = alias;
     }
 
     /// Stops announcing and listening; the work future returns soon after.
@@ -189,7 +201,7 @@ fn broadcast_addresses() -> Vec<Ipv4Addr> {
 }
 
 /// Owns the socket and runs the announce and listen loops until stopped.
-async fn run(id: String, alias: String, registry: Arc<Mutex<Registry>>, stop: Arc<Notify>) {
+async fn run(id: String, alias: Arc<Mutex<String>>, registry: Arc<Mutex<Registry>>, stop: Arc<Notify>) {
     let socket = match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, DISCOVERY_PORT)).await {
         Ok(socket) => socket,
         Err(error) => {
@@ -202,11 +214,14 @@ async fn run(id: String, alias: String, registry: Arc<Mutex<Registry>>, stop: Ar
         return;
     }
     let socket = Arc::new(socket);
-    let packet = encode_announce(&id, &alias);
-
     let announcer = Arc::clone(&socket);
+    let announce_id = id.clone();
     let announce = async move {
         loop {
+            let packet = {
+                let alias = alias.lock().unwrap_or_else(|p| p.into_inner());
+                encode_announce(&announce_id, &alias)
+            };
             for address in broadcast_addresses() {
                 let _ = announcer.send_to(&packet, (address, DISCOVERY_PORT)).await;
             }

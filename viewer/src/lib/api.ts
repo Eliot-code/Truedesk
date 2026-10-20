@@ -238,6 +238,10 @@ export const listWakeable = () => invoke<string[]>("wakeable_devices");
 export interface NearbyDevice { id: string; alias: string }
 /** Truedesk devices announcing themselves on this network right now. */
 export const listNearby = () => invoke<NearbyDevice[]>("nearby_devices");
+/** This device's display name (the alias you set, or the hostname). */
+export const getDeviceName = () => invoke<string>("device_name");
+/** Renames this device; resolves to the stored name (hostname when cleared). */
+export const setDeviceName = (name: string) => invoke<string>("set_device_name", { name });
 
 /** One entry in a remote directory listing. */
 export interface DirEntry { name: string; is_dir: boolean; size: number; modified: number }

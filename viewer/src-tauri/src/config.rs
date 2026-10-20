@@ -61,9 +61,19 @@ pub struct Config {
     /// displays go when the session ends.
     #[serde(default = "default_true")]
     pub allow_virtual_displays: bool,
+    /// A friendly name for this device, shown to others on the local network
+    /// and as a default when they save it. Empty falls back to the hostname.
+    #[serde(default)]
+    pub alias: Option<String>,
 }
 
 fn default_true() -> bool { true }
+
+/// The computer's hostname, or a plain default when it has none.
+fn hostname() -> String {
+    let name = gethostname::gethostname().to_string_lossy().trim().to_owned();
+    if name.is_empty() { "Truedesk device".to_owned() } else { name }
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -83,6 +93,7 @@ impl Default for Config {
             unattended_twofa_enabled: false,
             clipboard_sync: false,
             allow_virtual_displays: true,
+            alias: None,
         }
     }
 }
@@ -273,6 +284,22 @@ impl ConfigStore {
 
     pub fn set_clipboard_sync(&mut self, enabled: bool) -> io::Result<()> {
         self.config.clipboard_sync = enabled;
+        self.save()
+    }
+
+    /// This device's name: the alias the user set, or the computer's hostname.
+    pub fn device_name(&self) -> String {
+        match self.config.alias.as_deref().map(str::trim).filter(|name| !name.is_empty()) {
+            Some(name) => name.to_owned(),
+            None => hostname(),
+        }
+    }
+
+    /// Sets the device's name (trimmed, capped), or clears it back to the
+    /// hostname when blank.
+    pub fn set_alias(&mut self, alias: &str) -> io::Result<()> {
+        let trimmed = alias.trim();
+        self.config.alias = if trimmed.is_empty() { None } else { Some(trimmed.chars().take(64).collect()) };
         self.save()
     }
 
@@ -716,6 +743,21 @@ mod tests {
         assert!(ConfigStore::load(&dir).unwrap().config.clipboard_sync);
         let legacy: Config = serde_json::from_str(r#"{"id":"123456789","relay_url":"wss://x","allow_list":[],"recent_ids":[]}"#).unwrap();
         assert!(!legacy.clipboard_sync);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn alias_defaults_to_hostname_and_persists() {
+        let dir = test_dir();
+        let mut store = ConfigStore::load(&dir).unwrap();
+        // No alias set: the name is the hostname.
+        assert_eq!(store.device_name(), hostname());
+        store.set_alias("  Front Desk  ").unwrap();
+        // Trimmed, persisted, and reloaded.
+        assert_eq!(ConfigStore::load(&dir).unwrap().device_name(), "Front Desk");
+        // Blank clears it back to the hostname.
+        store.set_alias("   ").unwrap();
+        assert_eq!(store.device_name(), hostname());
         let _ = fs::remove_dir_all(dir);
     }
 }

@@ -22,21 +22,10 @@ impl From<Device> for NearbyDevice {
     }
 }
 
-/// The name this device shows on the network: the computer's hostname, or a
-/// plain default when it has none.
-pub(crate) fn device_alias() -> String {
-    let name = gethostname::gethostname().to_string_lossy().trim().to_owned();
-    if name.is_empty() {
-        "Truedesk device".to_owned()
-    } else {
-        name
-    }
-}
-
 /// Starts announcing this device and listening for others. The handle goes
 /// into the app state; dropping it (on shutdown) stops discovery.
-pub(crate) fn start(id: String) -> Discovery {
-    let (discovery, worker) = Discovery::start(id, device_alias());
+pub(crate) fn start(id: String, name: String) -> Discovery {
+    let (discovery, worker) = Discovery::start(id, name);
     tauri::async_runtime::spawn(worker);
     discovery
 }
@@ -48,4 +37,23 @@ pub(crate) fn nearby_devices(state: tauri::State<'_, AppState>) -> Vec<NearbyDev
         Some(discovery) => discovery.devices().into_iter().map(NearbyDevice::from).collect(),
         None => Vec::new(),
     }
+}
+
+/// This device's current display name (the alias, or the hostname).
+#[tauri::command]
+pub(crate) fn device_name(state: tauri::State<'_, AppState>) -> String {
+    state.lock().config.device_name()
+}
+
+/// Renames this device. The name is saved and announced on the LAN at once;
+/// returns the name actually stored (the hostname when cleared).
+#[tauri::command]
+pub(crate) fn set_device_name(state: tauri::State<'_, AppState>, name: String) -> Result<String, String> {
+    let mut guard = state.lock();
+    guard.config.set_alias(&name).map_err(|error| error.to_string())?;
+    let resolved = guard.config.device_name();
+    if let Some(discovery) = &guard.lan {
+        discovery.set_alias(resolved.clone());
+    }
+    Ok(resolved)
 }

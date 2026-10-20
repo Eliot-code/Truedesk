@@ -153,3 +153,6 @@ button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-
 .nearby { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
 .nearby .chip { display: inline-flex; gap: 6px; align-items: baseline; }
 .nearby-id { opacity: .7; font-size: 10px; }
+/* This device's name, in the identity card. */
+.device-name-row { margin: 0 0 16px; }
+.device-name-row label { display: block; color: var(--muted); font: 600 10px var(--mono); letter-spacing: .1em; margin-bottom: 8px; }
