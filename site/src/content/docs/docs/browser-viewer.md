@@ -22,6 +22,13 @@ next time.
 Under **Relay** you can change which relay the page uses. It has to be the
 same relay the host uses, and it must start with `wss://`.
 
+### Invite link
+
+You can share a link that fills the ID in for whoever opens it:
+`https://your-truedesk-site/connect/?id=123456789`. Add `&relay=wss://…`
+to point them at the right relay too. The link never carries the password,
+so you still tell them that (or turn on unattended access).
+
 ## What works
 
 - The remote screen, mouse and keyboard.

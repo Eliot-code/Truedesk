@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it } from "vitest";
-import { DEFAULT_RELAY, formatId, generateViewerId, normalizeId, relayUrlError, saveRelay, savedRelay, viewerId } from "./settings";
+import { DEFAULT_RELAY, formatId, generateViewerId, normalizeId, relayUrlError, saveRelay, savedRelay, viewerId, inviteParams } from "./settings";
 import { friendlyError, unsupportedReason } from "./errors";
 
 beforeEach(() => localStorage.clear());
@@ -58,5 +58,18 @@ describe("errors", () => {
     expect(unsupportedReason({ isSecureContext: true, WebSocket: {}, VideoDecoder: {} })).toBeNull();
     expect(unsupportedReason({ isSecureContext: true, WebSocket: {} })).toMatch(/WebCodecs/);
     expect(unsupportedReason({ isSecureContext: false })).toMatch(/https/);
+  });
+});
+
+describe("inviteParams", () => {
+  it("reads a valid id and relay from the query", () => {
+    expect(inviteParams("?id=123456789")).toEqual({ id: "123456789", relay: null });
+    expect(inviteParams("?id=123-456-789")).toEqual({ id: "123456789", relay: null });
+    expect(inviteParams("?id=123456789&relay=wss://relay.example.com/ws")).toEqual({ id: "123456789", relay: "wss://relay.example.com/ws" });
+  });
+  it("ignores a bad id, a bad relay, and an empty query", () => {
+    expect(inviteParams("?id=abc")).toEqual({ id: null, relay: null });
+    expect(inviteParams("?id=123456789&relay=not-a-url")).toEqual({ id: "123456789", relay: null });
+    expect(inviteParams("")).toEqual({ id: null, relay: null });
   });
 });

@@ -135,3 +135,22 @@ export function generateHostPassword(random: (array: Uint8Array<ArrayBuffer>) =>
   }
   return Array.from(bytes, (b) => alphabet[b % alphabet.length]).join("");
 }
+
+/**
+ * Prefill from an invite link, e.g. `/connect/?id=123456789&relay=wss://…`.
+ * Only a valid 9-digit ID and an acceptable relay are returned; the password
+ * is never carried in a link.
+ */
+export function inviteParams(search: string = typeof location === "undefined" ? "" : location.search): { id: string | null; relay: string | null } {
+  try {
+    const params = new URLSearchParams(search);
+    const id = normalizeId(params.get("id") ?? "");
+    const relay = (params.get("relay") ?? "").trim();
+    return {
+      id: /^\d{9}$/.test(id) ? id : null,
+      relay: relay && relayUrlError(relay) === null ? relay : null,
+    };
+  } catch {
+    return { id: null, relay: null };
+  }
+}

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Connection, type ConnectionStatus, type Socket } from "./lib/connection";
 import { friendlyError, unsupportedReason } from "./lib/errors";
-import { DEFAULT_RELAY, saveRelay, savedRelay, viewerId } from "./lib/settings";
+import { DEFAULT_RELAY, inviteParams, saveRelay, savedRelay, viewerId } from "./lib/settings";
 import type { Core, FileSignal, MonitorInfo } from "./lib/types";
 import ConnectForm, { type ConnectRequest } from "./screens/ConnectForm";
 import Session, { type SessionControls } from "./screens/Session";
@@ -23,10 +23,12 @@ interface Active {
 export default function App({ loadCore, openSocket, unsupported = unsupportedReason() }: AppProps) {
   const [ownId] = useState(viewerId);
   const [mode, setMode] = useState<"connect" | "share">("connect");
+  // An invite link (…/connect/?id=&relay=) prefills the form, once.
+  const [invite] = useState(inviteParams);
   const [active, setActive] = useState<Active | null>(null);
   const [monitors, setMonitors] = useState<MonitorInfo[]>([]);
   const [message, setMessage] = useState<string>();
-  const [lastTarget, setLastTarget] = useState("");
+  const [lastTarget, setLastTarget] = useState(invite.id ?? "");
   const [busy, setBusy] = useState(false);
   const [twofa, setTwofa] = useState<"required" | "invalid" | null>(null);
   const lastRequest = useRef<ConnectRequest | null>(null);
@@ -49,6 +51,13 @@ export default function App({ loadCore, openSocket, unsupported = unsupportedRea
     rejectFile: (id) => connection.current?.rejectFile(id),
     setFileSink: (sink) => { fileSink.current = sink; },
   }), []);
+
+  // Drop the invite params from the address bar once read.
+  useEffect(() => {
+    if ((invite.id || invite.relay) && typeof history !== "undefined" && history.replaceState) {
+      history.replaceState(null, "", location.pathname + location.hash);
+    }
+  }, []);
 
   // Leaving the page ends the session on the host right away.
   useEffect(() => {
@@ -121,7 +130,7 @@ export default function App({ loadCore, openSocket, unsupported = unsupportedRea
     <>
       <ConnectForm
         viewerId={ownId}
-        relay={savedRelay()}
+        relay={invite.relay ?? savedRelay()}
         defaultRelay={DEFAULT_RELAY}
         message={message}
         unsupported={unsupported}
