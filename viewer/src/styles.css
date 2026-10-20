@@ -149,3 +149,7 @@ button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-
 .touch-keyboard__keys { position: absolute; top: 76px; left: 50%; z-index: 3; display: flex; gap: 6px; max-width: calc(100vw - 24px); overflow-x: auto; padding: 8px; transform: translateX(-50%); background: #141922f2; border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 12px 35px #0008; }.touch-keyboard__keys button { flex: none; min-width: 40px; min-height: 40px; padding: 0 9px; color: var(--text); background: #0f131a; border: 1px solid var(--border); border-radius: 6px; font: 600 13px var(--mono); }.touch-keyboard__keys button[aria-pressed="true"] { color: #061116; background: var(--accent); border-color: transparent; }
 /* Phones: the toolbar drops the ID so Disconnect stays in view. */
 @media (max-width: 520px) { .session-toolbar__remote { display: none; } }
+/* Nearby devices on the LAN (connect screen): same chips as RECENT. */
+.nearby { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+.nearby .chip { display: inline-flex; gap: 6px; align-items: baseline; }
+.nearby-id { opacity: .7; font-size: 10px; }

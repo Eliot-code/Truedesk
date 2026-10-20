@@ -3,6 +3,7 @@ pub mod capture;
 pub mod audio;
 pub mod clipboard;
 pub mod datachan;
+pub mod discovery;
 pub mod encode;
 pub mod filexfer;
 pub mod inject;

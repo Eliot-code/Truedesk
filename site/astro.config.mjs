@@ -39,6 +39,7 @@ export default defineConfig({
         "docs/host-controls",
         "docs/tunnels",
         "docs/wake-on-lan",
+        "docs/discovery",
         "docs/unattended",
         "docs/browser-viewer",
         "docs/mobile",

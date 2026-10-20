@@ -50,6 +50,7 @@ path is used whenever the network allows it.
 | 📁 **Files and clipboard** | Encrypted file transfer with consent and hash check; text clipboard sync |
 | 🔀 **TCP tunnels** | Reach Remote Desktop, SSH or any TCP service on the remote network through the session; the host can turn it off |
 | ⏰ **Wake-on-LAN** | Turn on a sleeping saved device, on your network or through another Truedesk computer on its network |
+| 🔎 **Nearby devices** | Find other Truedesk computers on your local network and connect by name |
 | 🪟 **Multi-monitor** | Pick a monitor, or add a virtual display on macOS and Windows |
 | 🌙 **Unattended access** | Stored password, optional 2FA code, start at sign-in with a tray icon |
 | 📱 **Phones and tablets** | Android app and any phone's browser: tap, long-press, two-finger scroll, pinch zoom, on-screen keyboard with Ctrl/Alt/Win. Android can also be shared and controlled |
@@ -145,6 +146,7 @@ To run two instances on one machine, see [`docs/TESTING.md`](docs/TESTING.md).
 - [x] In-session text chat and view-only sessions
 - [x] TCP tunnels (local port forwarding)
 - [x] Wake-on-LAN, directly or through another computer on the same network
+- [x] LAN discovery of nearby devices
 - [ ] Windows sign-in screen, UAC prompts, lock screen and Ctrl+Alt+Del (shipped experimental; needs hardware/VM validation)
 - [ ] Hardware H.264 on Linux (VAAPI)
 - [ ] Privacy mode on Linux

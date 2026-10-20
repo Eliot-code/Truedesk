@@ -15,6 +15,7 @@ pub use windows_service::run_windows_service;
 mod viewer;
 mod tunnels;
 mod wake;
+mod lan;
 
 use config::ConfigStore;
 use contacts::{Contact, ContactStore};
@@ -32,6 +33,7 @@ pub(crate) use host::*;
 pub(crate) use viewer::*;
 pub(crate) use tunnels::*;
 pub(crate) use wake::*;
+pub(crate) use lan::*;
 
 struct RuntimeState {
     config: ConfigStore,
@@ -59,6 +61,9 @@ struct RuntimeState {
     file_router: Option<Arc<FileRouter>>,
     /// The session's TCP tunnels (either role).
     tunnels: Option<host_core::tunnel::Tunnels>,
+    /// Announces this device on the LAN and lists nearby ones. Dropped on
+    /// shutdown, which stops discovery.
+    lan: Option<host_core::discovery::Discovery>,
     /// Destination for the next uploaded file (the folder the viewer is
     /// browsing), consumed once; `None` means save to Downloads.
     upload_dir: Arc<Mutex<Option<String>>>,
@@ -858,6 +863,8 @@ pub fn run() {
             let contacts = ContactStore::load(&app_data_dir)?;
             let wake = WakeStore::load(&app_data_dir)?;
             let clipboard_sync = config.config.clipboard_sync;
+            // LAN discovery: announce this device and watch for others nearby.
+            let lan = lan::start(config.config.id.clone());
             app.manage(AppState(Mutex::new(RuntimeState {
                 config,
                 contacts,
@@ -883,6 +890,7 @@ pub fn run() {
                 identity_conflicts: Vec::new(),
                 viewer_permissions: ViewerPermissions::new(),
                 tunnels: None,
+                lan: Some(lan),
                 disconnect_viewer: None,
             })));
             #[cfg(windows)]
@@ -978,7 +986,8 @@ pub fn run() {
             tunnel_support,
             wake_device,
             wakeable_devices,
-            wake_relay_support
+            wake_relay_support,
+            nearby_devices
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -1273,6 +1282,7 @@ mod tests {
             identity_conflicts: Vec::new(),
             viewer_permissions: ViewerPermissions::new(),
             tunnels: None,
+            lan: None,
             disconnect_viewer: None,
         }));
 

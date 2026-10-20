@@ -234,6 +234,11 @@ export const wakeDevice = (peerId: string) => invoke<{ sent: number; relayed: bo
 /** IDs of the devices Truedesk knows how to wake (it learns while connected to them). */
 export const listWakeable = () => invoke<string[]>("wakeable_devices");
 
+/** A Truedesk device seen on the local network, to connect by name not ID. */
+export interface NearbyDevice { id: string; alias: string }
+/** Truedesk devices announcing themselves on this network right now. */
+export const listNearby = () => invoke<NearbyDevice[]>("nearby_devices");
+
 /** One entry in a remote directory listing. */
 export interface DirEntry { name: string; is_dir: boolean; size: number; modified: number }
 /** List a directory on this computer (empty path = home folder). */
