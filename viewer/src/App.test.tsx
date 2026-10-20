@@ -18,6 +18,7 @@ const { listeners, mocks } = vi.hoisted(() => {
     onPrivacyModeSupport: on("privacy_mode_support"), onPrivacyModeChanged: on("privacy_mode_changed"), setPrivacyMode: vi.fn(),
     onTunnelSupport: on("tunnel_support"), onTunnelRefused: on("tunnel_refused"), onTunnelsChanged: on("tunnels_changed"), getTunnelSupport: vi.fn(() => Promise.resolve(false)), listTunnels: vi.fn(() => Promise.resolve([])),
     onWakeRelaySupport: on("wake_relay_support"), onWakeSent: on("wake_sent"), getWakeRelaySupport: vi.fn(() => Promise.resolve(false)), listWakeable: vi.fn(() => Promise.resolve([])), wakeDevice: vi.fn(),
+    listNearby: vi.fn(() => Promise.resolve([])), getDeviceName: vi.fn(() => Promise.resolve("test-pc")), setDeviceName: vi.fn(() => Promise.resolve("test-pc")),
     browseLocal: vi.fn(() => Promise.resolve({ path: "/home", entries: [] })), browseRemote: vi.fn(() => Promise.resolve()), onRemoteListing: on("remote_listing"), pullRemote: vi.fn(() => Promise.resolve()),
     onFileDrop: on("drop"), onPasswordRotated: on("password_rotated"), onIdentityChanged: on("identity_changed"),
     onIdentityConflicts: on("identity_conflicts"), getIdentityConflicts: () => Promise.resolve([]),
