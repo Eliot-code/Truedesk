@@ -163,6 +163,7 @@ struct ClipboardThread {
 }
 enum ClipboardCommand {
     Apply(String),
+    ApplyImage(Vec<u8>),
     Stop,
 }
 struct AppState(Mutex<RuntimeState>);
@@ -226,17 +227,22 @@ fn spawn_clipboard_thread(
         let mut sync = ClipboardSync::new(backend);
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build();
         let Ok(runtime) = runtime else { return };
-        loop {
+        'thread: loop {
             match command_rx.recv_timeout(Duration::from_millis(500)) {
                 Ok(ClipboardCommand::Apply(text)) => {
                     if active() { sync.apply(&text); }
                 }
+                Ok(ClipboardCommand::ApplyImage(image)) => {
+                    if active() { sync.apply_image(&image); }
+                }
                 Ok(ClipboardCommand::Stop) | Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(std_mpsc::RecvTimeoutError::Timeout) => {
                     if !active() { continue; }
-                    let Some(message) = sync.poll_data() else { continue };
-                    let sealed = lock_unpoisoned(&sealer).seal(&[Tag::Data as u8], &message.to_bytes());
-                    if runtime.block_on(outgoing.send_frame(Tag::Data, &sealed)).is_err() { break; }
+                    // Send any local text and image change this tick.
+                    for message in [sync.poll_data(), sync.poll_image_data()].into_iter().flatten() {
+                        let sealed = lock_unpoisoned(&sealer).seal(&[Tag::Data as u8], &message.to_bytes());
+                        if runtime.block_on(outgoing.send_frame(Tag::Data, &sealed)).is_err() { break 'thread; }
+                    }
                 }
             }
         }
@@ -260,6 +266,8 @@ fn dispatch_data(
 ) -> (Arc<FileRouter>, mpsc::Receiver<IncomingTransfer>) {
     let (router, offers) = FileRouter::new();
     let clipboard_app = app.clone();
+    let clipboard_image_app = app.clone();
+    let clipboard_tx_image = clipboard_tx.clone();
     let chat_app = app.clone();
     let browse_app = app.clone();
     tauri::async_runtime::spawn(host_core::datachan::dispatch_data(
@@ -269,6 +277,10 @@ fn dispatch_data(
         move |message| {
             emit_activity(&clipboard_app, "clipboard", "clipboard received");
             if let Some(sender) = &clipboard_tx { let _ = sender.send(ClipboardCommand::Apply(message.text)); }
+        },
+        move |message| {
+            emit_activity(&clipboard_image_app, "clipboard", "clipboard image received");
+            if let Some(sender) = &clipboard_tx_image { let _ = sender.send(ClipboardCommand::ApplyImage(message.image)); }
         },
         move |message| emit(&chat_app, "chat_message", ChatMessage { text: message.text }),
         move |message| handle_browse(&browse_app, &data_sender, &data_sealer, &files_allowed, message),
