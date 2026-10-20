@@ -19,7 +19,7 @@ log = "0.4"
 # JNI entry points, and the Android logger so Rust logs reach logcat. Only
 # built for Android; the rest of the crate builds and tests on the desktop.
 [target.'cfg(target_os = "android")'.dependencies]
-jni = "0.21"
+jni = "0.22"
 android_logger = "0.15"
 
 [dev-dependencies]
